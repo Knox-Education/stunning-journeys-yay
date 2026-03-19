@@ -56,6 +56,8 @@ body {
 }
 .menu-btn.secondary:hover { background: #1a2744; }
 
+.mode-desc { font-size: 0.75rem; color: #999; margin-top: -8px; text-align: center; }
+
 /* ── Inputs ───────────────────────────────────────────────── */
 input[type="text"] {
   width: 280px;

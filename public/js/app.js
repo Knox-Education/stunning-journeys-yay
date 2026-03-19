@@ -39,9 +39,17 @@ function showScreen(id) {
 
 // ── Screen: Start ────────────────────────────────────────────
 $('#btn-singleplayer').addEventListener('click', () => {
-  flowTarget = 'single';
+  showScreen('screen-sp-mode');
+});
+$('#btn-sp-fight').addEventListener('click', () => {
+  flowTarget = 'fight';
   showScreen('screen-name');
 });
+$('#btn-sp-training').addEventListener('click', () => {
+  flowTarget = 'training';
+  showScreen('screen-name');
+});
+$('#btn-sp-back').addEventListener('click', () => showScreen('screen-start'));
 $('#btn-host').addEventListener('click', () => {
   flowTarget = 'host';
   showScreen('screen-name');
@@ -100,11 +108,6 @@ function buildMapGrid() {
 }
 
 $('#btn-host-create').addEventListener('click', () => {
-  if (flowTarget === 'single') {
-    // Singleplayer – go straight to game (placeholder for now)
-    enterGame(selectedMap, [{ name: playerName, isHost: true }]);
-    return;
-  }
   socket.emit('host-game', { playerName, mapIndex: selectedMap });
 });
 $('#btn-host-map-back').addEventListener('click', () => showScreen('screen-name'));
@@ -328,7 +331,7 @@ socket.on('projectile-spawned', ({ ownerId, projectiles: projs }) => {
 });
 
 // ── Enter the game screen ────────────────────────────────────
-function enterGame(mapIndex, players) {
+function enterGame(mapIndex, players, mode) {
   // Inject fighterId for local player
   players = players.map((p) => ({
     ...p,
@@ -336,7 +339,7 @@ function enterGame(mapIndex, players) {
   }));
   showScreen('screen-game');
   const myId = socket.id || 'local';
-  startGame(mapIndex, players, myId);
+  startGame(mapIndex, players, myId, mode);
 }
 
 // ── Fighter screen ───────────────────────────────────────────
@@ -388,10 +391,14 @@ $('#btn-select-fighter').addEventListener('click', () => {
   }
   if (flowTarget === 'host') {
     socket.emit('host-game', { playerName, mapIndex: selectedMap });
-  } else if (flowTarget === 'single') {
+  } else if (flowTarget === 'training') {
     const randomMap = Math.floor(Math.random() * MAPS.length);
     const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
-    enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }]);
+    enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }], 'training');
+  } else if (flowTarget === 'fight') {
+    const randomMap = Math.floor(Math.random() * MAPS.length);
+    const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
+    enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }], 'fight');
   } else if (flowTarget === 'join') {
     showScreen('screen-join');
   }

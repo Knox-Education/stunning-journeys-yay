@@ -43,14 +43,22 @@ let combatLog = [];    // [{text, timer, color}]
 let spectateIndex = -1;   // index into gamePlayers, -1 = free camera
 let freeCamX = 0, freeCamY = 0;
 
+// Game mode: 'training' | 'fight' | undefined (multiplayer)
+let gameMode = undefined;
+
+// CPU names
+const CPU_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Ghost', 'Havoc'];
+const CPU_COLORS = ['#e67e22', '#1abc9c', '#9b59b6', '#e74c3c', '#3498db', '#f1c40f'];
+
 // ═══════════════════════════════════════════════════════════════
 // START GAME
 // ═══════════════════════════════════════════════════════════════
-function startGame(mapIndex, players, myId) {
+function startGame(mapIndex, players, myId, mode) {
   gameCanvas = document.querySelector('#game-canvas');
   gameCtx = gameCanvas.getContext('2d');
   gameMap = MAPS[mapIndex];
   localPlayerId = myId;
+  gameMode = mode;
 
   // Find walkable spawn positions
   const walkable = [];
@@ -115,9 +123,12 @@ function startGame(mapIndex, players, myId) {
     localPlayerId = localPlayer.id;
   }
 
-  // In singleplayer, add a training dummy so the player can deal damage and unlock special
-  if (gamePlayers.length === 1) {
-    const dummySpawn = validSpawns[1] || validSpawns[0];
+  // Singleplayer mode setup
+  if (gameMode === 'training') {
+    // Training: indestructible dummy in center of map
+    const centerR = Math.floor(gameMap.rows / 2);
+    const centerC = Math.floor(gameMap.cols / 2);
+    const dummySpawn = { r: centerR, c: centerC };
     const dummyFighter = getFighter('fighter');
     const dummy = createPlayerState(
       { id: 'dummy', name: 'Training Dummy', color: '#555' },
@@ -127,6 +138,34 @@ function startGame(mapIndex, players, myId) {
     dummy.hp = 99999;
     dummy.maxHp = 99999;
     gamePlayers.push(dummy);
+  } else if (gameMode === 'fight') {
+    // Fight: 4 CPU opponents — 1 easy, 2 medium, 1 hard
+    const allFighters = getAllFighterIds();
+    const difficulties = ['easy', 'medium', 'medium', 'hard'];
+    const shuffledNames = CPU_NAMES.slice().sort(() => Math.random() - 0.5);
+    const shuffledColors = CPU_COLORS.slice().sort(() => Math.random() - 0.5);
+    for (let i = 0; i < 4; i++) {
+      const cpuFighterId = allFighters[Math.floor(Math.random() * allFighters.length)];
+      const cpuFighter = getFighter(cpuFighterId);
+      const cpuSpawn = validSpawns[(i + 1) % validSpawns.length];
+      const cpu = createPlayerState(
+        { id: 'cpu-' + i, name: shuffledNames[i], color: shuffledColors[i % shuffledColors.length], fighterId: cpuFighterId },
+        cpuSpawn,
+        cpuFighter
+      );
+      cpu.isCPU = true;
+      cpu.difficulty = difficulties[i];
+      cpu.aiState = {
+        moveTarget: null,
+        attackTarget: null,
+        thinkTimer: 0,
+        abilityTimer: 0,
+        lastSeenPositions: {}, // id -> {x, y, time}
+        strafeDir: Math.random() < 0.5 ? 1 : -1,
+        retreating: false,
+      };
+      gamePlayers.push(cpu);
+    }
   }
 
   // Resize canvas
@@ -427,6 +466,11 @@ function updateGame(dt) {
   if (mouseDown && localPlayer.cdM1 <= 0) {
     useAbility('M1');
   }
+
+  // CPU AI update
+  if (gameMode === 'fight') {
+    updateCPUs(dt);
+  }
 }
 
 function tickCooldowns(p, dt) {
@@ -514,15 +558,17 @@ function updateProjectiles(dt) {
       projectiles.splice(i, 1); continue;
     }
 
-    // Hit detection against players (only owner's client resolves damage)
-    if (p.ownerId === localPlayerId) {
+    // Hit detection against players (owner's client resolves, or CPU projectiles resolve locally)
+    const isCpuProj = p.ownerId && p.ownerId.startsWith('cpu-');
+    if (p.ownerId === localPlayerId || isCpuProj) {
+      const owner = isCpuProj ? gamePlayers.find(pl => pl.id === p.ownerId) : localPlayer;
       for (const target of gamePlayers) {
         if (target.id === p.ownerId || !target.alive) continue;
         const dx = target.x - p.x;
         const dy = target.y - p.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist < radius + 4) {
-          dealDamage(localPlayer, target, p.damage);
+          dealDamage(owner, target, p.damage);
           // Log gamble card hits
           if (p.type === 'card') {
             combatLog.push({ text: '🎲 Gamble hit ' + target.name + ' for ' + p.damage + '!', timer: 4, color: '#f5a623' });
@@ -533,6 +579,516 @@ function updateProjectiles(dt) {
       }
     }
   }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CPU AI
+// ═══════════════════════════════════════════════════════════════
+
+// Difficulty tuning
+const AI_PARAMS = {
+  easy:   { thinkDelay: 1.2, aimError: 0.35, abilityDelay: 3.0, aggroRange: 7, retreatHp: 0.15, reactionTime: 0.8 },
+  medium: { thinkDelay: 0.6, aimError: 0.18, abilityDelay: 1.5, aggroRange: 10, retreatHp: 0.25, reactionTime: 0.4 },
+  hard:   { thinkDelay: 0.25, aimError: 0.06, abilityDelay: 0.7, aggroRange: 14, retreatHp: 0.35, reactionTime: 0.15 },
+};
+
+function updateCPUs(dt) {
+  for (const cpu of gamePlayers) {
+    if (!cpu.isCPU || !cpu.alive || cpu.stunned > 0) continue;
+    const ai = cpu.aiState;
+    const params = AI_PARAMS[cpu.difficulty] || AI_PARAMS.medium;
+
+    // Tick cooldowns for CPU
+    tickCooldowns(cpu, dt);
+
+    // Tick CPU-specific buff/debuff timers
+    if (cpu.blindBuff === 'dealer') {
+      cpu.blindTimer += dt;
+      if (cpu.blindTimer >= 3) { cpu.blindBuff = null; cpu.blindTimer = 0; }
+    } else if (cpu.blindTimer > 0) {
+      cpu.blindTimer = Math.max(0, cpu.blindTimer - dt);
+      if (cpu.blindTimer <= 0 && cpu.blindBuff === 'big') cpu.blindBuff = null;
+    }
+    if (cpu.chipChangeTimer > 0) {
+      cpu.chipChangeTimer = Math.max(0, cpu.chipChangeTimer - dt);
+      if (cpu.chipChangeTimer <= 0) cpu.chipChangeDmg = -1;
+    }
+
+    // Think timer — re-evaluate target periodically
+    ai.thinkTimer -= dt;
+    if (ai.thinkTimer <= 0) {
+      ai.thinkTimer = params.thinkDelay * (0.8 + Math.random() * 0.4);
+      cpuChooseTarget(cpu, params);
+    }
+
+    // Update vision — track "last seen" positions of visible enemies
+    cpuUpdateVision(cpu, params);
+
+    // Movement
+    cpuMove(cpu, dt, params);
+
+    // Combat
+    ai.abilityTimer -= dt;
+    if (ai.abilityTimer <= 0 && ai.attackTarget) {
+      cpuAttack(cpu, params);
+      ai.abilityTimer = params.abilityDelay * (0.7 + Math.random() * 0.6);
+    }
+  }
+}
+
+function cpuChooseTarget(cpu, params) {
+  const ai = cpu.aiState;
+  const aggroRange = params.aggroRange * GAME_TILE;
+
+  // Find closest alive enemy within aggro range
+  let bestTarget = null;
+  let bestDist = Infinity;
+  for (const p of gamePlayers) {
+    if (p.id === cpu.id || !p.alive) continue;
+    // Check if CPU can see the player (not hidden in grass)
+    if (cpuIsHidden(p, cpu)) continue;
+    const dx = p.x - cpu.x; const dy = p.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestTarget = p;
+    }
+  }
+
+  // If no visible target, check last-seen positions
+  if (!bestTarget) {
+    let newestTime = 0;
+    for (const id in ai.lastSeenPositions) {
+      const seen = ai.lastSeenPositions[id];
+      const target = gamePlayers.find(p => p.id === id);
+      if (!target || !target.alive) { delete ai.lastSeenPositions[id]; continue; }
+      if (seen.time > newestTime) {
+        newestTime = seen.time;
+        ai.moveTarget = { x: seen.x, y: seen.y };
+      }
+    }
+    ai.attackTarget = null;
+    return;
+  }
+
+  ai.attackTarget = bestTarget;
+  ai.moveTarget = null; // will chase attackTarget directly
+}
+
+function cpuIsHidden(target, observer) {
+  // Check if target is hidden in grass from observer's perspective
+  const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
+  const samplePoints = [
+    { x: target.x, y: target.y },
+    { x: target.x - radius, y: target.y }, { x: target.x + radius, y: target.y },
+    { x: target.x, y: target.y - radius }, { x: target.x, y: target.y + radius },
+  ];
+  let grassCount = 0;
+  for (const pt of samplePoints) {
+    const col = Math.floor(pt.x / GAME_TILE);
+    const row = Math.floor(pt.y / GAME_TILE);
+    if (row >= 0 && row < gameMap.rows && col >= 0 && col < gameMap.cols
+        && gameMap.tiles[row][col] === TILE.GRASS) grassCount++;
+  }
+  const grassFraction = grassCount / samplePoints.length;
+  if (grassFraction <= 0.5) return false; // not hidden
+
+  // Hidden, BUT check if observer saw them enter (last seen recently)
+  const ai = observer.aiState;
+  const seen = ai.lastSeenPositions[target.id];
+  if (seen) {
+    const dx = target.x - seen.x; const dy = target.y - seen.y;
+    // If target is still near where we last saw them and it was recent
+    if (Math.sqrt(dx * dx + dy * dy) < GAME_TILE * 2 && (Date.now() - seen.time) < 3000) {
+      return false; // still "tracked"
+    }
+  }
+  return true;
+}
+
+function cpuUpdateVision(cpu, params) {
+  const ai = cpu.aiState;
+  for (const p of gamePlayers) {
+    if (p.id === cpu.id || !p.alive) continue;
+    if (!cpuIsHidden(p, cpu)) {
+      ai.lastSeenPositions[p.id] = { x: p.x, y: p.y, time: Date.now() };
+    }
+  }
+}
+
+function cpuMove(cpu, dt, params) {
+  const ai = cpu.aiState;
+  const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
+  let speed = cpu.fighter.speed;
+
+  // Retreat if low HP
+  ai.retreating = cpu.hp / cpu.maxHp < params.retreatHp;
+
+  let goalX, goalY;
+
+  if (ai.attackTarget && ai.attackTarget.alive) {
+    const target = ai.attackTarget;
+    const dx = target.x - cpu.x; const dy = target.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (ai.retreating) {
+      // Run away from target
+      goalX = cpu.x - dx / (dist || 1) * GAME_TILE * 3;
+      goalY = cpu.y - dy / (dist || 1) * GAME_TILE * 3;
+    } else {
+      // Approach to ideal range based on fighter type
+      const idealRange = cpu.fighter.id === 'poker' ? 5 * GAME_TILE : 1.2 * GAME_TILE;
+      if (dist > idealRange + GAME_TILE) {
+        // Move toward target
+        goalX = target.x;
+        goalY = target.y;
+      } else if (dist < idealRange - GAME_TILE * 0.5) {
+        // Too close, back off slightly
+        goalX = cpu.x - dx / (dist || 1) * GAME_TILE;
+        goalY = cpu.y - dy / (dist || 1) * GAME_TILE;
+      } else {
+        // At ideal range — strafe
+        const perpX = -dy / (dist || 1);
+        const perpY = dx / (dist || 1);
+        goalX = cpu.x + perpX * ai.strafeDir * GAME_TILE * 2;
+        goalY = cpu.y + perpY * ai.strafeDir * GAME_TILE * 2;
+        // Randomly switch strafe direction
+        if (Math.random() < 0.01) ai.strafeDir *= -1;
+      }
+    }
+  } else if (ai.moveTarget) {
+    goalX = ai.moveTarget.x;
+    goalY = ai.moveTarget.y;
+    // Clear move target if reached
+    const dx = goalX - cpu.x; const dy = goalY - cpu.y;
+    if (Math.sqrt(dx * dx + dy * dy) < GAME_TILE) {
+      ai.moveTarget = null;
+    }
+  } else {
+    // Wander toward zone center
+    const centerX = (gameMap.cols / 2) * GAME_TILE;
+    const centerY = (gameMap.rows / 2) * GAME_TILE;
+    goalX = centerX + (Math.random() - 0.5) * GAME_TILE * 4;
+    goalY = centerY + (Math.random() - 0.5) * GAME_TILE * 4;
+  }
+
+  if (goalX === undefined) return;
+
+  let moveX = goalX - cpu.x;
+  let moveY = goalY - cpu.y;
+  const moveDist = Math.sqrt(moveX * moveX + moveY * moveY);
+  if (moveDist < 2) return;
+  moveX /= moveDist;
+  moveY /= moveDist;
+
+  // Stay in zone — strongly prefer moving toward zone center if out of bounds
+  if (zoneInset > 0) {
+    const pCol = Math.floor(cpu.x / GAME_TILE);
+    const pRow = Math.floor(cpu.y / GAME_TILE);
+    if (pCol < zoneInset + 1 || pCol >= gameMap.cols - zoneInset - 1 ||
+        pRow < zoneInset + 1 || pRow >= gameMap.rows - zoneInset - 1) {
+      const centerX = (gameMap.cols / 2) * GAME_TILE;
+      const centerY = (gameMap.rows / 2) * GAME_TILE;
+      const toCenter = Math.sqrt((centerX - cpu.x) ** 2 + (centerY - cpu.y) ** 2) || 1;
+      moveX = (centerX - cpu.x) / toCenter;
+      moveY = (centerY - cpu.y) / toCenter;
+    }
+  }
+
+  // Use cover: prefer moving through grass if nearby
+  const grassBias = 0.3;
+  for (let angle = -1; angle <= 1; angle += 2) {
+    const testX = cpu.x + (moveX * Math.cos(angle * 0.5) - moveY * Math.sin(angle * 0.5)) * GAME_TILE;
+    const testY = cpu.y + (moveX * Math.sin(angle * 0.5) + moveY * Math.cos(angle * 0.5)) * GAME_TILE;
+    const testCol = Math.floor(testX / GAME_TILE);
+    const testRow = Math.floor(testY / GAME_TILE);
+    if (testRow >= 0 && testRow < gameMap.rows && testCol >= 0 && testCol < gameMap.cols) {
+      if (gameMap.tiles[testRow][testCol] === TILE.GRASS && !ai.attackTarget) {
+        const toGrassX = testX - cpu.x;
+        const toGrassY = testY - cpu.y;
+        const toGrassDist = Math.sqrt(toGrassX * toGrassX + toGrassY * toGrassY) || 1;
+        moveX = moveX * (1 - grassBias) + (toGrassX / toGrassDist) * grassBias;
+        moveY = moveY * (1 - grassBias) + (toGrassY / toGrassDist) * grassBias;
+        break;
+      }
+    }
+  }
+
+  const newX = cpu.x + moveX * speed;
+  const newY = cpu.y + moveY * speed;
+  if (canMoveTo(newX, cpu.y, radius)) cpu.x = newX;
+  if (canMoveTo(cpu.x, newY, radius)) cpu.y = newY;
+}
+
+function cpuAttack(cpu, params) {
+  const ai = cpu.aiState;
+  const target = ai.attackTarget;
+  if (!target || !target.alive) return;
+
+  const dx = target.x - cpu.x; const dy = target.y - cpu.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const fighter = cpu.fighter;
+  const isPoker = fighter.id === 'poker';
+
+  // Add aim error based on difficulty
+  const errorAngle = (Math.random() - 0.5) * params.aimError * 2;
+  const baseAngle = Math.atan2(dy, dx);
+  const aimAngle = baseAngle + errorAngle;
+  const aimNx = Math.cos(aimAngle);
+  const aimNy = Math.sin(aimAngle);
+
+  // Try to use abilities in priority order: Special > R > E > T > M1
+  const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
+
+  // Special
+  if (cpu.specialUnlocked && !cpu.specialUsed) {
+    if (isPoker) {
+      // Royal Flush: use when enemies nearby
+      const closeRange = 3 * GAME_TILE;
+      const mediumRange = 10 * GAME_TILE;
+      if (dist < mediumRange) {
+        cpuUseSpecialPoker(cpu, params);
+        return;
+      }
+    } else {
+      // Fighter: Special jump — aim at target
+      if (dist < 10 * GAME_TILE) {
+        cpuUseSpecialFighter(cpu, target);
+        return;
+      }
+    }
+  }
+
+  // E ability
+  if (cpu.cdE <= 0) {
+    if (isPoker) {
+      // Gamble: throw card at target
+      if (dist < 12 * GAME_TILE) {
+        cpuFireProjectile(cpu, target, 'card', aimAngle);
+        return;
+      }
+    } else {
+      // Support: use proactively
+      cpu.cdE = fighter.abilities[1].cooldown;
+      cpu.supportBuff = fighter.abilities[1].duration;
+      cpu.effects.push({ type: 'support', timer: 1.5 });
+      return;
+    }
+  }
+
+  // R ability
+  if (cpu.cdR <= 0) {
+    if (isPoker) {
+      // Blinds
+      cpu.cdR = fighter.abilities[2].cooldown;
+      const roll = Math.random();
+      if (roll < 0.70) { cpu.blindBuff = 'small'; cpu.blindTimer = 0; }
+      else if (roll < 0.90) { cpu.blindBuff = 'big'; cpu.blindTimer = 60; }
+      else { cpu.blindBuff = 'dealer'; cpu.blindTimer = 0; cpu.cdE = 0; }
+      cpu.effects.push({ type: 'blind-small', timer: 1.0 });
+      return;
+    } else {
+      // Power Swing: use when very close
+      if (dist < fighter.abilities[2].range * GAME_TILE) {
+        cpuPowerSwing(cpu, target, aimNx, aimNy);
+        return;
+      }
+    }
+  }
+
+  // T ability
+  if (cpu.cdT <= 0 && Math.random() < 0.3) {
+    if (isPoker) {
+      // Chip Change
+      cpu.cdT = fighter.abilities[3].cooldown;
+      const options = [50, 100, 200, 300, 400];
+      cpu.chipChangeDmg = options[Math.floor(Math.random() * options.length)];
+      cpu.chipChangeTimer = fighter.abilities[3].duration || 30;
+      return;
+    } else {
+      // Intimidation
+      const sightRange = CAMERA_RANGE * GAME_TILE * 2;
+      if (dist <= sightRange) {
+        cpu.cdT = fighter.abilities[3].cooldown;
+        for (const t of gamePlayers) {
+          if (t.id === cpu.id || !t.alive) continue;
+          const d = Math.sqrt((t.x - cpu.x) ** 2 + (t.y - cpu.y) ** 2);
+          if (d <= sightRange) {
+            t.intimidated = fighter.abilities[3].duration;
+            t.intimidatedBy = cpu.id;
+          }
+        }
+        cpu.effects.push({ type: 'intimidation', timer: 1.0 });
+        return;
+      }
+    }
+  }
+
+  // M1 — primary attack
+  if (cpu.cdM1 <= 0) {
+    if (isPoker) {
+      // Chip throw
+      if (dist < 8 * GAME_TILE) {
+        cpuFireChips(cpu, target, aimAngle);
+      }
+    } else {
+      // Sword swing
+      if (dist < fighter.abilities[0].range * GAME_TILE) {
+        cpuSwordSwing(cpu, target, aimNx, aimNy);
+      }
+    }
+  }
+}
+
+function cpuFireProjectile(cpu, target, type, aimAngle) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[1]; // E = Gamble
+  cpu.cdE = abil.cooldown;
+  // Weighted damage
+  const roll = Math.random();
+  let dmg;
+  if (roll < 0.60) dmg = 100 + Math.floor(Math.random() * 4) * 100;
+  else if (roll < 0.85) dmg = 500 + Math.floor(Math.random() * 3) * 100;
+  else if (roll < 0.95) dmg = 800 + Math.floor(Math.random() * 2) * 100;
+  else dmg = 1000;
+  if (cpu.supportBuff > 0) dmg *= 1.5;
+  if (cpu.intimidated > 0) dmg *= 0.5;
+  const spd = (abil.projectileSpeed || 18) * GAME_TILE / 10;
+  projectiles.push({
+    x: cpu.x, y: cpu.y,
+    vx: Math.cos(aimAngle) * spd, vy: Math.sin(aimAngle) * spd,
+    ownerId: cpu.id, damage: Math.round(dmg), timer: 999, type: 'card',
+  });
+  if (cpu.blindBuff === 'small') cpu.blindBuff = null;
+  cpu.effects.push({ type: 'gamble', timer: 0.5 });
+}
+
+function cpuFireChips(cpu, target, aimAngle) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[0]; // M1
+  cpu.cdM1 = abil.cooldown;
+  const count = abil.projectileCount || 3;
+  const spread = abil.projectileSpread || 0.15;
+  let dmg = abil.damage;
+  if (cpu.chipChangeDmg >= 0) dmg = cpu.chipChangeDmg;
+  if (cpu.supportBuff > 0) dmg *= 1.5;
+  if (cpu.intimidated > 0) dmg *= 0.5;
+  for (let i = 0; i < count; i++) {
+    const angle = aimAngle + (i - (count - 1) / 2) * spread;
+    const spd = (abil.projectileSpeed || 8) * GAME_TILE / 10;
+    projectiles.push({
+      x: cpu.x, y: cpu.y,
+      vx: Math.cos(angle) * spd, vy: Math.sin(angle) * spd,
+      ownerId: cpu.id, damage: dmg, timer: 0.8, type: 'chip',
+    });
+  }
+  if (cpu.blindBuff === 'small') cpu.blindBuff = null;
+  cpu.effects.push({ type: 'chip-throw', timer: 0.2 });
+}
+
+function cpuSwordSwing(cpu, target, aimNx, aimNy) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[0];
+  cpu.cdM1 = abil.cooldown;
+  const range = abil.range * GAME_TILE;
+  let baseDmg = abil.damage;
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  if (cpu.intimidated > 0) baseDmg *= 0.5;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > range) continue;
+    const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+    if (dot < 0) continue;
+    dealDamage(cpu, t, baseDmg);
+  }
+  cpu.effects.push({ type: 'sword', timer: 0.2, aimNx, aimNy });
+}
+
+function cpuPowerSwing(cpu, target, aimNx, aimNy) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[2];
+  cpu.cdR = abil.cooldown;
+  const range = abil.range * GAME_TILE;
+  let baseDmg = abil.damage;
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  if (cpu.intimidated > 0) baseDmg *= 0.5;
+  const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > range) continue;
+    dealDamage(cpu, t, baseDmg);
+    const kbDist = (abil.knockback || 3) * GAME_TILE;
+    const kbNx = dx / (dist || 1); const kbNy = dy / (dist || 1);
+    for (let s = 10; s >= 1; s--) {
+      const tryX = t.x + kbNx * kbDist * (s / 10);
+      const tryY = t.y + kbNy * kbDist * (s / 10);
+      if (canMoveTo(tryX, tryY, r)) { t.x = tryX; t.y = tryY; break; }
+      if (s === 1) { /* stay */ }
+    }
+  }
+  cpu.effects.push({ type: 'power-arc', timer: 0.3 });
+}
+
+function cpuUseSpecialPoker(cpu, params) {
+  const fighter = cpu.fighter;
+  cpu.specialUsed = true;
+  cpu.hp = cpu.maxHp;
+  const stunDur = fighter.abilities[4].stunDuration || 3;
+  const execThresh = fighter.abilities[4].executeThreshold || 500;
+  const closeRange = 3 * GAME_TILE;
+  const mediumRange = (fighter.abilities[4].range || 10) * GAME_TILE;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > mediumRange) continue;
+    if (dist <= closeRange) {
+      if (t.hp <= execThresh) { dealDamage(cpu, t, t.hp); }
+      else { t.stunned = stunDur; t.effects.push({ type: 'stun', timer: stunDur }); }
+    }
+    t.cdM1 = t.fighter.abilities[0].cooldown;
+    t.cdE = t.fighter.abilities[1].cooldown;
+    t.cdR = t.fighter.abilities[2].cooldown;
+    t.cdT = t.fighter.abilities[3].cooldown;
+    t.specialUnlocked = false; t.totalDamageTaken = 0;
+    t.supportBuff = 0; t.chipChangeDmg = -1; t.chipChangeTimer = 0;
+    t.blindBuff = null; t.blindTimer = 0;
+  }
+  cpu.effects.push({ type: 'royal-flush', timer: 2.0 });
+}
+
+function cpuUseSpecialFighter(cpu, target) {
+  // CPU does a simpler instant jump toward target (no aiming phase)
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[4];
+  cpu.specialUsed = true;
+  const landX = target.x;
+  const landY = target.y;
+  const hitRange = GAME_TILE * 1.2;
+  let hitSomeone = false;
+  let baseDmg = abil.damage;
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    const dx = t.x - landX; const dy = t.y - landY;
+    if (Math.sqrt(dx * dx + dy * dy) < hitRange) {
+      dealDamage(cpu, t, baseDmg);
+      hitSomeone = true;
+    }
+  }
+  const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+  if (canMoveTo(landX, landY, r)) { cpu.x = landX; cpu.y = landY; }
+  if (!hitSomeone) {
+    cpu.stunned = abil.missStun;
+    cpu.hp = Math.max(0, cpu.hp - abil.missDamage);
+    if (cpu.hp <= 0) { cpu.alive = false; cpu.hp = 0; cpu.effects.push({ type: 'death', timer: 2 }); }
+    cpu.effects.push({ type: 'stun', timer: abil.missStun });
+  }
+  cpu.effects.push({ type: 'land', timer: 0.5 });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1570,10 +2126,33 @@ function showPopup(text) {
 }
 
 function checkWinCondition() {
-  // In singleplayer only — multiplayer uses server-side win detection
+  if (gameMode === 'fight') {
+    const alive = gamePlayers.filter(p => p.alive);
+    if (alive.length <= 1) {
+      gameRunning = false;
+      const cw = gameCanvas.width;
+      const ch = gameCanvas.height;
+      gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      gameCtx.fillRect(0, 0, cw, ch);
+      gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+      gameCtx.textAlign = 'center';
+      if (alive.length === 1 && alive[0].id === localPlayerId) {
+        gameCtx.fillStyle = '#2ecc71';
+        gameCtx.fillText('VICTORY!', cw / 2, ch / 2);
+      } else {
+        gameCtx.fillStyle = '#e94560';
+        const winnerName = alive.length === 1 ? alive[0].name : 'Nobody';
+        gameCtx.fillText(winnerName + ' WINS', cw / 2, ch / 2);
+      }
+      gameCtx.font = 'bold 14px "Press Start 2P", monospace';
+      gameCtx.fillStyle = '#ccc';
+      gameCtx.fillText('Refresh to play again', cw / 2, ch / 2 + 50);
+    }
+    return;
+  }
+  // Multiplayer: server handles this
   const realPlayers = gamePlayers.filter((p) => p.id !== 'dummy');
-  if (realPlayers.length > 1) return; // multiplayer: server handles this
-  // Singleplayer: no win/loss to check
+  if (realPlayers.length > 1) return;
 }
 
 // ═══════════════════════════════════════════════════════════════
