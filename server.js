@@ -218,12 +218,14 @@ io.on('connection', (socket) => {
   });
 
   // Relay buff/debuff events
-  socket.on('player-buff', ({ type, duration }) => {
+  socket.on('player-buff', ({ type, duration, cx, cy }) => {
     if (socket.lobbyCode) {
       io.to(socket.lobbyCode).emit('player-buffed', {
         casterId: socket.id,
         type,
         duration,
+        cx,
+        cy,
       });
     }
   });

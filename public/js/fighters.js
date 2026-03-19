@@ -130,7 +130,7 @@ const FIGHTERS = {
       {
         key: 'SPACE',
         name: 'Royal Flush',
-        description: 'Heals to full HP, resets all enemy cooldowns + charges, stuns enemies for 3s. Auto-kills enemies below 500 HP. Range: 10 tiles.',
+        description: 'Heals self to full HP. Close range (3 tiles): stuns 3s + executes <500 HP. Medium range (10 tiles): resets enemy cooldowns + charges.',
         damage: 0,
         cooldown: 0,
         stunDuration: 3,

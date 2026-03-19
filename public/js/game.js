@@ -39,6 +39,10 @@ let lastWallClock = 0;  // wall-clock ms for background-tab-safe dt
 let projectiles = [];  // [{x, y, vx, vy, ownerId, damage, speed, timer, type}]
 let combatLog = [];    // [{text, timer, color}]
 
+// Spectator / dead-camera state
+let spectateIndex = -1;   // index into gamePlayers, -1 = free camera
+let freeCamX = 0, freeCamY = 0;
+
 // ═══════════════════════════════════════════════════════════════
 // START GAME
 // ═══════════════════════════════════════════════════════════════
@@ -95,6 +99,9 @@ function startGame(mapIndex, players, myId) {
   // Reset projectiles
   projectiles = [];
   combatLog = [];
+  spectateIndex = -1;
+  freeCamX = 0;
+  freeCamY = 0;
 
   gamePlayers = players.map((p, i) => {
     const spawn = validSpawns[i % validSpawns.length];
@@ -202,7 +209,29 @@ function onKeyDown(e) {
     e.preventDefault();
   }
 
-  if (!localPlayer || !localPlayer.alive) return;
+  if (!localPlayer) return;
+
+  // Spectator: Tab to cycle through alive players when dead
+  if (!localPlayer.alive) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const alivePlayers = gamePlayers.filter(p => p.alive && p.id !== localPlayerId);
+      if (alivePlayers.length > 0) {
+        // Find current spectate target in alive list
+        let curIdx = -1;
+        if (spectateIndex >= 0 && spectateIndex < gamePlayers.length) {
+          curIdx = alivePlayers.indexOf(gamePlayers[spectateIndex]);
+        }
+        curIdx = (curIdx + 1) % alivePlayers.length;
+        spectateIndex = gamePlayers.indexOf(alivePlayers[curIdx]);
+      }
+    }
+    // Escape returns to free camera
+    if (e.key === 'Escape') {
+      spectateIndex = -1;
+    }
+    return;
+  }
 
   // Ability presses (single-fire, not held)
   if (e.key === 'e' || e.key === 'E') useAbility('E');
@@ -242,12 +271,47 @@ function gameLoop(now) {
 // UPDATE
 // ═══════════════════════════════════════════════════════════════
 function updateGame(dt) {
-  if (!localPlayer || !localPlayer.alive) return;
+  if (!localPlayer) return;
 
   // Use wall-clock delta for timers so they keep running in background tabs
   const wallNow = Date.now();
   const wallDt = Math.min((wallNow - lastWallClock) / 1000, 2); // cap at 2s to avoid huge jumps
   lastWallClock = wallNow;
+
+  // Dead: free camera movement, still tick world state
+  if (!localPlayer.alive) {
+    // Free camera movement with WASD
+    if (spectateIndex < 0 || !gamePlayers[spectateIndex] || !gamePlayers[spectateIndex].alive) {
+      let dx = 0, dy = 0;
+      if (keys['ArrowUp']    || keys['w'] || keys['W']) dy -= 1;
+      if (keys['ArrowDown']  || keys['s'] || keys['S']) dy += 1;
+      if (keys['ArrowLeft']  || keys['a'] || keys['A']) dx -= 1;
+      if (keys['ArrowRight'] || keys['d'] || keys['D']) dx += 1;
+      const camSpeed = 6 * GAME_TILE * dt;
+      freeCamX += dx * camSpeed;
+      freeCamY += dy * camSpeed;
+      // If spectate target died, reset to free cam
+      if (spectateIndex >= 0) spectateIndex = -1;
+    }
+    // Still tick world timers for other players
+    for (const p of gamePlayers) {
+      p.effects = p.effects.filter((fx) => { fx.timer -= wallDt; return fx.timer > 0; });
+      if (p.alive && p.hp < p.maxHp) {
+        p.noDamageTimer += wallDt;
+        if (!p.isHealing && p.noDamageTimer >= p.fighter.healDelay) { p.isHealing = true; p.healTickTimer = 0; }
+        if (p.isHealing) { p.healTickTimer -= wallDt; if (p.healTickTimer <= 0) { p.hp = Math.min(p.maxHp, p.hp + p.fighter.healAmount); p.healTickTimer = p.fighter.healTick; } }
+      }
+    }
+    // Tick combat log
+    for (let i = combatLog.length - 1; i >= 0; i--) {
+      combatLog[i].timer -= dt;
+      if (combatLog[i].timer <= 0) combatLog.splice(i, 1);
+    }
+    // Zone timer display
+    const zoneElapsed = (Date.now() - zonePhaseStart) / 1000;
+    zoneTimer = Math.max(0, ZONE_INTERVAL - zoneElapsed);
+    return;
+  }
 
   // Tick cooldowns
   tickCooldowns(localPlayer, wallDt);
@@ -287,7 +351,12 @@ function updateGame(dt) {
         p.noDamageTimer = 0;
         p.isHealing = false;
         p.healTickTimer = 0;
-        if (p.hp <= 0) { p.hp = 0; p.alive = false; }
+        if (p.hp <= 0) {
+          p.hp = 0;
+          p.alive = false;
+          p.effects.push({ type: 'death', timer: 2 });
+          if (p.id === localPlayerId) { freeCamX = p.x; freeCamY = p.y; spectateIndex = -1; }
+        }
       }
     }
 
@@ -684,26 +753,31 @@ function useAbility(key) {
     if (!lp.specialUnlocked || lp.specialUsed) return;
 
     if (isPoker) {
-      // Royal Flush: heal to full, stun enemies in range, reset CDs, execute <500hp
+      // Royal Flush — distance-tiered:
+      //   Self: heal to full HP automatically
+      //   Close (≤3 tiles): stun + execute <500hp + reset CDs/charges
+      //   Medium (3–10 tiles): reset CDs/charges only
       lp.specialUsed = true;
-      lp.hp = lp.maxHp;
+      lp.hp = lp.maxHp;  // Self-heal
       const stunDur = fighter.abilities[4].stunDuration || 3;
       const execThresh = fighter.abilities[4].executeThreshold || 500;
-      const rfRange = (fighter.abilities[4].range || 10) * GAME_TILE;
+      const closeRange = 3 * GAME_TILE;
+      const mediumRange = (fighter.abilities[4].range || 10) * GAME_TILE;
       for (const target of gamePlayers) {
         if (target.id === lp.id || !target.alive) continue;
         const dx = target.x - lp.x; const dy = target.y - lp.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist > rfRange) continue; // out of range
-        // Auto-kill if below threshold
-        if (target.hp <= execThresh) {
-          dealDamage(lp, target, target.hp);
-        } else {
-          // Stun
-          target.stunned = stunDur;
-          target.effects.push({ type: 'stun', timer: stunDur });
+        if (dist > mediumRange) continue; // out of range entirely
+        if (dist <= closeRange) {
+          // Close range: stun + execute + reset
+          if (target.hp <= execThresh) {
+            dealDamage(lp, target, target.hp);
+          } else {
+            target.stunned = stunDur;
+            target.effects.push({ type: 'stun', timer: stunDur });
+          }
         }
-        // Reset all their cooldowns (simulating debt)
+        // Both close and medium: reset cooldowns/charges
         target.cdM1 = target.fighter.abilities[0].cooldown;
         target.cdE = target.fighter.abilities[1].cooldown;
         target.cdR = target.fighter.abilities[2].cooldown;
@@ -719,9 +793,9 @@ function useAbility(key) {
       }
       showPopup('👑 ROYAL FLUSH!');
       lp.effects.push({ type: 'royal-flush', timer: 2.0 });
-      // Broadcast stun + reset to other clients
+      // Broadcast to other clients with position for distance calc
       if (typeof socket !== 'undefined' && socket.emit) {
-        socket.emit('player-buff', { type: 'royal-flush', duration: stunDur });
+        socket.emit('player-buff', { type: 'royal-flush', duration: stunDur, cx: lp.x, cy: lp.y });
       }
     } else {
       // Fighter: Special jump
@@ -767,7 +841,11 @@ function executeSpecialLanding() {
     // Miss: stun self + self damage
     lp.stunned = abil.missStun;
     lp.hp = Math.max(0, lp.hp - abil.missDamage);
-    if (lp.hp <= 0) { lp.alive = false; lp.hp = 0; }
+    if (lp.hp <= 0) {
+      lp.alive = false; lp.hp = 0;
+      lp.effects.push({ type: 'death', timer: 2 });
+      freeCamX = lp.x; freeCamY = lp.y; spectateIndex = -1;
+    }
     lp.effects.push({ type: 'stun', timer: abil.missStun });
   }
 
@@ -815,6 +893,12 @@ function dealDamage(attacker, target, amount) {
     target.hp = 0;
     target.alive = false;
     target.effects.push({ type: 'death', timer: 2 });
+    // Init spectator camera if local player died
+    if (target.id === localPlayerId) {
+      freeCamX = target.x;
+      freeCamY = target.y;
+      spectateIndex = -1;
+    }
     // Tell server this player died
     if (typeof socket !== 'undefined' && socket.emit) {
       socket.emit('player-died', { playerId: target.id });
@@ -842,6 +926,12 @@ function onRemoteDamage(targetId, amount) {
     target.hp = 0;
     target.alive = false;
     target.effects.push({ type: 'death', timer: 2 });
+    // Init spectator camera if local player died
+    if (target.id === localPlayerId) {
+      freeCamX = target.x;
+      freeCamY = target.y;
+      spectateIndex = -1;
+    }
   }
 }
 
@@ -899,8 +989,18 @@ function renderGame() {
 
   if (!localPlayer) return;
 
-  const camX = localPlayer.x - cw / 2;
-  const camY = localPlayer.y - ch / 2;
+  // Camera: follow alive player, or spectator target, or free cam
+  let camX, camY;
+  if (localPlayer.alive) {
+    camX = localPlayer.x - cw / 2;
+    camY = localPlayer.y - ch / 2;
+  } else if (spectateIndex >= 0 && gamePlayers[spectateIndex] && gamePlayers[spectateIndex].alive) {
+    camX = gamePlayers[spectateIndex].x - cw / 2;
+    camY = gamePlayers[spectateIndex].y - ch / 2;
+  } else {
+    camX = freeCamX - cw / 2;
+    camY = freeCamY - ch / 2;
+  }
 
   // Tiles
   const startCol = Math.floor(camX / GAME_TILE) - 1;
@@ -958,6 +1058,9 @@ function renderGame() {
 
     if (sx < -GAME_TILE * 2 || sx > cw + GAME_TILE * 2 || sy < -GAME_TILE * 2 || sy > ch + GAME_TILE * 2) continue;
 
+    // Dead player: dark red for 2s then hidden
+    const isDying = !p.alive && p.effects.some((fx) => fx.type === 'death');
+
     // Grass hiding logic
     const samplePoints = [
       { x: p.x, y: p.y },
@@ -982,21 +1085,21 @@ function renderGame() {
     if (isHidden && !isLocal) continue;
 
     const inAnyGrass = grassFraction > 0;
-    const dotAlpha = (isLocal && inAnyGrass) ? 0.4 : (p.alive ? 1.0 : 0.3);
+    const dotAlpha = isDying ? 0.7 : (isLocal && inAnyGrass) ? 0.4 : (p.alive ? 1.0 : 0.3);
 
     gameCtx.save();
     gameCtx.globalAlpha = dotAlpha;
 
     // Stunned visual
-    if (p.stunned > 0) {
+    if (p.stunned > 0 && !isDying) {
       gameCtx.fillStyle = 'rgba(255,255,0,0.2)';
       gameCtx.beginPath();
       gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
       gameCtx.fill();
     }
 
-    // Dot
-    gameCtx.fillStyle = p.color;
+    // Dot — dark red if dying
+    gameCtx.fillStyle = isDying ? '#8b0000' : p.color;
     gameCtx.beginPath();
     gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
     gameCtx.fill();
@@ -1105,7 +1208,7 @@ function renderGame() {
 
     // Name + HP above
     gameCtx.globalAlpha = 1;
-    gameCtx.fillStyle = '#fff';
+    gameCtx.fillStyle = isDying ? '#8b0000' : '#fff';
     gameCtx.font = 'bold 11px sans-serif';
     gameCtx.textAlign = 'center';
     gameCtx.fillText(p.name, sx, sy - radius - 14);
@@ -1269,6 +1372,29 @@ function renderGame() {
   gameCtx.fillStyle = zoneTimer <= 10 ? '#e94560' : '#fff';
   gameCtx.fillText('Zone: ' + Math.ceil(zoneTimer) + 's', cw / 2, 32);
   gameCtx.restore();
+
+  // Spectator overlay when dead
+  if (localPlayer && !localPlayer.alive) {
+    gameCtx.save();
+    // Slight dark overlay
+    gameCtx.fillStyle = 'rgba(0,0,0,0.15)';
+    gameCtx.fillRect(0, 0, cw, ch);
+    // "YOU DIED" text
+    gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('YOU DIED', cw / 2 + 2, ch / 2 - 40 + 2);
+    gameCtx.fillStyle = '#8b0000';
+    gameCtx.fillText('YOU DIED', cw / 2, ch / 2 - 40);
+    // Spectator hint
+    gameCtx.font = 'bold 12px "Press Start 2P", monospace';
+    gameCtx.fillStyle = '#ccc';
+    if (spectateIndex >= 0 && gamePlayers[spectateIndex]) {
+      gameCtx.fillText('Spectating: ' + gamePlayers[spectateIndex].name, cw / 2, ch / 2);
+    }
+    gameCtx.fillText('TAB = cycle players | WASD = free cam | ESC = free cam', cw / 2, ch / 2 + 24);
+    gameCtx.restore();
+  }
 
   // Draw HP in top-left corner
   drawTopRightHP();
@@ -1453,7 +1579,7 @@ function checkWinCondition() {
 // ═══════════════════════════════════════════════════════════════
 // MULTIPLAYER SYNC
 // ═══════════════════════════════════════════════════════════════
-function onRemoteBuff(casterId, type, duration) {
+function onRemoteBuff(casterId, type, duration, cx, cy) {
   // Apply buff to the caster only
   if (type === 'support') {
     const caster = gamePlayers.find((p) => p.id === casterId);
@@ -1466,12 +1592,21 @@ function onRemoteBuff(casterId, type, duration) {
       caster.blindTimer = duration;
     }
   } else if (type === 'royal-flush') {
-    // Royal Flush: stun all non-casters, handled by caster's client for damage
-    const stunDur = duration;
+    // Royal Flush: distance-tiered effects
+    const caster = gamePlayers.find((p) => p.id === casterId);
+    const casterX = cx || (caster ? caster.x : 0);
+    const casterY = cy || (caster ? caster.y : 0);
+    const closeRange = 3 * GAME_TILE;
+    const mediumRange = 10 * GAME_TILE;
     for (const target of gamePlayers) {
       if (target.id === casterId || !target.alive) continue;
-      target.stunned = stunDur;
-      target.effects.push({ type: 'stun', timer: stunDur });
+      const ddx = target.x - casterX; const ddy = target.y - casterY;
+      const dist = Math.sqrt(ddx * ddx + ddy * ddy);
+      if (dist > mediumRange) continue;
+      if (dist <= closeRange) {
+        target.stunned = duration;
+        target.effects.push({ type: 'stun', timer: duration });
+      }
       target.cdM1 = target.fighter.abilities[0].cooldown;
       target.cdE = target.fighter.abilities[1].cooldown;
       target.cdR = target.fighter.abilities[2].cooldown;
@@ -1479,7 +1614,6 @@ function onRemoteBuff(casterId, type, duration) {
       target.specialUnlocked = false;
       target.totalDamageTaken = 0;
     }
-    const caster = gamePlayers.find((p) => p.id === casterId);
     if (caster) caster.effects.push({ type: 'royal-flush', timer: 2.0 });
   }
 }

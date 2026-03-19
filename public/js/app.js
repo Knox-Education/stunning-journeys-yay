@@ -307,9 +307,9 @@ socket.on('game-over', ({ winnerId, winnerName }) => {
 });
 
 // Buff applied by another player
-socket.on('player-buffed', ({ casterId, type, duration }) => {
+socket.on('player-buffed', ({ casterId, type, duration, cx, cy }) => {
   if (typeof onRemoteBuff === 'function') {
-    onRemoteBuff(casterId, type, duration);
+    onRemoteBuff(casterId, type, duration, cx, cy);
   }
 });
 
