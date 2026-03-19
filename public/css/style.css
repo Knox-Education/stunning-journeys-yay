@@ -13,9 +13,9 @@ body {
 }
 
 /* ── Screens ──────────────────────────────────────────────── */
-.screen { display: none; flex-direction: column; align-items: center; gap: 16px; padding: 32px; max-height: 100vh; overflow-y: auto; }
+.screen { display: none; flex-direction: column; align-items: center; gap: 16px; padding: 32px; }
 .screen.active { display: flex; }
-#screen-fighters.screen { gap: 10px; padding: 16px 32px; }
+#screen-fighters.screen { gap: 6px; padding: 10px 32px; }
 
 /* ── Title ────────────────────────────────────────────────── */
 .title-area { text-align: center; margin-bottom: 20px; }
@@ -228,12 +228,10 @@ input[type="text"]::placeholder { color: #666; }
 
 .fighter-card {
   background: #16213e;
-  border-radius: 12px;
-  padding: 14px 18px;
+  border-radius: 10px;
+  padding: 10px 14px;
   width: 420px;
   max-width: 90vw;
-  max-height: 60vh;
-  overflow-y: auto;
 }
 .fighter-header {
   display: flex;
@@ -241,30 +239,31 @@ input[type="text"]::placeholder { color: #666; }
   align-items: center;
   margin-bottom: 6px;
 }
-.fighter-name { font-size: 1.5rem; font-weight: 700; color: #e94560; }
+.fighter-name { font-size: 1.2rem; font-weight: 700; color: #e94560; }
 .fighter-hp { font-size: 1rem; color: #ff6b6b; font-weight: 600; }
-.fighter-desc { color: #aaa; font-size: 0.85rem; margin-bottom: 8px; line-height: 1.3; }
-.fighter-stats { margin-bottom: 8px; }
+.fighter-desc { color: #aaa; font-size: 0.8rem; margin-bottom: 4px; line-height: 1.2; }
+.fighter-stats { margin-bottom: 4px; }
 .stat-row {
   display: flex;
   justify-content: space-between;
-  padding: 4px 0;
-  font-size: 0.9rem;
+  padding: 2px 0;
+  font-size: 0.8rem;
   border-bottom: 1px solid #1a1a2e;
 }
 .stat-row span:first-child { color: #888; }
 .stat-row span:last-child { color: #ddd; font-weight: 600; }
-.abilities-title { font-size: 1rem; color: #f5a623; margin-bottom: 8px; }
+.abilities-title { font-size: 0.9rem; color: #f5a623; margin-bottom: 4px; }
 
-.ability-list { display: flex; flex-direction: column; gap: 5px; }
+.ability-list { display: flex; flex-direction: column; gap: 3px; }
 .ability-item {
   background: #0f3460;
-  border-radius: 8px;
-  padding: 6px 10px;
+  border-radius: 6px;
+  padding: 4px 8px;
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: flex-start;
-  font-size: 0.85rem;
+  font-size: 0.75rem;
+  line-height: 1.2;
 }
 .ability-key {
   background: #e94560;
@@ -283,8 +282,8 @@ input[type="text"]::placeholder { color: #666; }
 .ability-desc { font-size: 0.8rem; color: #999; margin-top: 2px; line-height: 1.3; }
 .ability-meta { font-size: 0.75rem; color: #666; margin-top: 3px; }
 .special-note {
-  margin-top: 12px;
-  font-size: 0.8rem;
+  margin-top: 6px;
+  font-size: 0.7rem;
   color: #f5a623;
   text-align: center;
   padding: 6px;
