@@ -87,15 +87,15 @@ const FIGHTERS = {
       {
         key: 'M1',
         name: 'Chip Throw',
-        description: 'Throws 3 chips in a straight line. Deals 200 damage each.',
-        damage: 200,
+        description: 'Throws 3 chips in a straight line. Deals 150 damage each.',
+        damage: 150,
         cooldown: 1,
         range: 6,
         type: 'ranged',
         bind: 'click',
         projectileCount: 3,
         projectileSpread: 0.15,
-        projectileSpeed: 28,
+        projectileSpeed: 35,
       },
       {
         key: 'E',
