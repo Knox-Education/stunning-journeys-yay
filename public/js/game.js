@@ -980,25 +980,42 @@ function renderGame() {
 
     // Fighter icon on the dot
     if (p.fighter && p.fighter.id === 'poker') {
-      // Poker: chip icon (circle with a stripe)
-      const chipR = radius * 0.45;
-      const chipX = sx + radius * 0.35;
-      const chipY = sy - radius * 0.35;
+      // Poker: chip icon sticking out from the dot (like the sword does for Fighter)
+      const chipR = radius * 0.5;
+      const chipAngle = -Math.PI / 4; // upper-right, same as sword
+      const chipX = sx + Math.cos(chipAngle) * (radius + chipR * 0.3);
+      const chipY = sy + Math.sin(chipAngle) * (radius + chipR * 0.3);
+      // Chip body
       gameCtx.fillStyle = '#f5a623';
       gameCtx.beginPath();
       gameCtx.arc(chipX, chipY, chipR, 0, Math.PI * 2);
       gameCtx.fill();
-      gameCtx.strokeStyle = '#fff';
-      gameCtx.lineWidth = 1.5;
-      gameCtx.beginPath();
-      gameCtx.moveTo(chipX - chipR * 0.7, chipY);
-      gameCtx.lineTo(chipX + chipR * 0.7, chipY);
-      gameCtx.stroke();
-      gameCtx.strokeStyle = '#333';
-      gameCtx.lineWidth = 1;
+      // Outer ring
+      gameCtx.strokeStyle = '#d4891a';
+      gameCtx.lineWidth = 2;
       gameCtx.beginPath();
       gameCtx.arc(chipX, chipY, chipR, 0, Math.PI * 2);
       gameCtx.stroke();
+      // Inner circle
+      gameCtx.strokeStyle = '#fff';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.arc(chipX, chipY, chipR * 0.55, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Edge notches (4 dashes around the chip)
+      for (let n = 0; n < 4; n++) {
+        const a = (n * Math.PI) / 2;
+        const nx1 = chipX + Math.cos(a) * chipR * 0.7;
+        const ny1 = chipY + Math.sin(a) * chipR * 0.7;
+        const nx2 = chipX + Math.cos(a) * chipR * 0.95;
+        const ny2 = chipY + Math.sin(a) * chipR * 0.95;
+        gameCtx.strokeStyle = '#fff';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(nx1, ny1);
+        gameCtx.lineTo(nx2, ny2);
+        gameCtx.stroke();
+      }
     } else {
       // Fighter: Sword indicator on the dot
       const swordLen = radius * 1.3;
