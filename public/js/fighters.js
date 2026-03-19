@@ -16,7 +16,7 @@ const FIGHTERS = {
     healDelay: 10,        
     healTick: 4,           
     speed: 3.2,            
-    description: 'A versatile brawler with a deadly sword and powerful combo potential.',
+    description: 'A basic, plain, cool, and versatile fighter.',
     abilities: [
       {
         key: 'M1',
