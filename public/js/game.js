@@ -2578,6 +2578,81 @@ function renderGame() {
         gameCtx.arc(sx + 3, sy - 2, 1.5, 0, Math.PI * 2);
         gameCtx.fill();
       }
+    } else if (p.fighter && p.fighter.id === 'onexonexonex' && !p.isSummon) {
+      // ── 1X1X1X1: Fully custom dot — dark base with neon green glitches + red eye ──
+      // Base: dark circle
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Glitchy neon green edge fragments (irregular outline instead of smooth)
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 2;
+      const segments = 8;
+      for (let i = 0; i < segments; i++) {
+        const a1 = (i / segments) * Math.PI * 2;
+        const a2 = ((i + 0.6) / segments) * Math.PI * 2;
+        // Offset each segment slightly for glitch effect
+        const jitter = ((i * 7 + 3) % 5) * 0.5 - 1;
+        const r = radius + jitter;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, r, a1, a2);
+        gameCtx.stroke();
+      }
+      // Neon green glitch streaks across the dot surface
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 1.2;
+      gameCtx.globalAlpha = 0.7;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.6, sy - radius * 0.3);
+      gameCtx.lineTo(sx - radius * 0.2, sy - radius * 0.1);
+      gameCtx.moveTo(sx + radius * 0.1, sy + radius * 0.2);
+      gameCtx.lineTo(sx + radius * 0.6, sy + radius * 0.1);
+      gameCtx.moveTo(sx - radius * 0.3, sy + radius * 0.4);
+      gameCtx.lineTo(sx + radius * 0.1, sy + radius * 0.55);
+      gameCtx.moveTo(sx + radius * 0.3, sy - radius * 0.5);
+      gameCtx.lineTo(sx + radius * 0.5, sy - radius * 0.2);
+      gameCtx.stroke();
+      gameCtx.globalAlpha = 1.0;
+      // Subtle green inner glow
+      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.08)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 0.8, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Red eye — glowing, slightly above center (like obelisk but rounder)
+      // Outer glow
+      gameCtx.fillStyle = 'rgba(255, 34, 0, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 6, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Eye white (dark)
+      gameCtx.fillStyle = '#220000';
+      gameCtx.beginPath();
+      // Almond/eye shape
+      gameCtx.ellipse(sx, sy - radius * 0.15, 5, 3, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Iris
+      gameCtx.fillStyle = '#ff2200';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 2.5, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Pupil
+      gameCtx.fillStyle = '#000';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 1, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Bright red glint
+      gameCtx.fillStyle = 'rgba(255, 100, 80, 0.8)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx + 1, sy - radius * 0.15 - 1, 0.7, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Zombie indicator if zombies active
+      if (p.zombieIds && p.zombieIds.length > 0) {
+        gameCtx.fillStyle = '#1a5c1a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
     } else {
       // Normal player dot
       gameCtx.fillStyle = isDying ? '#8b0000' : (p.boiledOneActive ? '#8b0000' : p.color);
@@ -2654,40 +2729,6 @@ function renderGame() {
       // Summon indicator dot if summon active
       if (p.summonId) {
         gameCtx.fillStyle = '#d4af37';
-        gameCtx.beginPath();
-        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
-        gameCtx.fill();
-      }
-    } else if (p.fighter && p.fighter.id === 'onexonexonex') {
-      // 1X1X1X1: Eye on dot + neon green streaks
-      // Glowing neon green eye in center
-      gameCtx.fillStyle = '#00ff66';
-      gameCtx.beginPath();
-      gameCtx.arc(sx, sy, 3.5, 0, Math.PI * 2);
-      gameCtx.fill();
-      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.3)';
-      gameCtx.beginPath();
-      gameCtx.arc(sx, sy, 6, 0, Math.PI * 2);
-      gameCtx.fill();
-      // Pupil
-      gameCtx.fillStyle = '#000';
-      gameCtx.beginPath();
-      gameCtx.arc(sx, sy, 1.5, 0, Math.PI * 2);
-      gameCtx.fill();
-      // Neon green streaks radiating from the dot
-      gameCtx.strokeStyle = '#00ff66';
-      gameCtx.lineWidth = 1.5;
-      gameCtx.beginPath();
-      gameCtx.moveTo(sx - 2, sy - radius * 0.6);
-      gameCtx.lineTo(sx - 4, sy + radius * 0.4);
-      gameCtx.moveTo(sx + 3, sy - radius * 0.5);
-      gameCtx.lineTo(sx + 1, sy + radius * 0.5);
-      gameCtx.moveTo(sx, sy - radius * 0.3);
-      gameCtx.lineTo(sx - 2, sy + radius * 0.6);
-      gameCtx.stroke();
-      // Zombie indicator if zombies active
-      if (p.zombieIds && p.zombieIds.length > 0) {
-        gameCtx.fillStyle = '#1a5c1a';
         gameCtx.beginPath();
         gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
         gameCtx.fill();
