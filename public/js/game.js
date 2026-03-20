@@ -2116,9 +2116,9 @@ function useAbility(key) {
   else if (key === 'T') {
     if (lp.cdT > 0) return;
     const abil = fighter.abilities[3];
-    lp.cdT = abil.cooldown;
 
     if (isPoker) {
+      lp.cdT = abil.cooldown;
       // Chip Change: randomize M1 damage for 30 seconds
       const options = [50, 100, 200, 300, 400];
       lp.chipChangeDmg = options[Math.floor(Math.random() * options.length)];
@@ -2196,17 +2196,20 @@ function useAbility(key) {
         }
         gamePlayers.push(summon);
         lp.summonId = summonId;
+        lp.cdT = abil.cooldown;
         combatLog.push({ text: '🔮 Summoned ' + compDef.name + '!', timer: 3, color: '#d4af37' });
         lp.effects.push({ type: 'summon', timer: 1.5 });
       }
     } else if (is1x) {
       // 1X1X1X1 T: Unstable Eye — speed boost + reveal all enemies + blur
+      lp.cdT = abil.cooldown;
       lp.unstableEyeTimer = abil.duration || 6;
       lp.effects.push({ type: 'unstable-eye', timer: abil.duration || 6 });
       combatLog.push({ text: '👁 Unstable Eye activated!', timer: 3, color: '#00ff66' });
       showPopup('👁 UNSTABLE EYE');
     } else {
       // Fighter: Intimidation
+      lp.cdT = abil.cooldown;
       const sightRange = CAMERA_RANGE * GAME_TILE * 2;
       for (const target of gamePlayers) {
         if (target.id === lp.id || !target.alive) continue;
