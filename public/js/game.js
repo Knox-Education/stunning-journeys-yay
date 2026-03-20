@@ -3171,12 +3171,26 @@ function renderGame() {
     }
   }
 
-  // Unstable Eye overlay: blur + green outlines (only visible to the 1x player, overridden by Boiled One)
+  // Unstable Eye overlay: heavy blur + green tint (only visible to the 1x player, overridden by Boiled One)
   if (localPlayer && localPlayer.unstableEyeTimer > 0 && localPlayer.fighter.id === 'onexonexonex' && !anyBoiledOne) {
-    // 60% blur overlay
-    gameCtx.fillStyle = 'rgba(0, 40, 0, 0.15)';
+    // Heavy blur pass - redraw canvas onto itself with blur filter to smear colours together
+    gameCtx.save();
+    gameCtx.filter = 'blur(14px)';
+    gameCtx.drawImage(gameCanvas, 0, 0);
+    gameCtx.filter = 'none';
+    gameCtx.restore();
+    // Second lighter blur pass for extra smear
+    gameCtx.save();
+    gameCtx.filter = 'blur(8px)';
+    gameCtx.globalAlpha = 0.6;
+    gameCtx.drawImage(gameCanvas, 0, 0);
+    gameCtx.filter = 'none';
+    gameCtx.globalAlpha = 1.0;
+    gameCtx.restore();
+    // Green colour wash to further obscure
+    gameCtx.fillStyle = 'rgba(0, 50, 10, 0.25)';
     gameCtx.fillRect(0, 0, cw, ch);
-    // Green outlines on all enemy players (reveal effect)
+    // Subtle green outlines on enemies (reveal effect, but hard to see through blur)
     for (const p of gamePlayers) {
       if (p.id === localPlayerId || !p.alive) continue;
       if (p.isSummon && p.summonOwner === localPlayerId) continue;

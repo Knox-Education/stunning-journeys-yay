@@ -219,7 +219,7 @@ const FIGHTERS = {
     healAmount: 90,
     healDelay: 10,
     healTick: 4,
-    speed: 2.5,
+    speed: 1.6,
     description: 'A 4th dimensional being who wields poison, entanglement, and rotting zombies. credits - Forsaken.',
     abilities: [
       {
