@@ -252,6 +252,11 @@ io.on('connection', (socket) => {
     if (!socket.lobbyCode) return;
     // Validate: must be an array, cap at 10 projectiles per message
     if (!Array.isArray(data.projectiles)) return;
+    // Rate-limit: max ~10 projectile-spawn messages per second per socket
+    const now = Date.now();
+    if (!socket._lastProjSpawn) socket._lastProjSpawn = 0;
+    if (now - socket._lastProjSpawn < 100) return; // drop if too fast
+    socket._lastProjSpawn = now;
     const clamped = data.projectiles.slice(0, 10);
     socket.to(socket.lobbyCode).emit('projectile-spawned', {
       ownerId: socket.id,

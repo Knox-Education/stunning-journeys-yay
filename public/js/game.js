@@ -453,19 +453,20 @@ function updateGame(dt) {
         }
       }
     }
-    // Boiled One timer
+    // Boiled One timer (only the Filbus player's client drives the stun loop)
     if (p.boiledOneActive) {
       p.boiledOneTimer -= wallDt;
-      // While active, anyone who can see the dark-red dot gets stunned
-      for (const target of gamePlayers) {
-        if (target.id === p.id || !target.alive || target.isSummon) continue;
-        // Check if target can "see" p (within camera range and not hidden in grass)
-        const dx = target.x - p.x; const dy = target.y - p.y;
-        const viewRange = CAMERA_RANGE * GAME_TILE * 2;
-        if (Math.sqrt(dx * dx + dy * dy) <= viewRange) {
-          if (target.stunned < 1) {
-            target.stunned = 1;
-            target.effects.push({ type: 'stun', timer: 1 });
+      // Only the local Filbus client applies ongoing stuns to prevent duplicate stun application
+      if (p.id === localPlayerId) {
+        for (const target of gamePlayers) {
+          if (target.id === p.id || !target.alive || target.isSummon) continue;
+          const dx = target.x - p.x; const dy = target.y - p.y;
+          const viewRange = CAMERA_RANGE * GAME_TILE * 2;
+          if (Math.sqrt(dx * dx + dy * dy) <= viewRange) {
+            if (target.stunned < 1) {
+              target.stunned = 1;
+              target.effects.push({ type: 'stun', timer: 1 });
+            }
           }
         }
       }
@@ -2165,6 +2166,10 @@ function useAbility(key) {
       showPopup('🩸 THE BOILED ONE PHENOMENON');
       lp.effects.push({ type: 'boiled-one', timer: stunDur + 1 });
       combatLog.push({ text: '🩸 Phen 228 has entered...', timer: 5, color: '#8b0000' });
+      // Broadcast to other clients
+      if (typeof socket !== 'undefined' && socket.emit) {
+        socket.emit('player-buff', { type: 'boiled-one', duration: stunDur, cx: lp.x, cy: lp.y });
+      }
     } else if (is1x) {
       // 1X1X1X1 SPACE: Rejuvenate the Rotten — summon zombies
       lp.specialUsed = true;
@@ -2379,6 +2384,20 @@ function onRemoteDamage(targetId, amount) {
   target.isHealing = false;
   target.healTickTimer = 0;
   target.effects.push({ type: 'hit', timer: 0.3 });
+  // Interrupt channels on the local player when hit by remote attacker
+  if (target.id === localPlayerId) {
+    if (target.isCraftingChair) {
+      target.isCraftingChair = false;
+      target.craftTimer = 0;
+      combatLog.push({ text: '🪑 Chair crafting interrupted!', timer: 2, color: '#e94560' });
+    }
+    if (target.isEatingChair) {
+      target.isEatingChair = false;
+      target.eatTimer = 0;
+      target.eatHealPool = 0;
+      combatLog.push({ text: '🪑 Chair eating interrupted!', timer: 2, color: '#e94560' });
+    }
+  }
   target.totalDamageTaken += amount;
   if (!target.specialUnlocked && target.totalDamageTaken >= target.maxHp * 2) {
     target.specialUnlocked = true;
@@ -3619,6 +3638,23 @@ function onRemoteBuff(casterId, type, duration, cx, cy) {
       target.totalDamageTaken = 0;
     }
     if (caster) caster.effects.push({ type: 'royal-flush', timer: 2.0 });
+  } else if (type === 'boiled-one') {
+    // Remote Filbus activated The Boiled One Phenomenon
+    const caster = gamePlayers.find((p) => p.id === casterId);
+    if (caster && caster.alive) {
+      caster.boiledOneActive = true;
+      caster.boiledOneTimer = duration;
+      caster.effects.push({ type: 'boiled-one', timer: duration + 1 });
+      // Stun all non-Filbus players
+      for (const target of gamePlayers) {
+        if (!target.alive || target.isSummon) continue;
+        if (target.id === casterId) continue;
+        target.stunned = duration;
+        target.effects.push({ type: 'stun', timer: duration });
+      }
+      showPopup('\ud83e\ude78 THE BOILED ONE PHENOMENON');
+      combatLog.push({ text: '\ud83e\ude78 Phen 228 has entered...', timer: 5, color: '#8b0000' });
+    }
   }
 }
 
@@ -3628,6 +3664,19 @@ function onRemoteDebuff(casterId, targetId, type, duration) {
     if (target) {
       target.intimidated = duration;
       target.intimidatedBy = casterId;
+    }
+  } else if (type === 'stun') {
+    const target = gamePlayers.find((p) => p.id === targetId);
+    if (target && target.alive) {
+      target.stunned = duration;
+      target.effects.push({ type: 'stun', timer: duration });
+    }
+  } else if (type === 'poison') {
+    const target = gamePlayers.find((p) => p.id === targetId);
+    if (target && target.alive) {
+      if (!target.poisonTimers) target.poisonTimers = [];
+      target.poisonTimers.push({ sourceId: casterId, dps: 50, remaining: duration });
+      target.effects.push({ type: 'poison', timer: duration });
     }
   }
 }
@@ -3649,6 +3698,7 @@ function onPlayerMove(id, x, y, hp) {
     // Store target position for smooth interpolation instead of snapping
     p._targetX = x;
     p._targetY = y;
+    // Each player is authoritative over their own HP — trust their broadcast
     if (hp !== undefined) p.hp = hp;
   }
 }
