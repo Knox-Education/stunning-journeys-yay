@@ -370,32 +370,179 @@ function enterGame(mapIndex, players, mode) {
 }
 
 // ── Fighter screen ───────────────────────────────────────────
+function drawFighterIcon(canvas, fighterId) {
+  const size = 48;
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const cx = size / 2, cy = size / 2, r = size * 0.38;
+
+  if (fighterId === 'onexonexonex') {
+    // Dark base with green glitches + red eye
+    ctx.fillStyle = '#111';
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#00ff66'; ctx.lineWidth = 1.5;
+    for (let i = 0; i < 6; i++) {
+      const a1 = (i / 6) * Math.PI * 2, a2 = ((i + 0.5) / 6) * Math.PI * 2;
+      ctx.beginPath(); ctx.arc(cx, cy, r + ((i * 3) % 3 - 1), a1, a2); ctx.stroke();
+    }
+    ctx.fillStyle = '#ff2200'; ctx.beginPath(); ctx.arc(cx, cy - 2, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(cx, cy - 2, 1.2, 0, Math.PI * 2); ctx.fill();
+  } else if (fighterId === 'poker') {
+    // Chip icon
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(cx, cy, r * 0.75, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#f5a623'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.75, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.45, 0, Math.PI * 2); ctx.stroke();
+    for (let n = 0; n < 4; n++) {
+      const a = (n * Math.PI) / 2;
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * r * 0.55, cy + Math.sin(a) * r * 0.55);
+      ctx.lineTo(cx + Math.cos(a) * r * 0.72, cy + Math.sin(a) * r * 0.72);
+      ctx.stroke();
+    }
+  } else if (fighterId === 'filbus') {
+    // Chair icon
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    const cw = r * 0.9, ch = r * 0.5;
+    ctx.fillStyle = '#a0522d';
+    ctx.fillRect(cx - cw/2, cy - ch/2 + 2, cw, ch);
+    ctx.fillStyle = '#8b4513';
+    ctx.fillRect(cx - cw/2, cy - ch - 2, cw * 0.2, ch);
+    ctx.fillRect(cx + cw/2 - cw * 0.2, cy - ch - 2, cw * 0.2, ch);
+    ctx.strokeStyle = '#654321'; ctx.lineWidth = 1.5; ctx.beginPath();
+    ctx.moveTo(cx - cw/2 + 2, cy + ch/2 + 2); ctx.lineTo(cx - cw/2 + 2, cy + ch + 2);
+    ctx.moveTo(cx + cw/2 - 2, cy + ch/2 + 2); ctx.lineTo(cx + cw/2 - 2, cy + ch + 2);
+    ctx.stroke();
+  } else if (fighterId === 'cricket') {
+    // Cricket bat icon
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    const batAngle = -Math.PI / 4, batLen = r * 1.5;
+    const bx = cx - Math.cos(batAngle) * batLen * 0.15, by = cy - Math.sin(batAngle) * batLen * 0.15;
+    ctx.strokeStyle = '#8b4513'; ctx.lineWidth = 3; ctx.beginPath();
+    ctx.moveTo(bx, by);
+    ctx.lineTo(bx + Math.cos(batAngle) * batLen * 0.4, by + Math.sin(batAngle) * batLen * 0.4);
+    ctx.stroke();
+    ctx.strokeStyle = '#c8a96e'; ctx.lineWidth = 6; ctx.beginPath();
+    ctx.moveTo(bx + Math.cos(batAngle) * batLen * 0.4, by + Math.sin(batAngle) * batLen * 0.4);
+    ctx.lineTo(bx + Math.cos(batAngle) * batLen, by + Math.sin(batAngle) * batLen);
+    ctx.stroke();
+  } else if (fighterId === 'deer') {
+    // Deer antler icon — bold dual antlers
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#c8a96e'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    // Left antler — main trunk + 2 branches
+    ctx.beginPath();
+    ctx.moveTo(cx - 2, cy + 2);
+    ctx.lineTo(cx - 6, cy - 8);
+    ctx.lineTo(cx - 12, cy - 14);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - 6, cy - 8);
+    ctx.lineTo(cx - 14, cy - 6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - 9, cy - 11);
+    ctx.lineTo(cx - 4, cy - 16);
+    ctx.stroke();
+    // Right antler — main trunk + 2 branches
+    ctx.beginPath();
+    ctx.moveTo(cx + 2, cy + 2);
+    ctx.lineTo(cx + 6, cy - 8);
+    ctx.lineTo(cx + 12, cy - 14);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx + 6, cy - 8);
+    ctx.lineTo(cx + 14, cy - 6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx + 9, cy - 11);
+    ctx.lineTo(cx + 4, cy - 16);
+    ctx.stroke();
+    // Head
+    ctx.fillStyle = '#8b6914'; ctx.beginPath(); ctx.arc(cx, cy + 8, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(cx - 2, cy + 7, 1, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + 2, cy + 7, 1, 0, Math.PI * 2); ctx.fill();
+  } else {
+    // Fighter: sword icon
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    const sAngle = -Math.PI / 4, sLen = r * 1.4;
+    const sx = cx - Math.cos(sAngle) * sLen * 0.15, sy = cy - Math.sin(sAngle) * sLen * 0.15;
+    ctx.strokeStyle = '#ccc'; ctx.lineWidth = 3; ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(sx + Math.cos(sAngle) * sLen, sy + Math.sin(sAngle) * sLen);
+    ctx.stroke();
+    const hx = sx + Math.cos(sAngle) * sLen * 0.35, hy = sy + Math.sin(sAngle) * sLen * 0.35;
+    const pAngle = sAngle + Math.PI / 2;
+    ctx.strokeStyle = '#a0522d'; ctx.lineWidth = 2; ctx.beginPath();
+    ctx.moveTo(hx + Math.cos(pAngle) * 5, hy + Math.sin(pAngle) * 5);
+    ctx.lineTo(hx - Math.cos(pAngle) * 5, hy - Math.sin(pAngle) * 5);
+    ctx.stroke();
+  }
+}
+
+let fighterCardShown = null; // track which fighter's stats are showing
+
 function populateFighterScreen() {
-  // Build selection bar
   const bar = document.querySelector('#fighter-select-bar');
+  const card = document.querySelector('#fighter-card');
   bar.innerHTML = '';
+
   getAllFighterIds().forEach((fid) => {
     const f = getFighter(fid);
     const btn = document.createElement('button');
     btn.className = 'fighter-select-btn' + (fid === selectedFighterId ? ' active' : '');
-    btn.textContent = f.name;
+
+    // Draw icon
+    const canvas = document.createElement('canvas');
+    drawFighterIcon(canvas, fid);
+    btn.appendChild(canvas);
+
+    // Name label
+    const label = document.createElement('span');
+    label.textContent = f.name;
+    btn.appendChild(label);
+
     btn.addEventListener('click', () => {
       selectedFighterId = fid;
-      populateFighterScreen();
+      if (fighterCardShown === fid) {
+        // Clicking same fighter again hides stats
+        card.classList.add('hidden');
+        fighterCardShown = null;
+      } else {
+        showFighterStats(fid);
+        fighterCardShown = fid;
+      }
+      // Update active state on all buttons
+      bar.querySelectorAll('.fighter-select-btn').forEach((b, idx) => {
+        const ids = getAllFighterIds();
+        b.className = 'fighter-select-btn' + (ids[idx] === selectedFighterId ? ' active' : '');
+      });
     });
     bar.appendChild(btn);
   });
 
-  const f = getFighter(selectedFighterId);
+  // Show stats for currently selected fighter
+  if (fighterCardShown === selectedFighterId) {
+    showFighterStats(selectedFighterId);
+  }
+}
+
+function showFighterStats(fid) {
+  const f = getFighter(fid);
   if (!f) return;
 
   const el = (sel) => document.querySelector(sel);
+  const card = el('#fighter-card');
+  card.classList.remove('hidden');
+
   el('#fc-name').textContent = f.name;
   el('#fc-hp').textContent = 'HP: ' + f.hp;
   el('#fc-desc').textContent = f.description;
   el('#fc-speed').textContent = f.speed;
   el('#fc-heal').textContent = f.healAmount + ' every ' + f.healTick + 's (after ' + f.healDelay + 's)';
-  // Update button text
   el('#btn-select-fighter').textContent = 'Pick & Play';
 
   const list = el('#fc-abilities');

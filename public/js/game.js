@@ -266,6 +266,20 @@ function createPlayerState(p, spawn, fighter) {
     poisonTimers: [],       // [{sourceId, dps, remaining}]
     unstableEyeTimer: 0,    // seconds remaining of Unstable Eye
     zombieIds: [],           // array of zombie summon ids
+    // Cricket-specific state
+    gearUpTimer: 0,         // seconds remaining of Gear Up
+    wicketIds: [],           // array of wicket summon ids [near, far]
+    driveReflectTimer: 0,   // seconds remaining of Drive reflect window
+    // Deer-specific state
+    deerFearTimer: 0,       // seconds remaining of Deer's Fear
+    deerFearTargetX: 0,     // x of closest enemy when Fear was used
+    deerFearTargetY: 0,     // y of closest enemy when Fear was used
+    deerSeerTimer: 0,       // seconds remaining of Deer's Seer
+    deerRobotId: null,      // id of deer robot summon
+    deerBuildSlowTimer: 0,  // seconds of build-slowness remaining
+    iglooX: 0,              // igloo center x
+    iglooY: 0,              // igloo center y
+    iglooTimer: 0,          // igloo active timer
   };
 }
 
@@ -321,7 +335,19 @@ function onKeyDown(e) {
     else useAbility('T');
   }
   if (e.key === ' ') {
-    if (gameMode === undefined && !isHostAuthority) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('SPACE'); }
+    if (gameMode === undefined && !isHostAuthority) {
+      if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = [];
+      localPlayer._pendingAbilities.push('SPACE');
+      // Also trigger local aiming mode for visual feedback
+      if (localPlayer.specialUnlocked && !localPlayer.specialUsed && localPlayer.alive && localPlayer.stunned <= 0) {
+        localPlayer.specialAiming = true;
+        localPlayer.specialAimX = localPlayer.x;
+        localPlayer.specialAimY = localPlayer.y;
+        const aimTime = localPlayer.fighter.abilities[4].aimTime || 5;
+        localPlayer.specialAimTimer = aimTime;
+        localPlayer.effects.push({ type: localPlayer.fighter.id === 'deer' ? 'igloo-aim' : 'sixer-aim', timer: aimTime + 2 });
+      }
+    }
     else useAbility('SPACE');
   }
 }
@@ -379,6 +405,17 @@ function updateGame(dt) {
   // NON-HOST CLIENT in multiplayer: predict local movement, render visuals, but host runs all combat
   if (gameMode === undefined && !isHostAuthority) {
     lastWallClock = Date.now();
+    // Local aiming prediction for specials (visual feedback while host processes)
+    if (localPlayer.alive && localPlayer.specialAiming) {
+      const cw = gameCanvas.width, ch = gameCanvas.height;
+      const camX = localPlayer.x - cw / 2, camY = localPlayer.y - ch / 2;
+      localPlayer.specialAimX = mouseX + camX;
+      localPlayer.specialAimY = mouseY + camY;
+      localPlayer.specialAimTimer -= dt;
+      if (localPlayer.specialAimTimer <= 0 || mouseDown) {
+        localPlayer.specialAiming = false;
+      }
+    }
     // Local movement prediction so our own character feels responsive
     if (localPlayer.alive && !localPlayer.specialAiming && localPlayer.stunned <= 0
         && !localPlayer.isCraftingChair && !localPlayer.isEatingChair) {
@@ -605,6 +642,61 @@ function updateGame(dt) {
     if (p.unstableEyeTimer > 0) {
       p.unstableEyeTimer = Math.max(0, p.unstableEyeTimer - wallDt);
     }
+
+    // Tick Cricket Gear Up timer
+    if (p.gearUpTimer > 0) {
+      p.gearUpTimer = Math.max(0, p.gearUpTimer - wallDt);
+    }
+
+    // Tick Cricket Drive reflect window
+    if (p.driveReflectTimer > 0) {
+      p.driveReflectTimer = Math.max(0, p.driveReflectTimer - wallDt);
+    }
+
+    // Tick Deer Fear timer
+    if (p.deerFearTimer > 0) {
+      p.deerFearTimer = Math.max(0, p.deerFearTimer - wallDt);
+    }
+
+    // Tick Deer Seer timer
+    if (p.deerSeerTimer > 0) {
+      p.deerSeerTimer = Math.max(0, p.deerSeerTimer - wallDt);
+    }
+
+    // Tick Deer build-slow timer
+    if (p.deerBuildSlowTimer > 0) {
+      p.deerBuildSlowTimer = Math.max(0, p.deerBuildSlowTimer - wallDt);
+    }
+
+    // Tick Deer Igloo — 50 dps to anyone inside (freely walkable, severe slow)
+    if (p.iglooTimer > 0) {
+      p.iglooTimer = Math.max(0, p.iglooTimer - wallDt);
+      const iglooAbil = p.fighter && p.fighter.abilities[4];
+      const iglooRadius = (iglooAbil ? (iglooAbil.radius || 4.5) : 4.5) * GAME_TILE;
+      const dps = iglooAbil ? (iglooAbil.damage || 50) : 50;
+      for (const t of gamePlayers) {
+        if (t.id === p.id || !t.alive) continue;
+        if (t.isSummon) continue;
+        const dx = t.x - p.iglooX; const dy = t.y - p.iglooY;
+        if (Math.sqrt(dx * dx + dy * dy) < iglooRadius) {
+          dealDamage(p, t, Math.round(dps * wallDt));
+        }
+      }
+    }
+
+    // Cricket: check if wickets are still alive (both must survive)
+    if (p.wicketIds && p.wicketIds.length === 2) {
+      const w0 = gamePlayers.find(x => x.id === p.wicketIds[0]);
+      const w1 = gamePlayers.find(x => x.id === p.wicketIds[1]);
+      if (!w0 || !w0.alive || !w1 || !w1.alive) {
+        // One wicket died, remove both
+        for (const wid of p.wicketIds) {
+          const idx = gamePlayers.findIndex(x => x.id === wid);
+          if (idx >= 0) { gamePlayers[idx].alive = false; gamePlayers.splice(idx, 1); }
+        }
+        p.wicketIds = [];
+      }
+    }
   }
 
   // Update summon AI
@@ -633,7 +725,7 @@ function updateGame(dt) {
     localPlayer.specialAimX = mouseX + camX;
     localPlayer.specialAimY = mouseY + camY;
     // Count down aim timer
-    localPlayer.specialAimTimer -= dt;
+    localPlayer.specialAimTimer -= wallDt;
     if (localPlayer.specialAimTimer <= 0 || mouseDown) {
       executeSpecialLanding();
     }
@@ -652,6 +744,23 @@ function updateGame(dt) {
       if (p.id === localPlayerId || p.isCPU || p.isSummon || !p.alive) continue;
       const inp = remoteInputs[p.id];
       if (!inp) continue;
+
+      // Tick special aiming for remote players (host processes aim timer + landing)
+      if (p.specialAiming) {
+        const cw = gameCanvas.width, ch = gameCanvas.height;
+        const camX = p.x - cw / 2, camY = p.y - ch / 2;
+        p.specialAimX = (inp.mouseX || 0) + camX;
+        p.specialAimY = (inp.mouseY || 0) + camY;
+        p.specialAimTimer -= wallDt;
+        if (p.specialAimTimer <= 0 || inp.mouseDown) {
+          // Swap context and call executeSpecialLanding for this remote player
+          const savedLP = localPlayer, savedLPID = localPlayerId;
+          localPlayer = p; localPlayerId = p.id;
+          executeSpecialLanding();
+          localPlayer = savedLP; localPlayerId = savedLPID;
+        }
+      }
+
       // NOTE: p.x/p.y for remote players is updated by onRemotePosition (no applyRemoteMovement needed)
       if (inp.mouseDown && p.cdM1 <= 0) applyRemoteAbility(p, 'M1', inp);
       if (inp.pendingAbilities && inp.pendingAbilities.length > 0) {
@@ -732,6 +841,22 @@ function updateMovement(dt) {
   let speed = localPlayer.fighter.speed;
   // Unstable Eye: 30% speed boost
   if (localPlayer.unstableEyeTimer > 0) speed *= 1.3;
+  // Cricket Gear Up: slower speed
+  if (localPlayer.gearUpTimer > 0) speed *= 0.6;
+  // Cricket Wicket line: 50% speed boost when on the line between both wickets
+  if (localPlayer.wicketIds && localPlayer.wicketIds.length === 2) {
+    const w0 = gamePlayers.find(p => p.id === localPlayer.wicketIds[0]);
+    const w1 = gamePlayers.find(p => p.id === localPlayer.wicketIds[1]);
+    if (w0 && w0.alive && w1 && w1.alive) {
+      // Check distance from player to line segment w0-w1
+      const lx = w1.x - w0.x, ly = w1.y - w0.y;
+      const lineLen = Math.sqrt(lx * lx + ly * ly) || 1;
+      const t = Math.max(0, Math.min(1, ((localPlayer.x - w0.x) * lx + (localPlayer.y - w0.y) * ly) / (lineLen * lineLen)));
+      const closestX = w0.x + t * lx, closestY = w0.y + t * ly;
+      const distToLine = Math.sqrt((localPlayer.x - closestX) ** 2 + (localPlayer.y - closestY) ** 2);
+      if (distToLine < GAME_TILE * 1.5) speed *= 1.5;
+    }
+  }
   // Intimidation: move 1.5× faster when moving AWAY from intimidator
   if (localPlayer.intimidated > 0 && localPlayer.intimidatedBy) {
     const src = gamePlayers.find((p) => p.id === localPlayer.intimidatedBy);
@@ -742,14 +867,37 @@ function updateMovement(dt) {
       if (dot > 0) speed *= 1.5; // moving away
     }
   }
+  // Deer Fear: 50% speed boost when moving away from the enemy who was closest at cast
+  if (localPlayer.deerFearTimer > 0) {
+    const awayX = localPlayer.x - localPlayer.deerFearTargetX;
+    const awayY = localPlayer.y - localPlayer.deerFearTargetY;
+    const dot = dx * awayX + dy * awayY;
+    if (dot > 0) speed *= 1.5;
+  }
+  // Deer: slower while building robot
+  if (localPlayer.deerBuildSlowTimer > 0 && localPlayer.fighter && localPlayer.fighter.id === 'deer') {
+    speed *= 0.6;
+  }
+  // Igloo slow: severely slow anyone inside an enemy igloo
+  for (const owner of gamePlayers) {
+    if (owner.iglooTimer > 0 && owner.id !== localPlayer.id) {
+      const iglooAbil = owner.fighter && owner.fighter.abilities[4];
+      const ir = ((iglooAbil ? iglooAbil.radius : 4.5) || 4.5) * GAME_TILE;
+      const dxI = localPlayer.x - owner.iglooX, dyI = localPlayer.y - owner.iglooY;
+      if (Math.sqrt(dxI * dxI + dyI * dyI) < ir) { speed *= 0.35; break; }
+    }
+  }
 
   const move = speed * dt * 60; // frame-rate independent: same effective speed at any FPS
   const newX = localPlayer.x + dx * move;
   const newY = localPlayer.y + dy * move;
   const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
 
+  const prevX = localPlayer.x, prevY = localPlayer.y;
   if (canMoveTo(newX, localPlayer.y, radius)) localPlayer.x = newX;
   if (canMoveTo(localPlayer.x, newY, radius)) localPlayer.y = newY;
+
+  // Igloo containment removed — igloo is now freely walkable (slow applied in speed calc)
 }
 
 function canMoveTo(px, py, radius) {
@@ -807,6 +955,26 @@ function updateProjectiles(dt) {
         const dist = Math.sqrt(dx * dx + dy * dy);
         const hitRadius = p.type === 'shockwave' ? radius + 12 : radius + 4;
         if (dist < hitRadius) {
+          // Cricket Drive reflect: if target has active reflect window, bounce projectile back
+          if (target.driveReflectTimer > 0 && target.fighter && target.fighter.id === 'cricket') {
+            const driveAbil = target.fighter.abilities[1];
+            const retSpd = (driveAbil.returnSpeed || 80) * GAME_TILE / 10;
+            if (owner && owner.alive) {
+              const rdx = owner.x - p.x; const rdy = owner.y - p.y;
+              const rd = Math.sqrt(rdx * rdx + rdy * rdy) || 1;
+              p.vx = (rdx / rd) * retSpd;
+              p.vy = (rdy / rd) * retSpd;
+            } else {
+              p.vx = -p.vx; p.vy = -p.vy;
+            }
+            p.damage = (p.damage || 0) + (driveAbil.returnBonusDmg || 100);
+            p.ownerId = target.id;
+            p.timer = 3;
+            target.driveReflectTimer = 0; // consume the reflect
+            // Reduce E cooldown since reflection happened
+            target.cdE = driveAbil.hitProjectileCD || 5;
+            break;
+          }
           dealDamage(owner, target, p.damage);
           // Log gamble card hits
           if (p.type === 'card') {
@@ -948,6 +1116,24 @@ function updateSummons(dt) {
           s.summonAttackTimer = s.summonAttackCD;
           s.effects.push({ type: 'zombie-slash', timer: 0.2, aimNx: nx, aimNy: ny });
         }
+      }
+    } else if (s.summonType === 'deer-robot') {
+      // Deer Robot: stationary, fires poker chips at closest enemy every second
+      // Cap at 10 active chips per owner to prevent lag
+      const ownerChipCount = projectiles.filter(pr => pr.ownerId === s.summonOwner && pr.type === 'chip').length;
+      if (bestTarget && s.summonAttackTimer <= 0 && ownerChipCount < 10) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const spd = 12 * GAME_TILE / 10;
+        const angle = Math.atan2(dy, dx);
+        projectiles.push({
+          x: s.x, y: s.y,
+          vx: Math.cos(angle) * spd, vy: Math.sin(angle) * spd,
+          ownerId: s.summonOwner, damage: s.summonDamage,
+          timer: 2, type: 'chip',
+        });
+        s.summonAttackTimer = s.summonAttackCD;
+        s.effects.push({ type: 'robot-fire', timer: 0.3 });
       }
     }
 
@@ -1104,6 +1290,12 @@ function cpuMove(cpu, dt, params) {
   let speed = cpu.fighter.speed;
   // Unstable Eye: 30% speed boost
   if (cpu.unstableEyeTimer > 0) speed *= 1.3;
+  // Gear Up: speed penalty
+  if (cpu.gearUpTimer > 0) speed *= (cpu.fighter.abilities[2].speedPenalty || 0.6);
+  // Deer Fear: speed boost when retreating
+  if (cpu.deerFearTimer > 0 && ai.retreating) speed *= 1.5;
+  // Deer: slower while building robot
+  if (cpu.deerBuildSlowTimer > 0 && cpu.fighter && cpu.fighter.id === 'deer') speed *= 0.6;
 
   // Retreat if low HP
   ai.retreating = cpu.hp / cpu.maxHp < params.retreatHp;
@@ -1121,7 +1313,7 @@ function cpuMove(cpu, dt, params) {
       goalY = cpu.y - dy / (dist || 1) * GAME_TILE * 3;
     } else {
       // Approach to ideal range based on fighter type
-      const idealRange = cpu.fighter.id === 'poker' ? 5 * GAME_TILE : cpu.fighter.id === 'filbus' ? 1.5 * GAME_TILE : 1.2 * GAME_TILE;
+      const idealRange = cpu.fighter.id === 'poker' ? 5 * GAME_TILE : cpu.fighter.id === 'filbus' ? 1.5 * GAME_TILE : cpu.fighter.id === 'cricket' ? 1.0 * GAME_TILE : cpu.fighter.id === 'deer' ? 1.0 * GAME_TILE : 1.2 * GAME_TILE;
       if (dist > idealRange + GAME_TILE) {
         // Move toward target
         goalX = target.x;
@@ -1198,6 +1390,22 @@ function cpuMove(cpu, dt, params) {
     }
   }
 
+  // Wicket line speed boost for Cricket CPUs
+  if (cpu.wicketIds && cpu.wicketIds.length === 2) {
+    const w0 = gamePlayers.find(p => p.id === cpu.wicketIds[0]);
+    const w1 = gamePlayers.find(p => p.id === cpu.wicketIds[1]);
+    if (w0 && w0.alive && w1 && w1.alive) {
+      const lx = w1.x - w0.x, ly = w1.y - w0.y;
+      const ll = lx * lx + ly * ly;
+      if (ll > 0) {
+        const t = Math.max(0, Math.min(1, ((cpu.x - w0.x) * lx + (cpu.y - w0.y) * ly) / ll));
+        const cx = w0.x + t * lx, cy = w0.y + t * ly;
+        const dd = Math.sqrt((cpu.x - cx) ** 2 + (cpu.y - cy) ** 2);
+        if (dd < 1.5 * GAME_TILE) speed *= (cpu.fighter.abilities[3].speedBoost || 1.5);
+      }
+    }
+  }
+
   const move = speed * dt * 60; // frame-rate independent
   const newX = cpu.x + moveX * move;
   const newY = cpu.y + moveY * move;
@@ -1216,6 +1424,8 @@ function cpuAttack(cpu, params) {
   const isPoker = fighter.id === 'poker';
   const isFilbus = fighter.id === 'filbus';
   const is1x = fighter.id === 'onexonexonex';
+  const isCricket = fighter.id === 'cricket';
+  const isDeer = fighter.id === 'deer';
 
   // Add aim error based on difficulty
   const errorAngle = (Math.random() - 0.5) * params.aimError * 2;
@@ -1243,6 +1453,16 @@ function cpuAttack(cpu, params) {
     } else if (is1x) {
       cpuUseSpecial1x(cpu);
       return;
+    } else if (isCricket) {
+      if (dist < 10 * GAME_TILE) {
+        cpuUseSpecialCricket(cpu, target);
+        return;
+      }
+    } else if (isDeer) {
+      if (dist < 10 * GAME_TILE) {
+        cpuUseSpecialDeer(cpu, target);
+        return;
+      }
     } else {
       if (dist < 10 * GAME_TILE) {
         cpuUseSpecialFighter(cpu, target);
@@ -1269,6 +1489,22 @@ function cpuAttack(cpu, params) {
       // Entanglement: throw swords if in range
       if (dist < 8 * GAME_TILE) {
         cpu1xEntangle(cpu, target, aimAngle);
+        return;
+      }
+    } else if (isCricket) {
+      // Drive: melee hit + projectile reflect
+      if (dist < 2 * GAME_TILE) {
+        cpuCricketDrive(cpu, target, aimNx, aimNy);
+        return;
+      }
+    } else if (isDeer) {
+      // Deer's Fear: speed buff when moving away
+      if (cpu.deerFearTimer <= 0 && dist < 5 * GAME_TILE) {
+        cpu.cdE = fighter.abilities[1].cooldown;
+        cpu.deerFearTimer = fighter.abilities[1].duration || 5;
+        cpu.deerFearTargetX = target.x;
+        cpu.deerFearTargetY = target.y;
+        cpu.effects.push({ type: 'deer-fear', timer: fighter.abilities[1].duration || 5 });
         return;
       }
     } else {
@@ -1302,6 +1538,22 @@ function cpuAttack(cpu, params) {
       // Mass Infection: wide attack when enemies nearby
       if (dist < (fighter.abilities[2].range || 4) * GAME_TILE) {
         cpu1xMassInfection(cpu, target, aimNx, aimNy);
+        return;
+      }
+    } else if (isCricket) {
+      // Gear Up: use when enemy nearby and not already active
+      if (cpu.gearUpTimer <= 0 && dist < 4 * GAME_TILE) {
+        cpu.cdR = fighter.abilities[2].cooldown;
+        cpu.gearUpTimer = fighter.abilities[2].duration || 10;
+        cpu.effects.push({ type: 'gear-up', timer: 1.5 });
+        return;
+      }
+    } else if (isDeer) {
+      // Deer's Seer: dodge state
+      if (cpu.deerSeerTimer <= 0 && dist < 4 * GAME_TILE && cpu.hp < cpu.maxHp * 0.5) {
+        cpu.cdR = fighter.abilities[2].cooldown;
+        cpu.deerSeerTimer = fighter.abilities[2].duration || 5;
+        cpu.effects.push({ type: 'deer-seer', timer: fighter.abilities[2].duration || 5 });
         return;
       }
     } else {
@@ -1357,6 +1609,9 @@ function cpuAttack(cpu, params) {
           isEatingChair: false, eatTimer: 0, eatHealPool: 0,
           summonId: null, boiledOneActive: false, boiledOneTimer: 0,
           poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+          gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0,
+          deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
+          deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
           isSummon: true, summonOwner: cpu.id, summonType: pick,
           summonSpeed: compDef.speed, summonDamage: compDef.damage,
           summonStunDur: compDef.stunDuration, summonAttackCD: compDef.attackCooldown,
@@ -1377,6 +1632,18 @@ function cpuAttack(cpu, params) {
         cpu.cdT = fighter.abilities[3].cooldown;
         cpu.unstableEyeTimer = fighter.abilities[3].duration || 6;
         cpu.effects.push({ type: 'unstable-eye', timer: fighter.abilities[3].duration || 6 });
+        return;
+      }
+    } else if (isCricket) {
+      // Wicket: place wickets between self and enemy
+      if (!cpu.wicketIds || cpu.wicketIds.length === 0) {
+        cpuCricketWicket(cpu, target);
+        return;
+      }
+    } else if (isDeer) {
+      // Deer T: Deer's Spear — antler stab + stun
+      if (cpu.deerSeerTimer <= 0 && dist < (fighter.abilities[3].range || 1.2) * GAME_TILE) {
+        cpuDeerSpear(cpu, target, aimNx, aimNy);
         return;
       }
     } else {
@@ -1412,6 +1679,14 @@ function cpuAttack(cpu, params) {
       // 1x Slash
       if (dist < (fighter.abilities[0].range || 1.5) * GAME_TILE) {
         cpu1xSlash(cpu, target, aimNx, aimNy);
+      }
+    } else if (isCricket) {
+      if (dist < (fighter.abilities[0].range || 1.2) * GAME_TILE) {
+        cpuCricketBatSwing(cpu, target, aimNx, aimNy);
+      }
+    } else if (isDeer) {
+      if (cpu.deerSeerTimer <= 0) {
+        cpuDeerEngineer(cpu);
       }
     } else {
       if (dist < fighter.abilities[0].range * GAME_TILE) {
@@ -1739,6 +2014,9 @@ function cpuUseSpecial1x(cpu) {
       isEatingChair: false, eatTimer: 0, eatHealPool: 0,
       summonId: null, boiledOneActive: false, boiledOneTimer: 0,
       poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+      gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0,
+      deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
+      deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
       isSummon: true, summonOwner: cpu.id, summonType: 'zombie',
       summonSpeed: abil.zombieSpeed || 2.0,
       summonDamage: abil.zombieDamage || 100,
@@ -1748,6 +2026,222 @@ function cpuUseSpecial1x(cpu) {
     cpu.zombieIds.push(zombieId);
   }
   cpu.effects.push({ type: 'rejuvenate', timer: 2.0 });
+}
+
+function cpuCricketBatSwing(cpu, target, aimNx, aimNy) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[0];
+  cpu.cdM1 = abil.cooldown;
+  const range = (abil.range || 1.2) * GAME_TILE;
+  let baseDmg = abil.damage;
+  if (cpu.gearUpTimer > 0) baseDmg = Math.round(baseDmg * (fighter.abilities[2].damageBoost || 1.5));
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  if (cpu.intimidated > 0) baseDmg *= 0.5;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > range) continue;
+    const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+    if (dot < 0) continue;
+    dealDamage(cpu, t, baseDmg);
+  }
+  cpu.effects.push({ type: 'bat-swing', timer: 0.2, aimNx, aimNy });
+}
+
+function cpuCricketDrive(cpu, target, aimNx, aimNy) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[1];
+  const range = (abil.range || 1.5) * GAME_TILE;
+  let baseDmg = abil.damage;
+  if (cpu.gearUpTimer > 0) baseDmg = Math.round(baseDmg * (fighter.abilities[2].damageBoost || 1.5));
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  if (cpu.intimidated > 0) baseDmg *= 0.5;
+  // Start 1-second reflect window
+  cpu.driveReflectTimer = abil.reflectDuration || 1.0;
+  // Melee hit with 3s stun
+  const stunDur = abil.stunDuration || 3;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > range) continue;
+    const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+    if (dot < 0) continue;
+    dealDamage(cpu, t, baseDmg);
+    t.stunned = stunDur;
+    t.effects.push({ type: 'stun', timer: stunDur });
+  }
+  cpu.cdE = abil.cooldown || 20;
+  cpu.effects.push({ type: 'drive', timer: 0.3, aimNx, aimNy });
+}
+
+function cpuCricketWicket(cpu, target) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[3];
+  cpu.cdT = abil.cooldown;
+  // Remove old wickets
+  if (cpu.wicketIds && cpu.wicketIds.length > 0) {
+    for (let wi = gamePlayers.length - 1; wi >= 0; wi--) {
+      if (cpu.wicketIds.includes(gamePlayers[wi].id)) {
+        gamePlayers.splice(wi, 1);
+      }
+    }
+  }
+  cpu.wicketIds = [];
+  // Place two wickets in a line toward the target
+  const dx = target.x - cpu.x; const dy = target.y - cpu.y;
+  const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+  const nx = dx / dist; const ny = dy / dist;
+  const wicketDist = (abil.wicketDistance || 12) * GAME_TILE;
+  const midX = cpu.x + nx * wicketDist * 0.5;
+  const midY = cpu.y + ny * wicketDist * 0.5;
+  const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+  for (let w = 0; w < 2; w++) {
+    const offset = w === 0 ? -0.5 : 0.5;
+    const wx = midX + nx * wicketDist * offset;
+    const wy = midY + ny * wicketDist * offset;
+    const wicketId = 'wicket-' + cpu.id + '-' + Date.now() + '-' + w;
+    const wicket = {
+      id: wicketId, name: 'Wicket', color: '#c8a96e',
+      x: wx, y: wy,
+      hp: abil.wicketHp || 300, maxHp: abil.wicketHp || 300,
+      fighter: fighter, alive: true,
+      cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
+      totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+      supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+      noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+      specialJumping: false, specialAiming: false,
+      specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+      effects: [],
+      blindBuff: null, blindTimer: 0, chipChangeDmg: -1, chipChangeTimer: 0,
+      chairCharges: 0, isCraftingChair: false, craftTimer: 0,
+      isEatingChair: false, eatTimer: 0, eatHealPool: 0,
+      summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+      poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+      gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0,
+      deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
+      deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
+      isSummon: true, summonOwner: cpu.id, summonType: 'wicket',
+      summonSpeed: 0, summonDamage: 0,
+      summonStunDur: 0, summonAttackCD: 999, summonAttackTimer: 0,
+    };
+    gamePlayers.push(wicket);
+    cpu.wicketIds.push(wicketId);
+  }
+  cpu.effects.push({ type: 'summon', timer: 1.5 });
+}
+
+function cpuUseSpecialCricket(cpu, target) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[4];
+  cpu.specialUsed = true;
+  // CPU aims directly at target (instant, no aiming phase)
+  const landX = target.x;
+  const landY = target.y;
+  const hitRange = GAME_TILE * 1.2;
+  let hitSomeone = false;
+  let baseDmg = abil.damage;
+  if (cpu.gearUpTimer > 0) baseDmg = Math.round(baseDmg * (fighter.abilities[2].damageBoost || 1.5));
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    const dx = t.x - landX; const dy = t.y - landY;
+    if (Math.sqrt(dx * dx + dy * dy) < hitRange) {
+      dealDamage(cpu, t, baseDmg);
+      hitSomeone = true;
+    }
+  }
+  // Cricket stays in place — ball lands at target
+  if (!hitSomeone) {
+    cpu.stunned = abil.missStun || 3;
+    cpu.hp = Math.max(0, cpu.hp - (abil.missDamage || 200));
+    if (cpu.hp <= 0) { cpu.alive = false; cpu.hp = 0; cpu.effects.push({ type: 'death', timer: 2 }); }
+    cpu.effects.push({ type: 'stun', timer: abil.missStun || 3 });
+  }
+  cpu.effects.push({ type: 'land', timer: 0.5 });
+}
+
+function cpuDeerSpear(cpu, target, aimNx, aimNy) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[3];
+  cpu.cdT = abil.cooldown;
+  const range = (abil.range || 1.2) * GAME_TILE;
+  let baseDmg = abil.damage;
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  if (cpu.intimidated > 0) baseDmg *= 0.5;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    if (t.isSummon && t.summonOwner === cpu.id) continue;
+    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > range) continue;
+    const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+    if (dot < 0) continue;
+    if (t.isSummon) {
+      dealDamage(cpu, t, t.hp); // kills summons instantly
+    } else {
+      dealDamage(cpu, t, baseDmg);
+      t.stunned = Math.max(t.stunned, abil.stunDuration || 3);
+      t.effects.push({ type: 'stun', timer: abil.stunDuration || 3 });
+    }
+  }
+  cpu.effects.push({ type: 'deer-spear', timer: 0.2, aimNx, aimNy });
+}
+
+function cpuDeerEngineer(cpu) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[0];
+  cpu.cdM1 = abil.cooldown;
+  // One robot at a time, HP carries over
+  let carryHp = abil.robotHp || 500;
+  if (cpu.deerRobotId) {
+    const oldRobot = gamePlayers.find(p => p.id === cpu.deerRobotId);
+    if (oldRobot && oldRobot.alive) carryHp = oldRobot.hp;
+    const oldIdx = gamePlayers.findIndex(p => p.id === cpu.deerRobotId);
+    if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+  }
+  const robotId = 'robot-' + cpu.id + '-' + Date.now();
+  const robot = {
+    id: robotId, name: 'Deer Robot', color: '#708090',
+    x: cpu.x + (Math.random() - 0.5) * GAME_TILE * 2,
+    y: cpu.y + (Math.random() - 0.5) * GAME_TILE * 2,
+    hp: carryHp, maxHp: abil.robotHp || 500,
+    fighter: fighter, alive: true,
+    cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
+    totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+    supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+    noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+    specialJumping: false, specialAiming: false,
+    specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+    effects: [],
+    blindBuff: null, blindTimer: 0, chipChangeDmg: -1, chipChangeTimer: 0,
+    chairCharges: 0, isCraftingChair: false, craftTimer: 0,
+    isEatingChair: false, eatTimer: 0, eatHealPool: 0,
+    summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+    poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+    gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0,
+    deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
+    deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
+    isSummon: true, summonOwner: cpu.id, summonType: 'deer-robot',
+    summonSpeed: 0, summonDamage: abil.damage || 100,
+    summonStunDur: 0, summonAttackCD: abil.robotFireRate || 1, summonAttackTimer: 0,
+  };
+  gamePlayers.push(robot);
+  cpu.deerRobotId = robotId;
+  cpu.deerBuildSlowTimer = 1.0;
+  cpu.effects.push({ type: 'summon', timer: 1.5 });
+}
+
+function cpuUseSpecialDeer(cpu, target) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[4];
+  cpu.specialUsed = true;
+  // CPU places igloo directly on target
+  cpu.iglooX = target.x;
+  cpu.iglooY = target.y;
+  cpu.iglooTimer = abil.duration || 5;
+  cpu.effects.push({ type: 'igloo', timer: (abil.duration || 5) + 1 });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1762,6 +2256,8 @@ function useAbility(key) {
   const isPoker = fighter.id === 'poker';
   const isFilbus = fighter.id === 'filbus';
   const is1x = fighter.id === 'onexonexonex';
+  const isCricket = fighter.id === 'cricket';
+  const isDeer = fighter.id === 'deer';
 
   // Filbus: channeling interrupts
   if (isFilbus && (key !== 'E' && key !== 'R')) {
@@ -1863,6 +2359,70 @@ function useAbility(key) {
         target.effects.push({ type: 'poison', timer: abil.poisonDuration || 3 });
       }
       lp.effects.push({ type: 'slash-1x', timer: 0.2, aimNx, aimNy });
+    } else if (isCricket) {
+      // Cricket: Bat Swing — short-range melee
+      const range = (abil.range || 1.2) * GAME_TILE;
+      let baseDmg = abil.damage;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      if (lp.gearUpTimer > 0) baseDmg *= 1.5;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, baseDmg);
+      }
+      lp.effects.push({ type: 'bat-swing', timer: 0.25, aimNx, aimNy });
+    } else if (isDeer) {
+      // Deer M1: Deer's fast engineer — one robot at a time, HP carries over replacements
+      if (lp.deerSeerTimer > 0) return; // cannot use during Seer
+      let carryHp = abil.robotHp || 500;
+      if (lp.deerRobotId) {
+        const oldRobot = gamePlayers.find(p => p.id === lp.deerRobotId);
+        if (oldRobot && oldRobot.alive) carryHp = oldRobot.hp;
+        const oldIdx = gamePlayers.findIndex(p => p.id === lp.deerRobotId);
+        if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+      }
+      const robotId = 'robot-' + lp.id + '-' + Date.now();
+      const robot = {
+        id: robotId, name: 'Deer Robot', color: '#708090',
+        x: lp.x + (Math.random() - 0.5) * GAME_TILE * 2,
+        y: lp.y + (Math.random() - 0.5) * GAME_TILE * 2,
+        hp: carryHp, maxHp: abil.robotHp || 500,
+        fighter: fighter, alive: true,
+        cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
+        totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+        supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+        noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+        specialJumping: false, specialAiming: false,
+        specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+        effects: [],
+        blindBuff: null, blindTimer: 0, chipChangeDmg: -1, chipChangeTimer: 0,
+        chairCharges: 0, isCraftingChair: false, craftTimer: 0,
+        isEatingChair: false, eatTimer: 0, eatHealPool: 0,
+        summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+        poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+        gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0,
+        deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
+        deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
+        isSummon: true, summonOwner: lp.id, summonType: 'deer-robot',
+        summonSpeed: 0, summonDamage: abil.damage || 100,
+        summonStunDur: 0, summonAttackCD: abil.robotFireRate || 1, summonAttackTimer: 0,
+      };
+      gamePlayers.push(robot);
+      lp.deerRobotId = robotId;
+      lp.deerBuildSlowTimer = 1.0; // 1 second build slowness
+      lp.effects.push({ type: 'summon', timer: 1.5 });
     } else {
       // Fighter: Sword (original M1)
       const range = abil.range * GAME_TILE;
@@ -1962,6 +2522,53 @@ function useAbility(key) {
       }
       lp.effects.push({ type: 'entangle-cast', timer: 0.5 });
       combatLog.push({ text: '⚔ Entanglement!', timer: 2, color: '#00ff66' });
+    } else if (isCricket) {
+      // Cricket E: Drive — melee swing + 1-second projectile reflect window
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      const driveRange = (abil.range || 2.0) * GAME_TILE;
+      // Start reflect window
+      lp.driveReflectTimer = abil.reflectDuration || 1.0;
+      // Hit enemies in melee range — stun for 3s
+      let driveDmg = abil.damage || 350;
+      if (lp.supportBuff > 0) driveDmg *= 1.5;
+      if (lp.intimidated > 0) driveDmg *= 0.5;
+      if (lp.gearUpTimer > 0) driveDmg *= 1.5;
+      const stunDur = abil.stunDuration || 3;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > driveRange) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, driveDmg);
+        target.stunned = stunDur;
+        target.effects.push({ type: 'stun', timer: stunDur });
+      }
+      // Set default cooldown (reduced if a projectile is reflected during the window)
+      lp.cdE = abil.cooldown || 20;
+      lp.effects.push({ type: 'drive', timer: 0.3, aimNx, aimNy });
+      combatLog.push({ text: '🏏 Drive!', timer: 2, color: '#c8a96e' });
+    } else if (isDeer) {
+      // Deer E: Deer's Fear — 5s speed buff when moving away from closest enemy
+      if (lp.deerSeerTimer > 0) return; // cannot use during Seer
+      let closestDist = Infinity, closestP = null;
+      for (const t of gamePlayers) {
+        if (t.id === lp.id || !t.alive || t.isSummon) continue;
+        const d = Math.sqrt((t.x - lp.x) ** 2 + (t.y - lp.y) ** 2);
+        if (d < closestDist) { closestDist = d; closestP = t; }
+      }
+      lp.deerFearTimer = abil.duration || 5;
+      lp.deerFearTargetX = closestP ? closestP.x : lp.x;
+      lp.deerFearTargetY = closestP ? closestP.y : lp.y;
+      lp.effects.push({ type: 'deer-fear', timer: abil.duration || 5 });
+      combatLog.push({ text: '🦌 Fear! Run away faster!', timer: 3, color: '#8fbc8f' });
     } else {
       // Fighter: Support buff
       lp.supportBuff = abil.duration;
@@ -2078,6 +2685,18 @@ function useAbility(key) {
         socket.emit('projectile-spawn', { projectiles: spawnedWaves });
       }
       combatLog.push({ text: '☣ Mass Infection!', timer: 3, color: '#00ff66' });
+    } else if (isCricket) {
+      // Cricket R: Gear Up — damage reduction + damage boost + speed penalty for 10s
+      lp.gearUpTimer = abil.duration || 10;
+      lp.effects.push({ type: 'gear-up', timer: abil.duration || 10 });
+      combatLog.push({ text: '🪖 Geared Up! 80% DR, 50% DMG for ' + (abil.duration || 10) + 's', timer: 3, color: '#3498db' });
+      showPopup('🪖 GEAR UP!');
+    } else if (isDeer) {
+      // Deer R: Deer's Seer — dodge state for 5 seconds, cannot attack
+      lp.deerSeerTimer = abil.duration || 5;
+      lp.effects.push({ type: 'deer-seer', timer: abil.duration || 5 });
+      combatLog.push({ text: '🦌 Seer! Dodging all attacks!', timer: 3, color: '#dda0dd' });
+      showPopup('👁 SEER MODE!');
     } else {
       // Fighter: Power Swing
       const range = abil.range * GAME_TILE;
@@ -2179,6 +2798,9 @@ function useAbility(key) {
           isEatingChair: false, eatTimer: 0, eatHealPool: 0,
           summonId: null, boiledOneActive: false, boiledOneTimer: 0,
           poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+          gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0,
+          deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
+          deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
           // Summon-specific
           isSummon: true,
           summonOwner: lp.id,
@@ -2207,6 +2829,90 @@ function useAbility(key) {
       lp.effects.push({ type: 'unstable-eye', timer: abil.duration || 6 });
       combatLog.push({ text: '👁 Unstable Eye activated!', timer: 3, color: '#00ff66' });
       showPopup('👁 UNSTABLE EYE');
+    } else if (isCricket) {
+      // Cricket T: Wicket — place two wickets in a line
+      lp.cdT = abil.cooldown;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      // Remove old wickets if they exist
+      if (lp.wicketIds && lp.wicketIds.length > 0) {
+        for (const wid of lp.wicketIds) {
+          const idx = gamePlayers.findIndex(p => p.id === wid);
+          if (idx >= 0) gamePlayers.splice(idx, 1);
+        }
+      }
+      lp.wicketIds = [];
+      const dist1 = GAME_TILE * 1.5;
+      const dist2 = (abil.wicketDistance || 12) * GAME_TILE;
+      const wHp = abil.wicketHp || 300;
+      for (let wi = 0; wi < 2; wi++) {
+        const wDist = wi === 0 ? dist1 : dist2;
+        const wx = lp.x + aimNx * wDist;
+        const wy = lp.y + aimNy * wDist;
+        const wId = 'wicket-' + lp.id + '-' + wi + '-' + Date.now();
+        const wicket = {
+          id: wId, name: 'Wicket', color: '#c8a96e',
+          x: wx, y: wy,
+          hp: wHp, maxHp: wHp,
+          fighter: fighter, alive: true,
+          cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
+          totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+          supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+          noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+          specialJumping: false, specialAiming: false,
+          specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+          effects: [],
+          blindBuff: null, blindTimer: 0, chipChangeDmg: -1, chipChangeTimer: 0,
+          chairCharges: 0, isCraftingChair: false, craftTimer: 0,
+          isEatingChair: false, eatTimer: 0, eatHealPool: 0,
+          summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+          poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+          gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0, wicketOwner: lp.id,
+          deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
+          deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
+          isSummon: true, summonOwner: lp.id, summonType: 'wicket',
+          summonSpeed: 0, summonDamage: 0, summonStunDur: 0, summonAttackCD: 0, summonAttackTimer: 0,
+        };
+        gamePlayers.push(wicket);
+        lp.wicketIds.push(wId);
+      }
+      lp.effects.push({ type: 'wicket-place', timer: 0.5 });
+      combatLog.push({ text: '🏏 Wickets placed!', timer: 3, color: '#c8a96e' });
+    } else if (isDeer) {
+      // Deer T: Deer's Spear — antler stab, kills summons instantly, stuns 3s
+      if (lp.deerSeerTimer > 0) return; // cannot attack during Seer
+      lp.cdT = abil.cooldown;
+      const range = (abil.range || 1.2) * GAME_TILE;
+      let baseDmg = abil.damage;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        if (target.isSummon) {
+          dealDamage(lp, target, target.hp);
+        } else {
+          dealDamage(lp, target, baseDmg);
+          target.stunned = Math.max(target.stunned, abil.stunDuration || 3);
+          target.effects.push({ type: 'stun', timer: abil.stunDuration || 3 });
+        }
+      }
+      lp.effects.push({ type: 'deer-spear', timer: 0.25, aimNx, aimNy });
     } else {
       // Fighter: Intimidation
       lp.cdT = abil.cooldown;
@@ -2342,6 +3048,9 @@ function useAbility(key) {
           isEatingChair: false, eatTimer: 0, eatHealPool: 0,
           summonId: null, boiledOneActive: false, boiledOneTimer: 0,
           poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+          gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0,
+          deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
+          deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
           // Summon-specific
           isSummon: true, summonOwner: lp.id, summonType: 'zombie',
           summonSpeed: abil.zombieSpeed || 2.0,
@@ -2354,6 +3063,28 @@ function useAbility(key) {
       showPopup('🧟 REJUVENATE THE ROTTEN!');
       lp.effects.push({ type: 'rejuvenate', timer: 2.0 });
       combatLog.push({ text: '🧟 Summoned ' + zombieCount + ' zombies!', timer: 4, color: '#1a5c1a' });
+    } else if (isCricket) {
+      // Cricket SPACE: SIXER — same aim mechanic as Fighter's special jump
+      lp.specialUsed = true;
+      lp.specialJumping = false; // Cricket doesn't jump, they hit a ball
+      lp.specialAiming = true;
+      lp.specialAimX = lp.x;
+      lp.specialAimY = lp.y;
+      const aimTime = lp.fighter.abilities[4].aimTime || 5;
+      lp.specialAimTimer = aimTime;
+      lp.effects.push({ type: 'sixer-aim', timer: aimTime + 2 });
+      combatLog.push({ text: '🏏 SIXER! Aim the ball!', timer: 3, color: '#f5a623' });
+    } else if (isDeer) {
+      // Deer SPACE: Igloo — aim where to build it
+      lp.specialUsed = true;
+      lp.specialJumping = false;
+      lp.specialAiming = true;
+      lp.specialAimX = lp.x;
+      lp.specialAimY = lp.y;
+      const aimTime = lp.fighter.abilities[4].aimTime || 5;
+      lp.specialAimTimer = aimTime;
+      lp.effects.push({ type: 'igloo-aim', timer: aimTime + 2 });
+      combatLog.push({ text: '🦌 IGLOO! Aim where to build!', timer: 3, color: '#87ceeb' });
     } else {
       // Fighter: Special jump
       lp.specialJumping = true;
@@ -2370,14 +3101,27 @@ function useAbility(key) {
 function executeSpecialLanding() {
   const lp = localPlayer;
   const abil = lp.fighter.abilities[4]; // Special
+  const isCricketSpecial = lp.fighter.id === 'cricket';
+  const isDeerSpecial = lp.fighter.id === 'deer';
   lp.specialAiming = false;
   lp.specialJumping = false;
   lp.specialUsed = true;
-  lp.effects = lp.effects.filter((fx) => fx.type !== 'jump');
+  lp.effects = lp.effects.filter((fx) => fx.type !== 'jump' && fx.type !== 'sixer-aim' && fx.type !== 'igloo-aim');
 
-  // Check if hit any enemy within 1 tile of landing
   const landX = lp.specialAimX;
   const landY = lp.specialAimY;
+
+  if (isDeerSpecial) {
+    // Deer Igloo: place igloo at aimed location, damage over time handled in updateGame
+    lp.iglooX = landX;
+    lp.iglooY = landY;
+    lp.iglooTimer = abil.duration || 5;
+    lp.effects.push({ type: 'igloo', timer: (abil.duration || 5) + 1 });
+    combatLog.push({ text: '🏔 Igloo built!', timer: 3, color: '#87ceeb' });
+    return;
+  }
+
+  // Check if hit any enemy within 1 tile of landing
   const hitRange = GAME_TILE * 1.2;
   let hitSomeone = false;
 
@@ -2390,9 +3134,11 @@ function executeSpecialLanding() {
     }
   }
 
-  // Move player to landing position
-  lp.x = landX;
-  lp.y = landY;
+  // Move player to landing position (Cricket stays in place — ball lands there instead)
+  if (!isCricketSpecial) {
+    lp.x = landX;
+    lp.y = landY;
+  }
 
   if (!hitSomeone) {
     // Miss: stun self + self damage
@@ -2413,9 +3159,35 @@ function dealDamage(attacker, target, amount) {
   if (!target.alive) return;
   // Obelisk is invincible
   if (target.isSummon && target.summonType === 'obelisk') return;
+  // Deer Seer: dodge by jumping to the side
+  if (target.deerSeerTimer > 0 && target.fighter && target.fighter.id === 'deer') {
+    const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+    // Jump perpendicular to attacker direction
+    let jx = 0, jy = 0;
+    if (attacker && attacker.alive) {
+      const adx = target.x - attacker.x; const ady = target.y - attacker.y;
+      const ad = Math.sqrt(adx * adx + ady * ady) || 1;
+      // Perpendicular (randomly left or right)
+      const side = Math.random() < 0.5 ? 1 : -1;
+      jx = (-ady / ad) * side; jy = (adx / ad) * side;
+    } else {
+      const angle = Math.random() * Math.PI * 2;
+      jx = Math.cos(angle); jy = Math.sin(angle);
+    }
+    const jumpDist = GAME_TILE * 2;
+    for (let s = 10; s >= 1; s--) {
+      const tryX = target.x + jx * jumpDist * (s / 10);
+      const tryY = target.y + jy * jumpDist * (s / 10);
+      if (canMoveTo(tryX, tryY, r)) { target.x = tryX; target.y = tryY; break; }
+    }
+    target.effects.push({ type: 'deer-dodge', timer: 0.4 });
+    return; // damage fully dodged
+  }
   // Blinds modifier (Poker)
   if (target.blindBuff === 'small') amount = Math.round(amount * 0.5);
   else if (target.blindBuff === 'big') amount = Math.round(amount * 1.5);
+  // Cricket Gear Up: 80% damage reduction
+  if (target.gearUpTimer > 0) amount = Math.round(amount * 0.2);
   target.hp -= amount;
   // Reset heal state on damage
   target.noDamageTimer = 0;
@@ -2485,6 +3257,12 @@ function dealDamage(attacker, target, amount) {
       const owner = gamePlayers.find(p => p.id === target.summonOwner);
       if (owner && owner.summonId === target.id) {
         owner.summonId = null;
+      }
+      // Deer robot death: clear reference, apply 30s M1 cooldown
+      if (target.summonType === 'deer-robot' && owner) {
+        if (owner.deerRobotId === target.id) owner.deerRobotId = null;
+        owner.cdM1 = 30;
+        combatLog.push({ text: '🤖 Robot died!', timer: 3, color: '#ff4444' });
       }
     }
     // Owner death: clear summon reference (summon cleanup in updateSummons)
@@ -2805,6 +3583,44 @@ function renderGame() {
         gameCtx.beginPath();
         gameCtx.arc(sx + 3, sy - 2, 1.5, 0, Math.PI * 2);
         gameCtx.fill();
+      } else if (p.summonType === 'deer-robot') {
+        // Deer Robot: metallic gray square body
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#708090';
+        const rSize = radius * 0.8;
+        gameCtx.fillRect(sx - rSize, sy - rSize, rSize * 2, rSize * 2);
+        gameCtx.strokeStyle = '#4a5568';
+        gameCtx.lineWidth = 2;
+        gameCtx.strokeRect(sx - rSize, sy - rSize, rSize * 2, rSize * 2);
+        // Antenna
+        gameCtx.strokeStyle = '#a0aec0';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy - rSize);
+        gameCtx.lineTo(sx, sy - rSize - 5);
+        gameCtx.stroke();
+        gameCtx.fillStyle = '#f56565';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - rSize - 5, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Eyes
+        gameCtx.fillStyle = '#00ff66';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 3, sy - 2, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 3, sy - 2, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'wicket') {
+        // Wicket: three vertical stumps
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#c8a96e';
+        const stumpW = 2, stumpH = radius * 1.5;
+        for (let wi = -1; wi <= 1; wi++) {
+          gameCtx.fillRect(sx + wi * 4 - stumpW / 2, sy - stumpH / 2, stumpW, stumpH);
+        }
+        // Bails on top
+        gameCtx.fillStyle = '#a0522d';
+        gameCtx.fillRect(sx - 5, sy - stumpH / 2 - 2, 4, 2);
+        gameCtx.fillRect(sx + 1, sy - stumpH / 2 - 2, 4, 2);
       }
     } else if (p.fighter && p.fighter.id === 'onexonexonex' && !p.isSummon) {
       // ── 1X1X1X1: Fully custom dot — dark base with neon green glitches + red eye ──
@@ -2961,6 +3777,93 @@ function renderGame() {
         gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
         gameCtx.fill();
       }
+    } else if (p.fighter && p.fighter.id === 'cricket') {
+      // Cricket: bat icon on the dot
+      const batAngle = -Math.PI / 4;
+      const batLen = radius * 1.4;
+      const batBaseX = sx + Math.cos(batAngle) * radius * 0.3;
+      const batBaseY = sy + Math.sin(batAngle) * radius * 0.3;
+      const batTipX = batBaseX + Math.cos(batAngle) * batLen;
+      const batTipY = batBaseY + Math.sin(batAngle) * batLen;
+      // Handle
+      gameCtx.strokeStyle = '#8b4513';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.moveTo(batBaseX, batBaseY);
+      gameCtx.lineTo(batBaseX + Math.cos(batAngle) * batLen * 0.4, batBaseY + Math.sin(batAngle) * batLen * 0.4);
+      gameCtx.stroke();
+      // Blade (wider part)
+      gameCtx.strokeStyle = '#c8a96e';
+      gameCtx.lineWidth = 6;
+      gameCtx.beginPath();
+      gameCtx.moveTo(batBaseX + Math.cos(batAngle) * batLen * 0.4, batBaseY + Math.sin(batAngle) * batLen * 0.4);
+      gameCtx.lineTo(batTipX, batTipY);
+      gameCtx.stroke();
+      // Gear Up indicator
+      if (p.gearUpTimer > 0) {
+        gameCtx.fillStyle = 'rgba(52, 152, 219, 0.3)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Helmet shape on top
+        gameCtx.fillStyle = '#3498db';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius * 0.5, radius * 0.5, Math.PI, 0);
+        gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'deer') {
+      // Deer: dual antlers icon on the dot
+      const antlerLen = radius * 1.2;
+      // Left antler
+      gameCtx.strokeStyle = '#8b6914';
+      gameCtx.lineWidth = 2.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.2, sy - radius * 0.3);
+      gameCtx.lineTo(sx - radius * 0.5, sy - radius * 0.3 - antlerLen * 0.7);
+      gameCtx.lineTo(sx - radius * 0.8, sy - radius * 0.3 - antlerLen);
+      gameCtx.stroke();
+      // Left antler branch
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.5, sy - radius * 0.3 - antlerLen * 0.5);
+      gameCtx.lineTo(sx - radius * 0.9, sy - radius * 0.3 - antlerLen * 0.5);
+      gameCtx.stroke();
+      // Right antler
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius * 0.2, sy - radius * 0.3);
+      gameCtx.lineTo(sx + radius * 0.5, sy - radius * 0.3 - antlerLen * 0.7);
+      gameCtx.lineTo(sx + radius * 0.8, sy - radius * 0.3 - antlerLen);
+      gameCtx.stroke();
+      // Right antler branch
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius * 0.5, sy - radius * 0.3 - antlerLen * 0.5);
+      gameCtx.lineTo(sx + radius * 0.9, sy - radius * 0.3 - antlerLen * 0.5);
+      gameCtx.stroke();
+      // Seer glow
+      if (p.deerSeerTimer > 0) {
+        gameCtx.fillStyle = 'rgba(221, 160, 221, 0.25)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Fear speed lines
+      if (p.deerFearTimer > 0) {
+        gameCtx.strokeStyle = 'rgba(143, 188, 143, 0.6)';
+        gameCtx.lineWidth = 1.5;
+        for (let i = 0; i < 3; i++) {
+          const a = (i / 3) * Math.PI * 2 + Date.now() * 0.003;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + Math.cos(a) * (radius + 2), sy + Math.sin(a) * (radius + 2));
+          gameCtx.lineTo(sx + Math.cos(a) * (radius + 8), sy + Math.sin(a) * (radius + 8));
+          gameCtx.stroke();
+        }
+      }
+      // Robot indicator
+      if (p.deerRobotId) {
+        gameCtx.fillStyle = '#708090';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
     } else {
       // Fighter: Sword indicator on the dot
       const swordLen = radius * 1.3;
@@ -2986,6 +3889,22 @@ function renderGame() {
       gameCtx.stroke();
     }
     } // end normal player dot
+
+    // Neon red aura when special is ready (visible to all players)
+    if (!p.isSummon && p.specialUnlocked && !p.specialUsed && p.alive && !isDying) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+      gameCtx.strokeStyle = `rgba(255, 20, 20, ${0.5 + pulse * 0.4})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8 + pulse * 3, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Outer glow
+      gameCtx.strokeStyle = `rgba(255, 20, 20, ${0.15 + pulse * 0.15})`;
+      gameCtx.lineWidth = 6;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 12 + pulse * 3, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
 
     // Support buff ring (visible to all players)
     if (p.supportBuff > 0) {
@@ -3067,6 +3986,100 @@ function renderGame() {
       gameCtx.beginPath();
       gameCtx.arc(sx, sy, swLen, 0, Math.PI * 2);
       gameCtx.fill();
+    }
+
+    // Cricket bat swing effect
+    const batFx = p.effects.find((fx) => fx.type === 'bat-swing');
+    if (batFx) {
+      const swLen = GAME_TILE * 1.0;
+      gameCtx.strokeStyle = '#c8a96e';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(batFx.aimNy, batFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.6, aRad + 0.6);
+      gameCtx.stroke();
+    }
+
+    // Cricket Drive effect
+    const driveFx = p.effects.find((fx) => fx.type === 'drive');
+    if (driveFx) {
+      const swLen = GAME_TILE * 1.8;
+      gameCtx.strokeStyle = '#f5a623';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(driveFx.aimNy, driveFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.4, aRad + 0.4);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(245, 166, 35, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.4, aRad + 0.4);
+      gameCtx.lineTo(sx, sy);
+      gameCtx.fill();
+    }
+
+    // Cricket Gear Up ring
+    if (p.gearUpTimer > 0) {
+      gameCtx.strokeStyle = '#3498db';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#3498db';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('GEAR ' + Math.ceil(p.gearUpTimer) + 's', sx, sy + radius + 16);
+    }
+
+    // Deer Spear effect (antler stab arc)
+    const deerSpearFx = p.effects.find((fx) => fx.type === 'deer-spear');
+    if (deerSpearFx) {
+      const swLen = GAME_TILE * 1.0;
+      gameCtx.strokeStyle = '#8b6914';
+      gameCtx.lineWidth = 4;
+      const aRad = Math.atan2(deerSpearFx.aimNy, deerSpearFx.aimNx);
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + Math.cos(aRad) * swLen, sy + Math.sin(aRad) * swLen);
+      gameCtx.stroke();
+      // Prongs
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + Math.cos(aRad) * swLen * 0.7, sy + Math.sin(aRad) * swLen * 0.7);
+      gameCtx.lineTo(sx + Math.cos(aRad - 0.3) * swLen, sy + Math.sin(aRad - 0.3) * swLen);
+      gameCtx.moveTo(sx + Math.cos(aRad) * swLen * 0.7, sy + Math.sin(aRad) * swLen * 0.7);
+      gameCtx.lineTo(sx + Math.cos(aRad + 0.3) * swLen, sy + Math.sin(aRad + 0.3) * swLen);
+      gameCtx.stroke();
+    }
+
+    // Deer dodge flash
+    if (p.effects.some((fx) => fx.type === 'deer-dodge')) {
+      gameCtx.fillStyle = 'rgba(221, 160, 221, 0.4)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Deer Seer state indicator
+    if (p.deerSeerTimer > 0) {
+      gameCtx.strokeStyle = '#dda0dd';
+      gameCtx.lineWidth = 2;
+      gameCtx.setLineDash([4, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      gameCtx.fillStyle = '#dda0dd';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('SEER ' + Math.ceil(p.deerSeerTimer) + 's', sx, sy + radius + 16);
+    }
+
+    // Deer Fear indicator
+    if (p.deerFearTimer > 0) {
+      gameCtx.fillStyle = '#8fbc8f';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('FEAR ' + Math.ceil(p.deerFearTimer) + 's', sx, sy - radius - 8);
     }
 
     // Hit flash
@@ -3276,18 +4289,72 @@ function renderGame() {
 
     // Summon-specific rendering
     if (p.isSummon) {
-      // Tether line to owner
-      const owner2 = gamePlayers.find(pl => pl.id === p.summonOwner);
-      if (owner2 && owner2.alive) {
-        const ownSx = owner2.x - camX;
-        const ownSy = owner2.y - camY;
-        gameCtx.strokeStyle = 'rgba(212, 175, 55, 0.3)';
-        gameCtx.lineWidth = 1;
+      // Tether line to owner (but not for wickets — they have their own line)
+      if (p.summonType !== 'wicket') {
+        const owner2 = gamePlayers.find(pl => pl.id === p.summonOwner);
+        if (owner2 && owner2.alive) {
+          const ownSx = owner2.x - camX;
+          const ownSy = owner2.y - camY;
+          gameCtx.strokeStyle = 'rgba(212, 175, 55, 0.3)';
+          gameCtx.lineWidth = 1;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx, sy);
+          gameCtx.lineTo(ownSx, ownSy);
+          gameCtx.stroke();
+        }
+      }
+    }
+
+    // Cricket: draw wicket line between two wickets
+    if (p.wicketIds && p.wicketIds.length === 2) {
+      const w0 = gamePlayers.find(x => x.id === p.wicketIds[0]);
+      const w1 = gamePlayers.find(x => x.id === p.wicketIds[1]);
+      if (w0 && w0.alive && w1 && w1.alive) {
+        const w0x = w0.x - camX, w0y = w0.y - camY;
+        const w1x = w1.x - camX, w1y = w1.y - camY;
+        // Dashed green line between wickets
+        gameCtx.strokeStyle = 'rgba(200, 169, 110, 0.5)';
+        gameCtx.lineWidth = 3;
+        gameCtx.setLineDash([8, 6]);
         gameCtx.beginPath();
-        gameCtx.moveTo(sx, sy);
-        gameCtx.lineTo(ownSx, ownSy);
+        gameCtx.moveTo(w0x, w0y);
+        gameCtx.lineTo(w1x, w1y);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+      }
+    }
+
+    // Deer: draw igloo dome
+    if (p.iglooTimer > 0) {
+      const ix = p.iglooX - camX, iy = p.iglooY - camY;
+      const iglooAbil = p.fighter && p.fighter.abilities[4];
+      const ir = ((iglooAbil ? iglooAbil.radius : 2.5) || 2.5) * GAME_TILE;
+      // Ice dome fill
+      gameCtx.fillStyle = 'rgba(135, 206, 235, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(ix, iy, ir, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Ice dome border
+      gameCtx.strokeStyle = 'rgba(135, 206, 235, 0.6)';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(ix, iy, ir, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Ice blocks pattern
+      gameCtx.strokeStyle = 'rgba(200, 230, 255, 0.3)';
+      gameCtx.lineWidth = 1;
+      for (let a = 0; a < 6; a++) {
+        const angle = (a / 6) * Math.PI * 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(ix, iy);
+        gameCtx.lineTo(ix + Math.cos(angle) * ir, iy + Math.sin(angle) * ir);
         gameCtx.stroke();
       }
+      // Timer text
+      gameCtx.fillStyle = '#87ceeb';
+      gameCtx.font = 'bold 11px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('IGLOO ' + Math.ceil(p.iglooTimer) + 's', ix, iy - ir - 6);
     }
 
     gameCtx.restore();
@@ -3860,6 +4927,20 @@ function buildGameStateSnapshot() {
     chairCharges: p.chairCharges || 0,
     isCraftingChair: p.isCraftingChair || false,
     isEatingChair: p.isEatingChair || false,
+    // Cricket
+    gearUpTimer: p.gearUpTimer || 0,
+    driveReflectTimer: p.driveReflectTimer || 0,
+    wicketIds: p.wicketIds || [],
+    // Deer
+    deerFearTimer: p.deerFearTimer || 0,
+    deerFearTargetX: p.deerFearTargetX || 0,
+    deerFearTargetY: p.deerFearTargetY || 0,
+    deerSeerTimer: p.deerSeerTimer || 0,
+    deerRobotId: p.deerRobotId || null,
+    deerBuildSlowTimer: p.deerBuildSlowTimer || 0,
+    iglooX: p.iglooX || 0,
+    iglooY: p.iglooY || 0,
+    iglooTimer: p.iglooTimer || 0,
     // visual effects (include aimNx/aimNy for directional rendering)
     effects: (p.effects || []).map(fx => ({ type: fx.type, timer: fx.timer, aimNx: fx.aimNx, aimNy: fx.aimNy })),
     // fighter id so client knows what it is
@@ -3932,6 +5013,19 @@ function onRemoteGameState(snapshot) {
     p.chairCharges = sp.chairCharges || 0;
     p.isCraftingChair = sp.isCraftingChair || false;
     p.isEatingChair = sp.isEatingChair || false;
+    p.gearUpTimer = sp.gearUpTimer || 0;
+    p.driveReflectTimer = sp.driveReflectTimer || 0;
+    p.wicketIds = sp.wicketIds || [];
+    // Deer
+    p.deerFearTimer = sp.deerFearTimer || 0;
+    p.deerFearTargetX = sp.deerFearTargetX || 0;
+    p.deerFearTargetY = sp.deerFearTargetY || 0;
+    p.deerSeerTimer = sp.deerSeerTimer || 0;
+    p.deerRobotId = sp.deerRobotId || null;
+    p.deerBuildSlowTimer = sp.deerBuildSlowTimer || 0;
+    p.iglooX = sp.iglooX || 0;
+    p.iglooY = sp.iglooY || 0;
+    p.iglooTimer = sp.iglooTimer || 0;
     if (sp.effects) p.effects = sp.effects;
   }
 
@@ -3989,12 +5083,51 @@ function applyRemoteMovement(p, inp, dt) {
   if (dx !== 0 && dy !== 0) { const len = Math.sqrt(2); dx /= len; dy /= len; }
   let speed = p.fighter.speed;
   if (p.unstableEyeTimer > 0) speed *= 1.3;
+  // Cricket: Gear Up speed penalty
+  if (p.gearUpTimer > 0) speed *= (p.fighter.abilities[2].speedPenalty || 0.6);
+  // Deer: Fear speed boost (when moving away from feared enemy)
+  if (p.deerFearTimer > 0 && p.fighter.id === 'deer') {
+    const awayX = p.x - p.deerFearTargetX, awayY = p.y - p.deerFearTargetY;
+    const dot = dx * awayX + dy * awayY;
+    if (dot > 0) speed *= (p.fighter.abilities[1].speedBoost || 1.5);
+  }
+  // Deer: slower while building robot
+  if (p.deerBuildSlowTimer > 0 && p.fighter && p.fighter.id === 'deer') {
+    speed *= 0.6;
+  }
+  // Igloo slow: severely slow anyone inside an enemy igloo
+  for (const owner of gamePlayers) {
+    if (owner.iglooTimer > 0 && owner.id !== p.id) {
+      const iglooAbil = owner.fighter && owner.fighter.abilities[4];
+      const ir = ((iglooAbil ? iglooAbil.radius : 4.5) || 4.5) * GAME_TILE;
+      const dxI = p.x - owner.iglooX, dyI = p.y - owner.iglooY;
+      if (Math.sqrt(dxI * dxI + dyI * dyI) < ir) { speed *= 0.35; break; }
+    }
+  }
+  // Cricket: wicket line speed boost
+  if (p.wicketIds && p.wicketIds.length === 2) {
+    const w0 = gamePlayers.find(pl => pl.id === p.wicketIds[0]);
+    const w1 = gamePlayers.find(pl => pl.id === p.wicketIds[1]);
+    if (w0 && w0.alive && w1 && w1.alive) {
+      const lx = w1.x - w0.x, ly = w1.y - w0.y;
+      const ll = lx * lx + ly * ly;
+      if (ll > 0) {
+        const t = Math.max(0, Math.min(1, ((p.x - w0.x) * lx + (p.y - w0.y) * ly) / ll));
+        const cx = w0.x + t * lx, cy = w0.y + t * ly;
+        const dd = Math.sqrt((p.x - cx) ** 2 + (p.y - cy) ** 2);
+        if (dd < 1.5 * GAME_TILE) speed *= (p.fighter.abilities[3].speedBoost || 1.5);
+      }
+    }
+  }
   const move = speed * dt * 60;
   const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
   const newX = p.x + dx * move;
   const newY = p.y + dy * move;
+  const prevX = p.x, prevY = p.y;
   if (canMoveTo(newX, p.y, radius)) p.x = newX;
   if (canMoveTo(p.x, newY, radius)) p.y = newY;
+
+  // Igloo containment removed — igloo is now freely walkable (slow applied in speed calc)
 }
 
 // Apply an ability for a remote player (host-side) — swaps localPlayer context temporarily
