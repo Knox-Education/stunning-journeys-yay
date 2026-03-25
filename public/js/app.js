@@ -293,36 +293,41 @@ socket.on('game-starting', ({ mapIndex, players }) => {
   enterGame(mapIndex, players);
 });
 
-// Multiplayer movement sync
+// Multiplayer movement sync (legacy — skipped under host-authoritative)
 socket.on('player-moved', ({ id, x, y, hp }) => {
+  if (typeof isHostAuthority !== 'undefined' && typeof gameMode !== 'undefined' && gameMode === undefined) return;
   if (typeof onPlayerMove === 'function') {
     onPlayerMove(id, x, y, hp);
   }
 });
 
-// Multiplayer damage sync
+// Multiplayer damage sync (legacy — skipped under host-authoritative)
 socket.on('player-damaged', ({ targetId, amount }) => {
+  if (typeof isHostAuthority !== 'undefined' && typeof gameMode !== 'undefined' && gameMode === undefined) return;
   if (typeof onRemoteDamage === 'function') {
     onRemoteDamage(targetId, amount);
   }
 });
 
-// Multiplayer knockback sync
+// Multiplayer knockback sync (legacy — skipped under host-authoritative)
 socket.on('player-knockedback', ({ targetId, x, y }) => {
+  if (typeof isHostAuthority !== 'undefined' && typeof gameMode !== 'undefined' && gameMode === undefined) return;
   if (typeof onRemoteKnockback === 'function') {
     onRemoteKnockback(targetId, x, y);
   }
 });
 
-// Zone timer sync from host
+// Zone timer sync (legacy — skipped under host-authoritative; zone comes in snapshot)
 socket.on('zone-synced', ({ zoneInset: zi, zoneTimer: zt }) => {
+  if (typeof isHostAuthority !== 'undefined' && typeof gameMode !== 'undefined' && gameMode === undefined) return;
   if (typeof onZoneSync === 'function') {
     onZoneSync(zi, zt);
   }
 });
 
-// Player died
+// Player died (legacy — skipped under host-authoritative; death state comes in snapshot)
 socket.on('player-death', ({ playerId }) => {
+  if (typeof isHostAuthority !== 'undefined' && typeof gameMode !== 'undefined' && gameMode === undefined) return;
   if (typeof onRemoteDeath === 'function') {
     onRemoteDeath(playerId);
   }
@@ -335,22 +340,25 @@ socket.on('game-over', ({ winnerId, winnerName }) => {
   }
 });
 
-// Buff applied by another player
+// Buff applied by another player (legacy — skipped under host-authoritative)
 socket.on('player-buffed', ({ casterId, type, duration, cx, cy }) => {
+  if (typeof isHostAuthority !== 'undefined' && typeof gameMode !== 'undefined' && gameMode === undefined) return;
   if (typeof onRemoteBuff === 'function') {
     onRemoteBuff(casterId, type, duration, cx, cy);
   }
 });
 
-// Debuff applied by another player
+// Debuff applied by another player (legacy — skipped under host-authoritative)
 socket.on('player-debuffed', ({ casterId, targetId, type, duration }) => {
+  if (typeof isHostAuthority !== 'undefined' && typeof gameMode !== 'undefined' && gameMode === undefined) return;
   if (typeof onRemoteDebuff === 'function') {
     onRemoteDebuff(casterId, targetId, type, duration);
   }
 });
 
-// Projectile spawned by another player (visual only — only used in non-host-authoritative fallback)
+// Projectile spawned by another player (legacy — skipped under host-authoritative; projectiles come in snapshot)
 socket.on('projectile-spawned', ({ ownerId, projectiles: projs }) => {
+  if (typeof isHostAuthority !== 'undefined' && typeof gameMode !== 'undefined' && gameMode === undefined) return;
   if (typeof onRemoteProjectiles === 'function') {
     onRemoteProjectiles(ownerId, projs);
   }
@@ -584,6 +592,103 @@ function drawFighterIcon(canvas, fighterId, customSize) {
     ctx.moveTo(cx + 5, cy + 6); ctx.lineTo(cx + r * 0.7, cy + 4);
     ctx.moveTo(cx + 5, cy + 7); ctx.lineTo(cx + r * 0.7, cy + 8);
     ctx.stroke();
+  } else if (fighterId === 'napoleon') {
+    // Napoleon bicorne hat icon — detailed French general hat
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Hat body (bicorne) — dark navy/black felt
+    ctx.fillStyle = '#1a1a2e';
+    ctx.beginPath();
+    // Left upswept brim
+    ctx.moveTo(cx - r * 0.95, cy + r * 0.1);
+    ctx.quadraticCurveTo(cx - r * 0.7, cy - r * 0.7, cx - r * 0.15, cy - r * 0.45);
+    // Top crest
+    ctx.quadraticCurveTo(cx, cy - r * 0.55, cx + r * 0.15, cy - r * 0.45);
+    // Right upswept brim
+    ctx.quadraticCurveTo(cx + r * 0.7, cy - r * 0.7, cx + r * 0.95, cy + r * 0.1);
+    // Bottom band
+    ctx.quadraticCurveTo(cx + r * 0.5, cy + r * 0.35, cx, cy + r * 0.25);
+    ctx.quadraticCurveTo(cx - r * 0.5, cy + r * 0.35, cx - r * 0.95, cy + r * 0.1);
+    ctx.closePath();
+    ctx.fillStyle = '#111';
+    ctx.fill();
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // Gold trim band along bottom
+    ctx.strokeStyle = '#d4af37';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.85, cy + r * 0.12);
+    ctx.quadraticCurveTo(cx - r * 0.4, cy + r * 0.32, cx, cy + r * 0.22);
+    ctx.quadraticCurveTo(cx + r * 0.4, cy + r * 0.32, cx + r * 0.85, cy + r * 0.12);
+    ctx.stroke();
+    // Cockade (rosette) — red/white/blue concentric circles
+    const cockX = cx, cockY = cy + r * 0.05;
+    ctx.fillStyle = '#003399'; ctx.beginPath(); ctx.arc(cockX, cockY, r * 0.2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(cockX, cockY, r * 0.14, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#cc0000'; ctx.beginPath(); ctx.arc(cockX, cockY, r * 0.08, 0, Math.PI * 2); ctx.fill();
+    // Gold button at center of cockade
+    ctx.fillStyle = '#d4af37'; ctx.beginPath(); ctx.arc(cockX, cockY, r * 0.04, 0, Math.PI * 2); ctx.fill();
+    // Plume feather — white plume curving from left tip upward
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.6, cy - r * 0.5);
+    ctx.quadraticCurveTo(cx - r * 0.9, cy - r * 1.1, cx - r * 0.4, cy - r * 0.9);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.55, cy - r * 0.55);
+    ctx.quadraticCurveTo(cx - r * 0.85, cy - r * 0.95, cx - r * 0.35, cy - r * 0.85);
+    ctx.stroke();
+  } else if (fighterId === 'moderator') {
+    // Moderator: terminal/console icon
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Terminal window frame
+    const tw = r * 1.5, th = r * 1.2;
+    const tx = cx - tw / 2, ty = cy - th / 2;
+    // Window background
+    ctx.fillStyle = '#0c0c0c';
+    ctx.beginPath();
+    const cr = 3;
+    ctx.moveTo(tx + cr, ty); ctx.lineTo(tx + tw - cr, ty);
+    ctx.quadraticCurveTo(tx + tw, ty, tx + tw, ty + cr);
+    ctx.lineTo(tx + tw, ty + th - cr);
+    ctx.quadraticCurveTo(tx + tw, ty + th, tx + tw - cr, ty + th);
+    ctx.lineTo(tx + cr, ty + th);
+    ctx.quadraticCurveTo(tx, ty + th, tx, ty + th - cr);
+    ctx.lineTo(tx, ty + cr);
+    ctx.quadraticCurveTo(tx, ty, tx + cr, ty);
+    ctx.closePath();
+    ctx.fill();
+    // Title bar
+    ctx.fillStyle = '#2d2d2d';
+    ctx.fillRect(tx, ty, tw, th * 0.18);
+    // Title bar dots (red/yellow/green)
+    const dotY = ty + th * 0.09;
+    ctx.fillStyle = '#ff5f56'; ctx.beginPath(); ctx.arc(tx + 5, dotY, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffbd2e'; ctx.beginPath(); ctx.arc(tx + 11, dotY, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#27c93f'; ctx.beginPath(); ctx.arc(tx + 17, dotY, 2, 0, Math.PI * 2); ctx.fill();
+    // Terminal text: "> mod_" with cursor blink
+    ctx.fillStyle = '#00ff41';
+    ctx.font = 'bold ' + Math.max(7, r * 0.35) + 'px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('> mod_', tx + 4, cy + th * 0.12);
+    // Border glow
+    ctx.strokeStyle = '#00ff41'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(tx + cr, ty); ctx.lineTo(tx + tw - cr, ty);
+    ctx.quadraticCurveTo(tx + tw, ty, tx + tw, ty + cr);
+    ctx.lineTo(tx + tw, ty + th - cr);
+    ctx.quadraticCurveTo(tx + tw, ty + th, tx + tw - cr, ty + th);
+    ctx.lineTo(tx + cr, ty + th);
+    ctx.quadraticCurveTo(tx, ty + th, tx, ty + th - cr);
+    ctx.lineTo(tx, ty + cr);
+    ctx.quadraticCurveTo(tx, ty, tx + cr, ty);
+    ctx.closePath();
+    ctx.stroke();
   } else {
     // Fighter: sword icon
     ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
@@ -612,8 +717,9 @@ function populateFighterScreen() {
   _shuffledFighterIds.forEach((fid) => {
     const f = getFighter(fid);
     const locked = !isFighterUnlocked(fid);
+    const mpOnly = f.multiplayerOnly && (flowTarget === 'fight' || flowTarget === 'training');
     const btn = document.createElement('button');
-    btn.className = 'fighter-select-btn' + (fid === selectedFighterId ? ' active' : '') + (locked ? ' locked' : '');
+    btn.className = 'fighter-select-btn' + (fid === selectedFighterId ? ' active' : '') + ((locked || mpOnly) ? ' locked' : '');
 
     // Draw icon
     const canvas = document.createElement('canvas');
@@ -622,11 +728,11 @@ function populateFighterScreen() {
 
     // Name label
     const label = document.createElement('span');
-    label.textContent = locked ? '???' : f.name;
+    label.textContent = locked ? '???' : mpOnly ? f.name + ' (MP)' : f.name;
     btn.appendChild(label);
 
     btn.addEventListener('click', () => {
-      if (locked) return;
+      if (locked || mpOnly) return;
       selectedFighterId = fid;
       if (fighterCardShown === fid) {
         // Clicking same fighter again hides stats
@@ -794,6 +900,8 @@ const _PROGRESS_KEYS = [
   'fighterSpecialAch', 'pokerNoSpecialAch', 'filbusBoiledKillAch',
   'onexKilledNoliMP', 'onexKilledCatSP', 'gearDmgAbsorbed',
   'deerWaterKill', 'noliVoidRushAch', 'catKittenAch',
+  // Napoleon unlock
+  'napoleonM1Kills', 'napoleonSummonWins',
 ];
 
 function _defaultProgress() {
@@ -991,6 +1099,11 @@ function checkAndUnlockAchievements() {
     _resetCategoriesFor('catAch');
     changed = true;
   }
+  // napoleonAchUnlock: 2 summon wins + 5 M1 kills
+  if (!completedAchievements.has('napoleonAchUnlock') && achProgress.napoleonSummonWins >= 2 && achProgress.napoleonM1Kills >= 5) {
+    completedAchievements.add('napoleonAchUnlock');
+    changed = true;
+  }
 
   // ── Round 2 per-fighter achievements ──
   if (!completedAchievements.has('fighterAch') && achProgress.fighterSpecialAch >= 1) {
@@ -1031,6 +1144,11 @@ function checkAndUnlockAchievements() {
   if (!completedAchievements.has('catAch2') && isAchievementAvailable('catAch2') && achProgress.catKittenAch >= 1) {
     completedAchievements.add('catAch2');
     newlyCompleted.push('catAch2');
+    changed = true;
+  }
+  if (!completedAchievements.has('moderatorAch') && isAchievementAvailable('moderatorAch') && achProgress.modWins >= 1) {
+    completedAchievements.add('moderatorAch');
+    newlyCompleted.push('moderatorAch');
     changed = true;
   }
 
@@ -1148,6 +1266,26 @@ function trackNoliVoidRushAch() {
 function trackCatKittenAch() {
   if (!isAchievementAvailable('catAch2')) return;
   achProgress.catKittenAch = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+// Napoleon unlock tracking
+function trackNapoleonM1Kill() {
+  achProgress.napoleonM1Kills = (achProgress.napoleonM1Kills || 0) + 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackNapoleonSummonWin() {
+  achProgress.napoleonSummonWins = (achProgress.napoleonSummonWins || 0) + 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+// Moderator achievement tracking
+function trackModWin() {
+  achProgress.modWins = (achProgress.modWins || 0) + 1;
   checkAndUnlockAchievements();
   saveAchievements();
 }

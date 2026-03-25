@@ -52,6 +52,9 @@ let deathOverlayTimer = 0; // seconds since local player died — used to fade o
 // Training dummy respawn timer
 let dummyRespawnTimer = 0;
 
+// Apple tree state
+let appleTree = null; // {col, row, hp, maxHp, alive, regrowTimer, appleTimer, apples:[{col,row}]}
+
 // Game mode: 'training' | 'fight' | undefined (multiplayer)
 let gameMode = undefined;
 
@@ -64,6 +67,8 @@ let _noliVoidRushKillsThisGame = 0;
 let _catKittenKillsThisGame = 0;
 let _gearDmgAbsorbedRemainder = 0; // fractional damage not yet added to progress
 let _filbusBoiledKillsThisGame = 0;
+let _hadSummonKillThisGame = false;
+let _lastDealDamageWasM1 = false;
 
 // CPU names
 const CPU_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Ghost', 'Havoc'];
@@ -84,6 +89,8 @@ function startGame(mapIndex, players, myId, mode) {
   _catKittenKillsThisGame = 0;
   _gearDmgAbsorbedRemainder = 0;
   _filbusBoiledKillsThisGame = 0;
+  _hadSummonKillThisGame = false;
+  _lastDealDamageWasM1 = false;
   window._spikeEntities = [];
 
   // Find walkable spawn positions
@@ -231,6 +238,61 @@ function startGame(mapIndex, players, myId, mode) {
     }
   }
 
+  // ── Apple Tree: spawn a 2×2 tree in the center of the map ──
+  {
+    // Find center tiles (pre-scaled map)
+    let treeCol = Math.floor(gameMap.cols / 2) - 1;
+    let treeRow = Math.floor(gameMap.rows / 2) - 1;
+    // River Crossing: place on bridge (walkable gap in the water)
+    if (gameMap.name === 'River Crossing') {
+      // Find the bridge: look for ground tiles in the water column area around center
+      for (let r = 0; r < gameMap.rows; r++) {
+        for (let c = 0; c < gameMap.cols; c++) {
+          const t = gameMap.tiles[r][c];
+          if (t === TILE.GROUND || t === TILE.GRASS) {
+            // Check if this is near the horizontal center and in the bridge area
+            if (Math.abs(c - gameMap.cols / 2) < 3 && Math.abs(r - gameMap.rows / 2) < 3) {
+              // Verify 2x2 area is walkable
+              if (r + 1 < gameMap.rows && c + 1 < gameMap.cols) {
+                const t01 = gameMap.tiles[r][c + 1];
+                const t10 = gameMap.tiles[r + 1][c];
+                const t11 = gameMap.tiles[r + 1][c + 1];
+                if ((t01 === TILE.GROUND || t01 === TILE.GRASS) &&
+                    (t10 === TILE.GROUND || t10 === TILE.GRASS) &&
+                    (t11 === TILE.GROUND || t11 === TILE.GRASS)) {
+                  treeCol = c;
+                  treeRow = r;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        if (treeCol !== Math.floor(gameMap.cols / 2) - 1) break;
+      }
+    }
+    // Ensure 2x2 area is within bounds
+    treeCol = Math.max(0, Math.min(treeCol, gameMap.cols - 2));
+    treeRow = Math.max(0, Math.min(treeRow, gameMap.rows - 2));
+    // Replace tiles under the tree with GROUND (remove any obstacles)
+    for (let dr = 0; dr < 2; dr++) {
+      for (let dc = 0; dc < 2; dc++) {
+        const t = gameMap.tiles[treeRow + dr][treeCol + dc];
+        if (t === TILE.ROCK || t === TILE.WATER) {
+          gameMap.tiles[treeRow + dr][treeCol + dc] = TILE.GROUND;
+        }
+      }
+    }
+    appleTree = {
+      col: treeCol, row: treeRow,
+      hp: 2000, maxHp: 2000,
+      alive: true,
+      regrowTimer: 0,
+      appleTimer: 15,   // seconds until next apple
+      apples: [],        // [{col, row}]
+    };
+  }
+
   // Resize canvas
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
@@ -258,6 +320,8 @@ function createPlayerState(p, spawn, fighter) {
     color: p.color,
     x: (spawn.c + 0.5) * GAME_TILE,
     y: (spawn.r + 0.5) * GAME_TILE,
+    spawnX: (spawn.c + 0.5) * GAME_TILE,
+    spawnY: (spawn.r + 0.5) * GAME_TILE,
     // Combat
     hp: fighter.hp,
     maxHp: fighter.hp,
@@ -365,6 +429,19 @@ function createPlayerState(p, spawn, fighter) {
     backroomsTimer: 0,           // seconds remaining (max 30s, auto-escape)
     hasAlternate: false,         // is an alternate copy hunting this player?
     alternateId: null,           // id of alternate entity
+    // Napoleon-specific state
+    napoleonCavalry: false,      // currently mounted (Cavalry toggle)
+    napoleonCannonId: null,      // id of cannon summon
+    napoleonWallId: null,        // id of defensive wall entity
+    napoleonInfantryIds: [],     // ids of infantry summons
+    // Moderator-specific state
+    modBugFixedTargets: [],      // [{targetId, abilityIndex}] — disabled moves
+    modServerResetUses: 0,       // uses of Server Reset (max 3)
+    modFirewallTimer: 0,         // seconds remaining of Firewall
+    modServerUpdateTimer: 0,     // buff timer for Server Update
+    modScaredId: null,           // id of Scare target (for Fear effect)
+    modFearTimer: 0,             // Fear duration on this player
+    modFearSourceId: null,       // who scared this player
   };
 }
 
@@ -459,31 +536,39 @@ function gameLoop(now) {
   checkWinCondition();
 
   if (typeof socket !== 'undefined' && socket.emit && localPlayer) {
-    // ALL multiplayer clients broadcast own position every 20ms for movement sync
-    if (gameMode === undefined) {
+    // NON-HOST clients broadcast own position every 20ms for host to use
+    // Host doesn't need to broadcast position (it's in the snapshot)
+    if (gameMode === undefined && !isHostAuthority) {
       if (!gameLoop._lastPosSend || now - gameLoop._lastPosSend > 20) {
         gameLoop._lastPosSend = now;
         socket.emit('player-position', { x: localPlayer.x, y: localPlayer.y });
       }
     }
     if (isHostAuthority) {
-      // HOST: broadcast full game state snapshot every 20ms
-      if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 20) {
+      // HOST: broadcast full game state snapshot every ~33ms (30 Hz)
+      if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 33) {
         gameLoop._lastBroadcast = now;
         const snapshot = buildGameStateSnapshot();
         socket.emit('game-state', snapshot);
       }
     } else if (gameMode === undefined) {
-      // NON-HOST: send ability inputs every frame (movement now handled by player-position relay)
-      // Send world-space aim coordinates so host canvas size doesn't matter
-      const cw = gameCanvas.width, ch = gameCanvas.height;
-      const camX = localPlayer.x - cw / 2, camY = localPlayer.y - ch / 2;
-      const input = {
-        aimWorldX: mouseX + camX, aimWorldY: mouseY + camY, mouseDown,
-        pendingAbilities: localPlayer._pendingAbilities || [],
-      };
-      if (localPlayer._pendingAbilities) localPlayer._pendingAbilities = [];
-      socket.emit('player-input', input);
+      // NON-HOST: send ability inputs throttled to ~50 Hz (every 20ms)
+      if (!gameLoop._lastInputSend || now - gameLoop._lastInputSend > 20) {
+        gameLoop._lastInputSend = now;
+        // Send world-space aim coordinates so host canvas size doesn't matter
+        const cw = gameCanvas.width, ch = gameCanvas.height;
+        const camX = localPlayer.x - cw / 2, camY = localPlayer.y - ch / 2;
+        const pending = localPlayer._pendingAbilities || [];
+        // Only send if there's meaningful input (mouse state changed or abilities pending)
+        const input = {
+          aimWorldX: mouseX + camX, aimWorldY: mouseY + camY, mouseDown,
+          pendingAbilities: pending,
+        };
+        localPlayer._pendingAbilities = [];
+        socket.emit('player-input', input);
+      } else {
+        // Between sends, still accumulate abilities but don't emit yet
+      }
     }
   }
 
@@ -512,7 +597,8 @@ function updateGame(dt) {
     }
     // Local movement prediction so our own character feels responsive
     if (localPlayer.alive && !localPlayer.specialAiming && localPlayer.stunned <= 0
-        && !localPlayer.isCraftingChair && !localPlayer.isEatingChair) {
+        && !localPlayer.isCraftingChair && !localPlayer.isEatingChair
+        && !localPlayer.noliVoidRushActive && !localPlayer.noliVoidStarAiming) {
       updateMovement(dt);
     }
     // Tick effect timers locally so visual effects render smoothly (host still sends authoritative effects)
@@ -780,6 +866,11 @@ function updateGame(dt) {
     if (p.catAttackBuff > 0) p.catAttackBuff = Math.max(0, p.catAttackBuff - wallDt);
     if (p.catSeerTimer > 0) p.catSeerTimer = Math.max(0, p.catSeerTimer - wallDt);
     if (p.catNopeTimer > 0) p.catNopeTimer = Math.max(0, p.catNopeTimer - wallDt);
+
+    // Tick Moderator timers
+    if (p.modFirewallTimer > 0) p.modFirewallTimer = Math.max(0, p.modFirewallTimer - wallDt);
+    if (p.modServerUpdateTimer > 0) p.modServerUpdateTimer = Math.max(0, p.modServerUpdateTimer - wallDt);
+    if (p.modFearTimer > 0) p.modFearTimer = Math.max(0, p.modFearTimer - wallDt);
 
     // Tick Noli Void Rush dash
     if (p.noliVoidRushActive && p.alive) {
@@ -1162,6 +1253,79 @@ function updateGame(dt) {
       gamePlayers.push(dummy);
     }
   }
+
+  // ── Apple Tree update ──────────────────────────────────────
+  if (appleTree) {
+    if (appleTree.alive) {
+      // Spawn apples every 15 seconds (max 3)
+      appleTree.appleTimer -= wallDt;
+      if (appleTree.appleTimer <= 0 && appleTree.apples.length < 3) {
+        appleTree.appleTimer = 15;
+        // Find adjacent walkable tiles (around the 2x2 tree footprint)
+        const adj = [];
+        for (let dr = -1; dr <= 2; dr++) {
+          for (let dc = -1; dc <= 2; dc++) {
+            // Skip the tree's own tiles
+            if (dr >= 0 && dr <= 1 && dc >= 0 && dc <= 1) continue;
+            const ar = appleTree.row + dr;
+            const ac = appleTree.col + dc;
+            if (ar < 0 || ar >= gameMap.rows || ac < 0 || ac >= gameMap.cols) continue;
+            const t = gameMap.tiles[ar][ac];
+            if (t === TILE.GROUND || t === TILE.GRASS) {
+              // Don't place on existing apple
+              if (!appleTree.apples.some(a => a.col === ac && a.row === ar)) {
+                adj.push({ col: ac, row: ar });
+              }
+            }
+          }
+        }
+        if (adj.length > 0) {
+          const pick = adj[Math.floor(Math.random() * adj.length)];
+          appleTree.apples.push({ col: pick.col, row: pick.row });
+        }
+      }
+      // Reset timer if max apples reached
+      if (appleTree.apples.length >= 3) appleTree.appleTimer = 15;
+    } else {
+      // Tree is dead — regrow timer
+      appleTree.regrowTimer -= wallDt;
+      if (appleTree.regrowTimer <= 0) {
+        appleTree.alive = true;
+        appleTree.hp = appleTree.maxHp;
+        appleTree.regrowTimer = 0;
+        appleTree.appleTimer = 15;
+        // Restore tree tiles to GROUND (in case they were changed)
+        for (let dr = 0; dr < 2; dr++) {
+          for (let dc = 0; dc < 2; dc++) {
+            gameMap.tiles[appleTree.row + dr][appleTree.col + dc] = TILE.GROUND;
+          }
+        }
+      }
+    }
+
+    // Apple pickup: any alive player touching an apple eats it and heals 300
+    for (let ai = appleTree.apples.length - 1; ai >= 0; ai--) {
+      const apple = appleTree.apples[ai];
+      const appleX = (apple.col + 0.5) * GAME_TILE;
+      const appleY = (apple.row + 0.5) * GAME_TILE;
+      for (const p of gamePlayers) {
+        if (!p.alive || p.isSummon) continue;
+        const dx = p.x - appleX;
+        const dy = p.y - appleY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < GAME_TILE * 0.6) {
+          // Eat apple
+          p.hp = Math.min(p.maxHp, p.hp + 300);
+          p.effects.push({ type: 'apple-heal', timer: 1.0 });
+          if (p.id === localPlayerId) {
+            combatLog.push({ text: '🍎 Ate an apple! +300 HP', timer: 3, color: '#2ecc71' });
+          }
+          appleTree.apples.splice(ai, 1);
+          break;
+        }
+      }
+    }
+  }
 }
 
 function tickCooldowns(p, dt) {
@@ -1193,6 +1357,20 @@ function updateMovement(dt) {
   let speed = localPlayer.fighter.speed;
   // Unstable Eye: 30% speed boost
   if (localPlayer.unstableEyeTimer > 0) speed *= 1.3;
+  // Napoleon Cavalry: 2.5x speed boost
+  if (localPlayer.napoleonCavalry) speed *= 2.5;
+  // Moderator Server Update: 50% speed buff
+  if (localPlayer.modServerUpdateTimer > 0) speed *= 1.5;
+  // Moderator Fear: 2x speed when running away from source
+  if (localPlayer.modFearTimer > 0 && localPlayer.modFearSourceId) {
+    const src = gamePlayers.find(p => p.id === localPlayer.modFearSourceId);
+    if (src && src.alive) {
+      const fdx = localPlayer.x - src.x; const fdy = localPlayer.y - src.y;
+      const mdx = (keysDown.d || keysDown.ArrowRight ? 1 : 0) - (keysDown.a || keysDown.ArrowLeft ? 1 : 0);
+      const mdy = (keysDown.s || keysDown.ArrowDown ? 1 : 0) - (keysDown.w || keysDown.ArrowUp ? 1 : 0);
+      if (fdx * mdx + fdy * mdy > 0) speed *= 2.0; // running away
+    }
+  }
   // Cricket Gear Up: slower speed
   if (localPlayer.gearUpTimer > 0) speed *= 0.6;
   // Buff slow debuff
@@ -1301,6 +1479,34 @@ function canMoveTo(px, py, radius) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// SAFE RANDOM TELEPORT — find a random walkable position
+// ═══════════════════════════════════════════════════════════════
+function getRandomSafePosition() {
+  const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
+  const candidates = [];
+  for (let r = 1; r < gameMap.rows - 1; r++) {
+    for (let c = 1; c < gameMap.cols - 1; c++) {
+      const t = gameMap.tiles[r][c];
+      if (t === TILE.GROUND || t === TILE.GRASS) {
+        candidates.push({ r, c });
+      }
+    }
+  }
+  // Shuffle and find one that passes canMoveTo
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  for (const pt of candidates) {
+    const px = (pt.c + 0.5) * GAME_TILE;
+    const py = (pt.r + 0.5) * GAME_TILE;
+    if (canMoveTo(px, py, radius)) return { x: px, y: py };
+  }
+  // Fallback: center of map
+  return { x: (gameMap.cols / 2) * GAME_TILE, y: (gameMap.rows / 2) * GAME_TILE };
+}
+
+// ═══════════════════════════════════════════════════════════════
 // PROJECTILES
 // ═══════════════════════════════════════════════════════════════
 function updateProjectiles(dt) {
@@ -1322,7 +1528,30 @@ function updateProjectiles(dt) {
     }
     const tile = gameMap.tiles[row][col];
     if (tile === TILE.ROCK) {
+      // Check if this rock is actually a dead apple tree stump — projectile still stops
       projectiles.splice(i, 1); continue;
+    }
+
+    // Projectile hits apple tree (alive tree blocks projectiles and takes damage)
+    if (appleTree && appleTree.alive) {
+      if (col >= appleTree.col && col <= appleTree.col + 1 &&
+          row >= appleTree.row && row <= appleTree.row + 1) {
+        const dmg = p.damage || 100;
+        appleTree.hp -= dmg;
+        if (appleTree.hp <= 0) {
+          appleTree.hp = 0;
+          appleTree.alive = false;
+          appleTree.regrowTimer = 30;
+          appleTree.apples = [];
+          for (let dr = 0; dr < 2; dr++) {
+            for (let dc = 0; dc < 2; dc++) {
+              gameMap.tiles[appleTree.row + dr][appleTree.col + dc] = TILE.ROCK;
+            }
+          }
+          combatLog.push({ text: '🪓 Apple tree destroyed!', timer: 4, color: '#e67e22' });
+        }
+        projectiles.splice(i, 1); continue;
+      }
     }
 
     // Hit detection: host resolves ALL projectile hits; otherwise only local/CPU projectiles
@@ -1362,7 +1591,7 @@ function updateProjectiles(dt) {
             target.cdE = driveAbil.hitProjectileCD || 5;
             break;
           }
-          dealDamage(owner, target, p.damage, !!p.fromSummon);
+          dealDamage(owner, target, Math.round(p.damage), !!p.fromSummon);
           // Log gamble card hits
           if (p.type === 'card') {
             combatLog.push({ text: '🎲 Gamble hit ' + target.name + ' for ' + p.damage + '!', timer: 4, color: '#f5a623' });
@@ -1386,7 +1615,7 @@ function updateProjectiles(dt) {
                 if (canMoveTo(tryX, tryY, r)) { target.x = tryX; target.y = tryY; break; }
               }
             }
-            if (typeof socket !== 'undefined' && socket.emit) {
+            if (typeof socket !== 'undefined' && socket.emit && !isHostAuthority) {
               socket.emit('player-knockback', { targetId: target.id, x: target.x, y: target.y });
               socket.emit('player-debuff', { targetId: target.id, type: 'stun', duration: stunDur });
             }
@@ -1778,6 +2007,75 @@ function updateSummons(dt) {
       // Queen Bee Unicorn: stays still, M1 block is passive
     } else if (s.summonType === 'seductive-unicorn') {
       // Seductive Unicorn: stays still, invulnerability is passive
+    } else if (s.summonType === 'napoleon-cannon') {
+      // Napoleon Cannon: stationary, fires cannonballs at closest enemy
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      if (bestTarget && s.summonAttackTimer <= 0) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const speed = (s.summonProjectileSpeed || 30) * GAME_TILE / 10;
+        const nx = dx / dist; const ny = dy / dist;
+        projectiles.push({
+          x: s.x, y: s.y,
+          vx: nx * speed, vy: ny * speed,
+          ownerId: owner ? owner.id : s.id,
+          damage: s.summonDamage || 700,
+          timer: 999,
+          type: 'cannonball',
+          color: '#333',
+          fromSummon: true,
+          napoleonOwner: owner ? owner.id : s.id,
+        });
+        s.summonAttackTimer = s.summonAttackCD || 5;
+        s.effects.push({ type: 'cannon-fire', timer: 0.5 });
+        combatLog.push({ text: '💣 Cannon fired!', timer: 2, color: '#555' });
+      }
+    } else if (s.summonType === 'napoleon-infantry') {
+      // Napoleon Infantry: chase nearest enemy, fire ranged bullets
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 2.0) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        // Move toward target but stop at firing range
+        const fireRange = 6 * GAME_TILE;
+        if (dist > fireRange) {
+          const newX = s.x + nx * moveSpeed;
+          const newY = s.y + ny * moveSpeed;
+          if (canMoveTo(newX, s.y, radius)) s.x = newX;
+          if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        }
+        // Fire ranged bullet when in range
+        if (s.summonAttackTimer <= 0) {
+          const speed = (s.summonProjectileSpeed || 38) * GAME_TILE / 10;
+          projectiles.push({
+            x: s.x, y: s.y,
+            vx: nx * speed, vy: ny * speed,
+            ownerId: owner ? owner.id : s.id,
+            damage: s.summonDamage || 100,
+            timer: s.summonProjectileRange || 0.8,
+            type: 'infantry-bullet',
+            color: '#2c3e50',
+            fromSummon: true,
+            napoleonOwner: owner ? owner.id : s.id,
+          });
+          s.summonAttackTimer = s.summonAttackCD || 1;
+          s.effects.push({ type: 'infantry-fire', timer: 0.2 });
+        }
+      }
+    } else if (s.summonType === 'napoleon-wall') {
+      // Napoleon Wall: stationary, invincible, 30s duration — half damage for anyone inside (handled in dealDamage)
+      if (s.wallTimer !== undefined) {
+        s.wallTimer -= dt;
+        if (s.wallTimer <= 0) {
+          s.alive = false;
+          s.hp = 0;
+          s.effects.push({ type: 'death', timer: 2 });
+          if (owner) owner.napoleonWallId = null;
+          continue;
+        }
+      }
     }
 
     // Clean up summon if owner died
@@ -1794,6 +2092,12 @@ function updateSummons(dt) {
       }
       if (s.summonType === 'johndoe' && owner.johnDoeId === s.id) owner.johnDoeId = null;
       if ((s.summonType === 'destructive-unicorn' || s.summonType === 'queenbee-unicorn' || s.summonType === 'seductive-unicorn') && owner.catUnicornId === s.id) owner.catUnicornId = null;
+      if (s.summonType === 'napoleon-cannon' && owner.napoleonCannonId === s.id) owner.napoleonCannonId = null;
+      if (s.summonType === 'napoleon-wall' && owner.napoleonWallId === s.id) owner.napoleonWallId = null;
+      if (s.summonType === 'napoleon-infantry' && owner.napoleonInfantryIds) {
+        const idx = owner.napoleonInfantryIds.indexOf(s.id);
+        if (idx >= 0) owner.napoleonInfantryIds.splice(idx, 1);
+      }
     }
   }
 }
@@ -1946,6 +2250,8 @@ function cpuMove(cpu, dt, params) {
   let speed = cpu.fighter.speed;
   // Unstable Eye: 30% speed boost
   if (cpu.unstableEyeTimer > 0) speed *= 1.3;
+  // Napoleon Cavalry: 2.5x speed boost
+  if (cpu.napoleonCavalry) speed *= 2.5;
   // Gear Up: speed penalty
   if (cpu.gearUpTimer > 0) speed *= (cpu.fighter.abilities[2].speedPenalty || 0.6);
   // Buff slow debuff
@@ -1954,6 +2260,20 @@ function cpuMove(cpu, dt, params) {
   if (cpu.deerFearTimer > 0 && ai.retreating) speed *= 1.5;
   // Deer: slower while building robot
   if (cpu.deerBuildSlowTimer > 0 && cpu.fighter && cpu.fighter.id === 'deer') speed *= 0.6;
+  // Moderator Fear: speed boost when running away from fear source
+  if (cpu.modFearTimer > 0) {
+    const src = gamePlayers.find(p => p.id === cpu.modFearSourceId);
+    if (src && src.alive) {
+      const fdx = cpu.x - src.x, fdy = cpu.y - src.y;
+      const fd = Math.sqrt(fdx * fdx + fdy * fdy) || 1;
+      // Force retreat from fear source
+      if (!ai.retreating) {
+        ai.retreating = true;
+        ai.attackTarget = src;
+      }
+      speed *= 2.0;
+    }
+  }
 
   // Retreat if low HP
   ai.retreating = cpu.hp / cpu.maxHp < params.retreatHp;
@@ -2126,6 +2446,8 @@ function cpuAttack(cpu, params) {
   const isDeer = fighter.id === 'deer';
   const isNoli = fighter.id === 'noli';
   const isCat = fighter.id === 'explodingcat';
+  const isNapoleon = fighter.id === 'napoleon';
+  const isModerator = fighter.id === 'moderator';
 
   // Add aim error based on difficulty
   const errorAngle = (Math.random() - 0.5) * params.aimError * 2;
@@ -2173,6 +2495,18 @@ function cpuAttack(cpu, params) {
         cpuUseSpecialCat(cpu);
         return;
       }
+    } else if (isNapoleon) {
+      // Grande Armée: spawn infantry
+      cpuUseSpecialNapoleon(cpu);
+      return;
+    } else if (isModerator) {
+      // Server Update: buff self (CPU doesn't have real teammates)
+      cpu.specialUsed = true;
+      cpu.modServerUpdateTimer = 10;
+      cpu.effects.push({ type: 'server-update', timer: 2 });
+      // Reset cooldowns
+      cpu.cdE = 0; cpu.cdR = 0; cpu.cdT = 0;
+      return;
     } else {
       if (dist < 10 * GAME_TILE) {
         cpuUseSpecialFighter(cpu, target);
@@ -2226,6 +2560,27 @@ function cpuAttack(cpu, params) {
     } else if (isCat) {
       // Draw: use whenever available
       cpuCatDraw(cpu);
+      return;
+    } else if (isNapoleon) {
+      // Cavalry: toggle mount if not already mounted
+      if (!cpu.napoleonCavalry) {
+        cpu.napoleonCavalry = true;
+        cpu.effects.push({ type: 'cavalry-mount', timer: 1.5 });
+      }
+      return;
+    } else if (isModerator) {
+      // Scare: TP random enemy to self, stun, apply fear
+      const enemies = gamePlayers.filter(p => p.alive && !p.isSummon && p.id !== cpu.id);
+      if (enemies.length > 0) {
+        const pick = enemies[Math.floor(Math.random() * enemies.length)];
+        pick.x = cpu.x + (Math.random() - 0.5) * GAME_TILE;
+        pick.y = cpu.y + (Math.random() - 0.5) * GAME_TILE;
+        pick.stunTimer = 1;
+        pick.modFearTimer = 5;
+        pick.modFearSourceId = cpu.id;
+        cpu.cdE = fighter.abilities[1].cooldown;
+        cpu.effects.push({ type: 'scare', timer: 1.5 });
+      }
       return;
     } else {
       cpu.cdE = fighter.abilities[1].cooldown;
@@ -2299,6 +2654,24 @@ function cpuAttack(cpu, params) {
         cpuCatAttack(cpu);
         return;
       }
+    } else if (isNapoleon) {
+      // Cannon: spawn cannon if not already placed
+      if (!cpu.napoleonCannonId) {
+        cpuNapoleonCannon(cpu);
+        return;
+      }
+    } else if (isModerator) {
+      // Bug Fixing: disable a random ability on target
+      if (!target.modDisabledAbilities) target.modDisabledAbilities = [];
+      const slots = [1, 2, 3]; // E, R, T
+      const available = slots.filter(s => !target.modDisabledAbilities.includes(s));
+      if (available.length > 0) {
+        const pick = available[Math.floor(Math.random() * available.length)];
+        target.modDisabledAbilities.push(pick);
+        cpu.cdR = fighter.abilities[2].cooldown;
+        cpu.effects.push({ type: 'bug-fix', timer: 1.5 });
+      }
+      return;
     } else {
       if (dist < fighter.abilities[2].range * GAME_TILE) {
         cpuPowerSwing(cpu, target, aimNx, aimNy);
@@ -2405,6 +2778,27 @@ function cpuAttack(cpu, params) {
         cpuCatSteal(cpu, target);
         return;
       }
+    } else if (isNapoleon) {
+      // Defensive Tactics: place wall between CPU and enemy
+      if (!cpu.napoleonWallId) {
+        cpuNapoleonWall(cpu, target);
+        return;
+      }
+    } else if (isModerator) {
+      // Server Reset: TP all players to spawn positions (limited uses)
+      if (cpu.modServerResetUses < 3) {
+        cpu.modServerResetUses++;
+        cpu.cdT = fighter.abilities[3].cooldown;
+        for (const p of gamePlayers) {
+          if (!p.alive || p.isSummon) continue;
+          if (p.spawnX != null && p.spawnY != null) {
+            p.x = p.spawnX;
+            p.y = p.spawnY;
+          }
+        }
+        cpu.effects.push({ type: 'server-reset', timer: 2 });
+        return;
+      }
     } else {
       const sightRange = CAMERA_RANGE * GAME_TILE * 2;
       if (dist <= sightRange) {
@@ -2459,6 +2853,30 @@ function cpuAttack(cpu, params) {
       // Cat Scratch melee
       if (dist < (fighter.abilities[0].range || 0.9) * GAME_TILE) {
         cpuCatScratch(cpu, target, aimNx, aimNy);
+      }
+    } else if (isNapoleon) {
+      // Napoleon Sword melee
+      if (dist < (fighter.abilities[0].range || 1.5) * GAME_TILE) {
+        cpuNapoleonSword(cpu, target, aimNx, aimNy);
+      }
+    } else if (isModerator) {
+      // Ban Hammer melee
+      if (dist < (fighter.abilities[0].range || 1.5) * GAME_TILE) {
+        const abil = fighter.abilities[0];
+        cpu.cdM1 = abil.cooldown;
+        let baseDmg = abil.damage || 100;
+        if (cpu.modServerUpdateTimer > 0) baseDmg = Math.round(baseDmg * 1.5);
+        dealDamage(cpu, target, baseDmg, false);
+        _lastDealDamageWasM1 = true;
+        // 10% chance to teleport target to random safe position
+        if (Math.random() < 0.1) {
+          const safe = getRandomSafePosition();
+          if (safe) {
+            target.x = safe.x;
+            target.y = safe.y;
+          }
+        }
+        cpu.effects.push({ type: 'ban-hammer', timer: 0.4 });
       }
     } else {
       if (dist < fighter.abilities[0].range * GAME_TILE) {
@@ -3342,6 +3760,135 @@ function cpuUseSpecialCat(cpu) {
   cpu.effects.push({ type: 'exploding-kitten-spawn', timer: 1.5 });
 }
 
+// ── Napoleon CPU helpers ────────────────────────────────────
+function cpuNapoleonSword(cpu, target, aimNx, aimNy) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[0];
+  cpu.cdM1 = abil.cooldown;
+  const range = (abil.range || 1.5) * GAME_TILE;
+  let baseDmg = abil.damage;
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  if (cpu.intimidated > 0) baseDmg *= 0.5;
+  if (cpu.napoleonCavalry) baseDmg *= 2;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    if (t.isSummon && t.summonOwner === cpu.id) continue;
+    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > range) continue;
+    const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+    if (dot < 0) continue;
+    dealDamage(cpu, t, baseDmg);
+  }
+  cpu.effects.push({ type: 'sword', timer: 0.2, aimNx, aimNy });
+}
+
+function cpuNapoleonCannon(cpu) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[2];
+  cpu.cdR = abil.cooldown;
+  if (cpu.napoleonCannonId) {
+    const oldIdx = gamePlayers.findIndex(p => p.id === cpu.napoleonCannonId);
+    if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+    cpu.napoleonCannonId = null;
+  }
+  const cannonId = 'cannon-' + cpu.id + '-' + Date.now();
+  const cannon = createPlayerState(
+    { id: cannonId, name: 'Cannon', color: '#555', fighterId: 'napoleon' },
+    { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) },
+    fighter
+  );
+  cannon.x = cpu.x + (Math.random() - 0.5) * GAME_TILE * 2;
+  cannon.y = cpu.y + (Math.random() - 0.5) * GAME_TILE * 2;
+  cannon.hp = abil.cannonHp || 600;
+  cannon.maxHp = abil.cannonHp || 600;
+  cannon.isSummon = true;
+  cannon.summonOwner = cpu.id;
+  cannon.summonType = 'napoleon-cannon';
+  cannon.summonSpeed = 0;
+  cannon.summonDamage = abil.damage || 700;
+  cannon.summonAttackCD = abil.cannonFireCD || 5;
+  cannon.summonAttackTimer = 0;
+  cannon.summonProjectileSpeed = abil.projectileSpeed || 30;
+  gamePlayers.push(cannon);
+  cpu.napoleonCannonId = cannonId;
+  cpu.effects.push({ type: 'cannon-place', timer: 1.0 });
+}
+
+function cpuNapoleonWall(cpu, target) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[3];
+  cpu.cdT = abil.cooldown;
+  if (cpu.napoleonWallId) {
+    const oldIdx = gamePlayers.findIndex(p => p.id === cpu.napoleonWallId);
+    if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+    cpu.napoleonWallId = null;
+  }
+  const dx = target.x - cpu.x; const dy = target.y - cpu.y;
+  const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+  const nx = dx / dist; const ny = dy / dist;
+  const wallDist = GAME_TILE * 2;
+  const wx = cpu.x + nx * wallDist;
+  const wy = cpu.y + ny * wallDist;
+  const wallId = 'wall-' + cpu.id + '-' + Date.now();
+  const wall = createPlayerState(
+    { id: wallId, name: 'Wall', color: '#8b7355', fighterId: 'napoleon' },
+    { r: Math.floor(wy / GAME_TILE), c: Math.floor(wx / GAME_TILE) },
+    fighter
+  );
+  wall.x = wx; wall.y = wy;
+  wall.hp = 999999;
+  wall.maxHp = 999999;
+  wall.isSummon = true;
+  wall.summonOwner = cpu.id;
+  wall.summonType = 'napoleon-wall';
+  wall.summonSpeed = 0;
+  wall.summonDamage = 0;
+  wall.summonAttackCD = 0;
+  wall.summonAttackTimer = 0;
+  wall.wallSize = abil.wallSize || 2;
+  wall.wallTimer = 30;
+  gamePlayers.push(wall);
+  cpu.napoleonWallId = wallId;
+  cpu.effects.push({ type: 'wall-place', timer: 0.5 });
+}
+
+function cpuUseSpecialNapoleon(cpu) {
+  const fighter = cpu.fighter;
+  cpu.specialUsed = true;
+  const abil = fighter.abilities[4];
+  const count = abil.infantryCount || 12;
+  const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
+  if (!cpu.napoleonInfantryIds) cpu.napoleonInfantryIds = [];
+  for (let i = 0; i < count; i++) {
+    const infId = 'infantry-' + cpu.id + '-' + Date.now() + '-' + i;
+    const angle = (i / count) * Math.PI * 2;
+    const spawnDist = GAME_TILE * 2;
+    const inf = createPlayerState(
+      { id: infId, name: 'Infantryman', color: '#2c3e50', fighterId: 'napoleon' },
+      { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) },
+      fighter
+    );
+    inf.x = cpu.x + Math.cos(angle) * spawnDist;
+    inf.y = cpu.y + Math.sin(angle) * spawnDist;
+    if (!canMoveTo(inf.x, inf.y, radius)) { inf.x = cpu.x; inf.y = cpu.y; }
+    inf.hp = abil.infantryHp || 50;
+    inf.maxHp = abil.infantryHp || 50;
+    inf.isSummon = true;
+    inf.summonOwner = cpu.id;
+    inf.summonType = 'napoleon-infantry';
+    inf.summonSpeed = abil.infantrySpeed || 2.0;
+    inf.summonDamage = abil.damage || 100;
+    inf.summonAttackCD = abil.infantryFireCD || 1;
+    inf.summonAttackTimer = 0;
+    inf.summonProjectileSpeed = abil.infantryProjectileSpeed || 38;
+    inf.summonProjectileRange = abil.infantryRange || 0.8;
+    gamePlayers.push(inf);
+    cpu.napoleonInfantryIds.push(infId);
+  }
+  cpu.effects.push({ type: 'grande-armee', timer: 2.0 });
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ABILITIES
 // ═══════════════════════════════════════════════════════════════
@@ -3361,6 +3908,8 @@ function useAbility(key) {
   const isDeer = fighter.id === 'deer';
   const isNoli = fighter.id === 'noli';
   const isCat = fighter.id === 'explodingcat';
+  const isNapoleon = fighter.id === 'napoleon';
+  const isModerator = fighter.id === 'moderator';
 
   // Filbus: channeling interrupts
   if (isFilbus && (key !== 'E' && key !== 'R')) {
@@ -3407,7 +3956,7 @@ function useAbility(key) {
       }
       // Visual sync to other clients
       if (typeof socket !== 'undefined' && socket.emit) {
-        socket.emit('projectile-spawn', { projectiles: spawnedChips });
+        if (!isHostAuthority) socket.emit('projectile-spawn', { projectiles: spawnedChips });
       }
       // Clear small blind when using another move
       if (lp.blindBuff === 'small') lp.blindBuff = null;
@@ -3579,6 +4128,69 @@ function useAbility(key) {
         dealDamage(lp, target, baseDmg);
       }
       lp.effects.push({ type: 'cat-scratch', timer: 0.2, aimNx, aimNy });
+    } else if (isNapoleon) {
+      // Napoleon M1: Sword — melee 200 dmg
+      const range = (abil.range || 1.5) * GAME_TILE;
+      let baseDmg = abil.damage;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      if (lp.napoleonCavalry) baseDmg *= 2; // Cavalry: 2x damage dealt
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      _lastDealDamageWasM1 = true;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, baseDmg);
+      }
+      _lastDealDamageWasM1 = false;
+      lp.effects.push({ type: 'sword', timer: 0.2, aimNx, aimNy });
+    } else if (isModerator) {
+      // Moderator M1: Ban Hammer — melee 100 dmg, 10% teleport
+      const range = (abil.range || 1.5) * GAME_TILE;
+      let baseDmg = abil.damage;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      if (lp.modServerUpdateTimer > 0) baseDmg = Math.round(baseDmg * 1.5);
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      _lastDealDamageWasM1 = true;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, baseDmg);
+        // 10% chance to teleport
+        if (Math.random() < (abil.teleportChance || 0.1) && !target.isSummon) {
+          const safePos = getRandomSafePosition();
+          target.x = safePos.x;
+          target.y = safePos.y;
+          target.effects.push({ type: 'ban-teleport', timer: 1.0 });
+          if (target.id === localPlayerId) {
+            combatLog.push({ text: '🔨 You were BANNED to a random location!', timer: 4, color: '#ff0000' });
+          }
+          combatLog.push({ text: '🔨 Ban Hammer teleported ' + target.name + '!', timer: 3, color: '#ff4444' });
+        }
+      }
+      _lastDealDamageWasM1 = false;
+      lp.effects.push({ type: 'ban-hammer', timer: 0.3 });
     } else {
       // Fighter: Sword (original M1)
       const range = abil.range * GAME_TILE;
@@ -3602,10 +4214,54 @@ function useAbility(key) {
       }
       lp.effects.push({ type: 'sword', timer: 0.2, aimNx, aimNy });
     }
+
+    // ── Apple Tree melee damage ──
+    if (appleTree && appleTree.alive) {
+      const abil = fighter.abilities[0];
+      const range = (abil.range || 1.5) * GAME_TILE;
+      const treeCX = (appleTree.col + 1) * GAME_TILE; // center of 2x2
+      const treeCY = (appleTree.row + 1) * GAME_TILE;
+      const dx = treeCX - lp.x;
+      const dy = treeCY - lp.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < range + GAME_TILE) {
+        // Check aim direction
+        const cw2 = gameCanvas.width; const ch2 = gameCanvas.height;
+        const camX2 = lp.x - cw2 / 2; const camY2 = lp.y - ch2 / 2;
+        const aimX2 = mouseX + camX2; const aimY2 = mouseY + camY2;
+        const aDx = aimX2 - lp.x; const aDy = aimY2 - lp.y;
+        const aDist = Math.sqrt(aDx * aDx + aDy * aDy) || 1;
+        const dot = (dx * aDx / aDist + dy * aDy / aDist) / (dist || 1);
+        if (dot > 0) {
+          let dmg = abil.damage || 100;
+          if (lp.supportBuff > 0) dmg *= 1.5;
+          appleTree.hp -= dmg;
+          lp.effects.push({ type: 'tree-hit', timer: 0.3 });
+          if (appleTree.hp <= 0) {
+            appleTree.hp = 0;
+            appleTree.alive = false;
+            appleTree.regrowTimer = 30;
+            appleTree.apples = [];
+            // Make tree tiles solid (trunk obstacle)
+            for (let dr = 0; dr < 2; dr++) {
+              for (let dc = 0; dc < 2; dc++) {
+                gameMap.tiles[appleTree.row + dr][appleTree.col + dc] = TILE.ROCK;
+              }
+            }
+            combatLog.push({ text: '🪓 Apple tree chopped down!', timer: 4, color: '#e67e22' });
+          }
+        }
+      }
+    }
   }
 
   else if (key === 'E') {
     if (lp.cdE > 0) return;
+    // Bug Fixing: check if E (slot 1) is disabled
+    if (lp.modDisabledAbilities && lp.modDisabledAbilities.includes(1)) {
+      combatLog.push({ text: '🐛 Move 1 is disabled by Bug Fixing!', timer: 2, color: '#e67e22' });
+      return;
+    }
     const abil = fighter.abilities[1];
     lp.cdE = abil.cooldown;
 
@@ -3637,7 +4293,7 @@ function useAbility(key) {
       });
       // Visual sync
       if (typeof socket !== 'undefined' && socket.emit) {
-        socket.emit('projectile-spawn', { projectiles: [{ x: lp.x, y: lp.y, vx: cvx, vy: cvy, timer: 999, type: 'card' }] });
+        if (!isHostAuthority) socket.emit('projectile-spawn', { projectiles: [{ x: lp.x, y: lp.y, vx: cvx, vy: cvy, timer: 999, type: 'card' }] });
       }
       // Clear small blind when using another move
       if (lp.blindBuff === 'small') lp.blindBuff = null;
@@ -3677,7 +4333,7 @@ function useAbility(key) {
         dragDistance: abil.dragDistance || 3,
       });
       if (typeof socket !== 'undefined' && socket.emit) {
-        socket.emit('projectile-spawn', { projectiles: [{ x: lp.x, y: lp.y, vx: evx, vy: evy, timer: 1.5, type: 'entangle' }] });
+        if (!isHostAuthority) socket.emit('projectile-spawn', { projectiles: [{ x: lp.x, y: lp.y, vx: evx, vy: evy, timer: 1.5, type: 'entangle' }] });
       }
       lp.effects.push({ type: 'entangle-cast', timer: 0.5 });
       combatLog.push({ text: '⚔ Entanglement!', timer: 2, color: '#00ff66' });
@@ -3821,6 +4477,40 @@ function useAbility(key) {
         combatLog.push({ text: '🔮 Reveal the Future! See all enemies!', timer: 3, color: '#dda0dd' });
         showPopup('🔮 REVEAL!');
       }
+    } else if (isNapoleon) {
+      // Napoleon E: Cavalry — toggle mount/dismount
+      lp.cdE = 0; // no cooldown, it's a toggle
+      lp.napoleonCavalry = !lp.napoleonCavalry;
+      if (lp.napoleonCavalry) {
+        lp.effects.push({ type: 'cavalry-mount', timer: 1.5 });
+        combatLog.push({ text: '🐴 Cavalry! Mounted! 2.5× speed, 2× dmg dealt & received.', timer: 3, color: '#c8a96e' });
+      } else {
+        lp.effects.push({ type: 'cavalry-dismount', timer: 0.5 });
+        combatLog.push({ text: '🐴 Dismounted.', timer: 2, color: '#999' });
+      }
+    } else if (isModerator) {
+      // Moderator E: Scare — TP a random enemy to you, stun 1s, add Fear
+      lp.cdE = abil.cooldown;
+      const enemies = gamePlayers.filter(p => p.alive && !p.isSummon && p.id !== lp.id);
+      if (enemies.length > 0) {
+        const victim = enemies[Math.floor(Math.random() * enemies.length)];
+        // TP victim near the moderator (safe position close by)
+        const pr = GAME_TILE * PLAYER_RADIUS_RATIO;
+        let nx = lp.x + (Math.random() - 0.5) * GAME_TILE;
+        let ny = lp.y + (Math.random() - 0.5) * GAME_TILE;
+        if (!canMoveTo(nx, ny, pr)) { nx = lp.x; ny = lp.y; }
+        victim.x = nx; victim.y = ny;
+        victim.stunned = abil.stunDuration || 1;
+        victim.modFearTimer = abil.fearDuration || 5;
+        victim.modFearSourceId = lp.id;
+        victim.effects.push({ type: 'scare-tp', timer: 1.5 });
+        if (victim.id === localPlayerId) {
+          combatLog.push({ text: '😱 You were SCARED! Teleported to Moderator!', timer: 4, color: '#ff0000' });
+        }
+        combatLog.push({ text: '😱 Scare! ' + victim.name + ' teleported to you!', timer: 3, color: '#9b59b6' });
+      } else {
+        combatLog.push({ text: 'No enemies to scare!', timer: 2, color: '#999' });
+      }
     } else {
       // Fighter: Buff — damage boost + slow nearby enemies
       lp.supportBuff = abil.duration;
@@ -3836,13 +4526,18 @@ function useAbility(key) {
         }
       }
       if (typeof socket !== 'undefined' && socket.emit) {
-        socket.emit('player-buff', { type: 'support', duration: abil.duration });
+        if (!isHostAuthority) socket.emit('player-buff', { type: 'support', duration: abil.duration });
       }
     }
   }
 
   else if (key === 'R') {
     if (lp.cdR > 0) return;
+    // Bug Fixing: check if R (slot 2) is disabled
+    if (lp.modDisabledAbilities && lp.modDisabledAbilities.includes(2)) {
+      combatLog.push({ text: '🐛 Move 2 is disabled by Bug Fixing!', timer: 2, color: '#e67e22' });
+      return;
+    }
     const abil = fighter.abilities[2];
     lp.cdR = abil.cooldown;
 
@@ -3879,7 +4574,7 @@ function useAbility(key) {
       }
       // Broadcast blind to other clients
       if (typeof socket !== 'undefined' && socket.emit) {
-        socket.emit('player-buff', { type: 'blind', duration: lp.blindBuff === 'big' ? 60 : 0 });
+        if (!isHostAuthority) socket.emit('player-buff', { type: 'blind', duration: lp.blindBuff === 'big' ? 60 : 0 });
       }
     } else if (isFilbus) {
       // Filbus R: Filbism (2) — eat a chair to heal 100 HP over 3s
@@ -3927,7 +4622,7 @@ function useAbility(key) {
         while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
         if (Math.abs(angleDiff) > Math.PI / 2) continue;
         dealDamage(lp, target, 50);
-        if (typeof socket !== 'undefined' && socket.emit) {
+        if (typeof socket !== 'undefined' && socket.emit && !isHostAuthority) {
           socket.emit('player-damage', { targetId: target.id, amount: 50, attackerId: lp.id });
         }
       }
@@ -3952,7 +4647,7 @@ function useAbility(key) {
         spawnedWaves.push({ x: lp.x, y: lp.y, vx, vy, timer: 10.0, type: 'shockwave' });
       }
       if (typeof socket !== 'undefined' && socket.emit) {
-        socket.emit('projectile-spawn', { projectiles: spawnedWaves });
+        if (!isHostAuthority) socket.emit('projectile-spawn', { projectiles: spawnedWaves });
       }
       combatLog.push({ text: '☣ Mass Infection!', timer: 3, color: '#00ff66' });
     } else if (isCricket) {
@@ -3990,6 +4685,67 @@ function useAbility(key) {
       lp.effects.push({ type: 'cat-attack-buff', timer: dur });
       combatLog.push({ text: '😼 Attack! Scratch deals 200 for ' + dur + 's!', timer: 3, color: '#ff4444' });
       showPopup('😼 ATTACK BUFF!');
+    } else if (isNapoleon) {
+      // Napoleon R: Cannon — spawn/replace a stationary cannon
+      if (lp.napoleonCannonId) {
+        const oldIdx = gamePlayers.findIndex(p => p.id === lp.napoleonCannonId);
+        if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+        lp.napoleonCannonId = null;
+      }
+      const cannonId = 'cannon-' + lp.id + '-' + Date.now();
+      const cannon = createPlayerState(
+        { id: cannonId, name: 'Cannon', color: '#555', fighterId: 'napoleon' },
+        { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+        fighter
+      );
+      cannon.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 2;
+      cannon.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 2;
+      cannon.hp = abil.cannonHp || 600;
+      cannon.maxHp = abil.cannonHp || 600;
+      cannon.isSummon = true;
+      cannon.summonOwner = lp.id;
+      cannon.summonType = 'napoleon-cannon';
+      cannon.summonSpeed = 0;
+      cannon.summonDamage = abil.damage || 700;
+      cannon.summonAttackCD = abil.cannonFireCD || 5;
+      cannon.summonAttackTimer = 0;
+      cannon.summonProjectileSpeed = abil.projectileSpeed || 30;
+      gamePlayers.push(cannon);
+      lp.napoleonCannonId = cannonId;
+      lp.effects.push({ type: 'cannon-place', timer: 1.0 });
+      combatLog.push({ text: '💣 Cannon deployed!', timer: 3, color: '#555' });
+    } else if (isModerator) {
+      // Moderator R: Bug Fixing — disable a random enemy's random move until next death
+      lp.cdR = abil.cooldown;
+      const enemies = gamePlayers.filter(p => p.alive && !p.isSummon && p.id !== lp.id && p.fighter);
+      if (enemies.length > 0) {
+        const victim = enemies[Math.floor(Math.random() * enemies.length)];
+        const aliveNonSummons = gamePlayers.filter(p => p.alive && !p.isSummon && p.fighter).length;
+        const is1v1 = aliveNonSummons <= 2;
+        // Pick a random ability to disable (E=1, R=2, T=3)
+        const disableSlots = [1, 2, 3];
+        const slot = disableSlots[Math.floor(Math.random() * disableSlots.length)];
+        const abilNames = { 1: 'Move 1 (E)', 2: 'Move 2 (R)', 3: 'Move 3 (T)' };
+        if (!victim.modDisabledAbilities) victim.modDisabledAbilities = [];
+        victim.modDisabledAbilities.push(slot);
+        if (!lp.modBugFixedTargets) lp.modBugFixedTargets = [];
+        lp.modBugFixedTargets.push({ targetId: victim.id, slot });
+        combatLog.push({ text: '🐛 Bug Fix! Disabled ' + victim.name + '\'s ' + abilNames[slot] + '!', timer: 4, color: '#e67e22' });
+        if (victim.id === localPlayerId) {
+          combatLog.push({ text: '⚠️ Your ' + abilNames[slot] + ' was DISABLED by Moderator!', timer: 5, color: '#ff0000' });
+        }
+        // In 1v1: also disable their special
+        if (is1v1) {
+          victim.modDisabledAbilities.push(4); // 4 = SPACE special
+          lp.modBugFixedTargets.push({ targetId: victim.id, slot: 4 });
+          combatLog.push({ text: '🐛 1v1 Bug Fix! Also disabled ' + victim.name + '\'s Special!', timer: 4, color: '#e67e22' });
+          if (victim.id === localPlayerId) {
+            combatLog.push({ text: '⚠️ Your Special was DISABLED by Moderator!', timer: 5, color: '#ff0000' });
+          }
+        }
+      } else {
+        combatLog.push({ text: 'No enemies to bug fix!', timer: 2, color: '#999' });
+      }
     } else {
       // Fighter: Power Swing
       const range = abil.range * GAME_TILE;
@@ -4017,7 +4773,7 @@ function useAbility(key) {
           if (s === 1) { newTX = target.x; newTY = target.y; }
         }
         target.x = newTX; target.y = newTY;
-        if (typeof socket !== 'undefined' && socket.emit) {
+        if (typeof socket !== 'undefined' && socket.emit && !isHostAuthority) {
           socket.emit('player-knockback', { targetId: target.id, x: newTX, y: newTY });
         }
       }
@@ -4027,6 +4783,11 @@ function useAbility(key) {
 
   else if (key === 'T') {
     if (lp.cdT > 0) return;
+    // Bug Fixing: check if T (slot 3) is disabled
+    if (lp.modDisabledAbilities && lp.modDisabledAbilities.includes(3)) {
+      combatLog.push({ text: '🐛 Move 3 is disabled by Bug Fixing!', timer: 2, color: '#e67e22' });
+      return;
+    }
     const abil = fighter.abilities[3];
 
     if (isPoker) {
@@ -4412,6 +5173,64 @@ function useAbility(key) {
           lp.cdT = 0;
         }
       }
+    } else if (isNapoleon) {
+      // Napoleon T: Defensive Tactics — place a 2x2 wall entity
+      lp.cdT = abil.cooldown;
+      // Remove old wall if exists
+      if (lp.napoleonWallId) {
+        const oldIdx = gamePlayers.findIndex(p => p.id === lp.napoleonWallId);
+        if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+        lp.napoleonWallId = null;
+      }
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      const wallDist = GAME_TILE * 2;
+      const wx = lp.x + aimNx * wallDist;
+      const wy = lp.y + aimNy * wallDist;
+      const wallId = 'wall-' + lp.id + '-' + Date.now();
+      const wall = createPlayerState(
+        { id: wallId, name: 'Wall', color: '#8b7355', fighterId: 'napoleon' },
+        { r: Math.floor(wy / GAME_TILE), c: Math.floor(wx / GAME_TILE) },
+        fighter
+      );
+      wall.x = wx;
+      wall.y = wy;
+      wall.hp = 999999;
+      wall.maxHp = 999999;
+      wall.isSummon = true;
+      wall.summonOwner = lp.id;
+      wall.summonType = 'napoleon-wall';
+      wall.summonSpeed = 0;
+      wall.summonDamage = 0;
+      wall.summonAttackCD = 0;
+      wall.summonAttackTimer = 0;
+      wall.wallSize = abil.wallSize || 2;
+      wall.wallTimer = 30;
+      gamePlayers.push(wall);
+      lp.napoleonWallId = wallId;
+      lp.effects.push({ type: 'wall-place', timer: 0.5 });
+      combatLog.push({ text: '🧱 Defensive wall placed! (30s)', timer: 3, color: '#8b7355' });
+    } else if (isModerator) {
+      // Moderator T: Server Reset — TP everyone back to spawn, 3 uses per game
+      if (!lp.modServerResetUses) lp.modServerResetUses = 0;
+      if (lp.modServerResetUses >= (abil.maxUses || 3)) {
+        combatLog.push({ text: 'Server Reset used up!', timer: 2, color: '#999' });
+        return;
+      }
+      lp.modServerResetUses++;
+      for (const p of gamePlayers) {
+        if (!p.alive || p.isSummon) continue;
+        if (p.spawnX != null && p.spawnY != null) {
+          p.x = p.spawnX;
+          p.y = p.spawnY;
+        }
+        p.effects.push({ type: 'server-reset', timer: 1.5 });
+      }
+      combatLog.push({ text: '🔄 SERVER RESET! Everyone returned to spawn! (' + lp.modServerResetUses + '/' + (abil.maxUses || 3) + ')', timer: 5, color: '#3498db' });
     } else {
       // Fighter: Intimidation
       lp.cdT = abil.cooldown;
@@ -4423,7 +5242,7 @@ function useAbility(key) {
           target.intimidated = abil.duration;
           target.intimidatedBy = lp.id;
           if (typeof socket !== 'undefined' && socket.emit) {
-            socket.emit('player-debuff', { targetId: target.id, type: 'intimidation', duration: abil.duration });
+            if (!isHostAuthority) socket.emit('player-debuff', { targetId: target.id, type: 'intimidation', duration: abil.duration });
           }
         }
       }
@@ -4433,6 +5252,11 @@ function useAbility(key) {
 
   else if (key === 'SPACE') {
     if (!lp.specialUnlocked || lp.specialUsed) return;
+    // Bug Fixing: check if Special (slot 4) is disabled
+    if (lp.modDisabledAbilities && lp.modDisabledAbilities.includes(4)) {
+      combatLog.push({ text: '🐛 Special is disabled by Bug Fixing!', timer: 2, color: '#e67e22' });
+      return;
+    }
 
     if (isPoker) {
       // Royal Flush — distance-tiered:
@@ -4477,7 +5301,7 @@ function useAbility(key) {
       lp.effects.push({ type: 'royal-flush', timer: 2.0 });
       // Broadcast to other clients with position for distance calc
       if (typeof socket !== 'undefined' && socket.emit) {
-        socket.emit('player-buff', { type: 'royal-flush', duration: stunDur, cx: lp.x, cy: lp.y });
+        if (!isHostAuthority) socket.emit('player-buff', { type: 'royal-flush', duration: stunDur, cx: lp.x, cy: lp.y });
       }
     } else if (isFilbus) {
       // Filbus SPACE: The Boiled One Phenomenon
@@ -4503,7 +5327,7 @@ function useAbility(key) {
       if (typeof trackBoiledOnePlayed === 'function') trackBoiledOnePlayed();
       // Broadcast to other clients
       if (typeof socket !== 'undefined' && socket.emit) {
-        socket.emit('player-buff', { type: 'boiled-one', duration: stunDur, cx: lp.x, cy: lp.y });
+        if (!isHostAuthority) socket.emit('player-buff', { type: 'boiled-one', duration: stunDur, cx: lp.x, cy: lp.y });
       }
     } else if (is1x) {
       // 1X1X1X1 SPACE: Rejuvenate the Rotten — summon zombies
@@ -4673,6 +5497,58 @@ function useAbility(key) {
       }
       lp.effects.push({ type: 'cat-explode-spawn', timer: 2.0 });
       combatLog.push({ text: '💣 Exploding Kittens unleashed!', timer: 3, color: '#ff4444' });
+    } else if (isNapoleon) {
+      // Napoleon SPACE: The Grande Armée — spawn 12 infantrymen
+      lp.specialUsed = true;
+      const sAbil = fighter.abilities[4];
+      const count = sAbil.infantryCount || 12;
+      if (!lp.napoleonInfantryIds) lp.napoleonInfantryIds = [];
+      for (let i = 0; i < count; i++) {
+        const infId = 'infantry-' + lp.id + '-' + i + '-' + Date.now();
+        const inf = createPlayerState(
+          { id: infId, name: 'Infantryman', color: '#2c3e50', fighterId: 'napoleon' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+          fighter
+        );
+        inf.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 4;
+        inf.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 4;
+        const infRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(inf.x, inf.y, infRadius)) { inf.x = lp.x; inf.y = lp.y; }
+        inf.hp = sAbil.infantryHp || 50;
+        inf.maxHp = sAbil.infantryHp || 50;
+        inf.isSummon = true;
+        inf.summonOwner = lp.id;
+        inf.summonType = 'napoleon-infantry';
+        inf.summonSpeed = sAbil.infantrySpeed || 2.0;
+        inf.summonDamage = sAbil.damage || 100;
+        inf.summonAttackCD = sAbil.infantryFireCD || 1;
+        inf.summonAttackTimer = 0;
+        inf.summonProjectileSpeed = sAbil.infantryProjectileSpeed || 38;
+        inf.summonProjectileRange = sAbil.infantryRange || 0.8;
+        gamePlayers.push(inf);
+        lp.napoleonInfantryIds.push(infId);
+      }
+      lp.effects.push({ type: 'grande-armee', timer: 2.0 });
+      combatLog.push({ text: '⚔ The Grande Armée has arrived!', timer: 4, color: '#2c3e50' });
+    } else if (isModerator) {
+      // Moderator SPACE: Server Update — buff all teammates + reset cooldowns
+      lp.specialUsed = true;
+      const sAbil = fighter.abilities[4];
+      const buffDur = sAbil.buffDuration || 10;
+      for (const p of gamePlayers) {
+        if (!p.alive || p.isSummon) continue;
+        // In MP with teams, buff teammates and self; in FFA, buff only self
+        if (p.id === lp.id || (p.team && p.team === lp.team)) {
+          p.modServerUpdateTimer = buffDur;
+          // Reset all cooldowns
+          p.cdM1 = 0; p.cdE = 0; p.cdR = 0; p.cdT = 0; p.cdF = 0;
+          p.effects.push({ type: 'server-update', timer: 2.0 });
+        }
+      }
+      // Always buff self
+      lp.modServerUpdateTimer = buffDur;
+      lp.cdM1 = 0; lp.cdE = 0; lp.cdR = 0; lp.cdT = 0; lp.cdF = 0;
+      combatLog.push({ text: '📦 SERVER UPDATE! +50% speed, damage, defense! CDs reset!', timer: 5, color: '#2ecc71' });
     } else {
       // Fighter: Special jump
       lp.specialJumping = true;
@@ -5061,6 +5937,46 @@ function useAbility(key) {
       lp.cdF = fAbil.cooldown;
       lp.effects.push({ type: 'unicorn-spawn', timer: 1.5 });
       combatLog.push({ text: uniLog, timer: 4, color: uniColor });
+    } else if (isNapoleon) {
+      // Napoleon F: Light Infantry — spawn 3 infantrymen
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      const count = fAbil.infantryCount || 3;
+      if (!lp.napoleonInfantryIds) lp.napoleonInfantryIds = [];
+      for (let i = 0; i < count; i++) {
+        const infId = 'infantry-' + lp.id + '-f-' + i + '-' + Date.now();
+        const inf = createPlayerState(
+          { id: infId, name: 'Infantryman', color: '#2c3e50', fighterId: 'napoleon' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+          fighter
+        );
+        inf.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 3;
+        inf.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 3;
+        const infRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(inf.x, inf.y, infRadius)) { inf.x = lp.x; inf.y = lp.y; }
+        inf.hp = fAbil.infantryHp || 50;
+        inf.maxHp = fAbil.infantryHp || 50;
+        inf.isSummon = true;
+        inf.summonOwner = lp.id;
+        inf.summonType = 'napoleon-infantry';
+        inf.summonSpeed = fAbil.infantrySpeed || 2.0;
+        inf.summonDamage = fAbil.damage || 100;
+        inf.summonAttackCD = fAbil.infantryFireCD || 1;
+        inf.summonAttackTimer = 0;
+        inf.summonProjectileSpeed = fAbil.infantryProjectileSpeed || 38;
+        inf.summonProjectileRange = fAbil.infantryRange || 0.8;
+        gamePlayers.push(inf);
+        lp.napoleonInfantryIds.push(infId);
+      }
+      lp.effects.push({ type: 'infantry-spawn', timer: 1.5 });
+      combatLog.push({ text: '🎖 Light Infantry deployed!', timer: 3, color: '#2c3e50' });
+    } else if (isModerator) {
+      // Moderator F: Firewall — invincible + invisible for 5s
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      lp.modFirewallTimer = fAbil.duration || 5;
+      lp.effects.push({ type: 'firewall', timer: (fAbil.duration || 5) + 0.5 });
+      combatLog.push({ text: '🛡 Firewall active! Invincible + invisible for 5s!', timer: 3, color: '#e74c3c' });
     } else {
       // Fighter: Potion — heal 300 over 3s
       lp.move4Uses++;
@@ -5174,6 +6090,12 @@ function dealDamage(attacker, target, amount, viaSummon) {
     const seductiveUnicorn = gamePlayers.find(p => p.alive && p.isSummon && p.summonType === 'seductive-unicorn' && p.summonOwner === target.id);
     if (seductiveUnicorn) return;
   }
+  // Moderator Firewall: invincible
+  if (target.modFirewallTimer > 0) return;
+  // Moderator Server Update: 50% damage reduction (defense buff)
+  if (target.modServerUpdateTimer > 0) amount = Math.round(amount * 0.5);
+  // Moderator Server Update: 50% damage increase (attack buff)
+  if (attacker && attacker.modServerUpdateTimer > 0) amount = Math.round(amount * 1.5);
   // Deer Seer: dodge by jumping to the side
   if (target.deerSeerTimer > 0 && target.fighter && target.fighter.id === 'deer') {
     const r = GAME_TILE * PLAYER_RADIUS_RATIO;
@@ -5223,6 +6145,21 @@ function dealDamage(attacker, target, amount, viaSummon) {
   // Blinds modifier (Poker)
   if (target.blindBuff === 'small') amount = Math.round(amount * 0.5);
   else if (target.blindBuff === 'big') amount = Math.round(amount * 1.5);
+  // Napoleon Cavalry: 2x damage received while mounted
+  if (target.napoleonCavalry) amount = Math.round(amount * 2);
+  // Napoleon Defensive Tactics wall: invincible — absorbs no damage itself
+  if (target.isSummon && target.summonType === 'napoleon-wall') return;
+  // Napoleon Defensive Tactics: anyone inside a wall area takes half damage
+  if (!target.isSummon) {
+    const walls = gamePlayers.filter(w => w.alive && w.summonType === 'napoleon-wall');
+    for (const wall of walls) {
+      const ws = (wall.wallSize || 2) * GAME_TILE / 2;
+      if (Math.abs(target.x - wall.x) < ws && Math.abs(target.y - wall.y) < ws) {
+        amount = Math.round(amount * 0.5);
+        break;
+      }
+    }
+  }
   // Cricket Gear Up: 80% damage reduction
   if (target.gearUpTimer > 0) {
     const originalAmount = amount;
@@ -5281,8 +6218,8 @@ function dealDamage(attacker, target, amount, viaSummon) {
     }
   }
 
-  // Broadcast damage to other clients
-  if (typeof socket !== 'undefined' && socket.emit && attacker && attacker.id === localPlayerId) {
+  // Broadcast damage to other clients (skip in host-authoritative — snapshot handles it)
+  if (typeof socket !== 'undefined' && socket.emit && attacker && attacker.id === localPlayerId && !isHostAuthority) {
     socket.emit('player-damage', { targetId: target.id, amount, attackerId: attacker.id });
   }
 
@@ -5323,6 +6260,14 @@ function dealDamage(attacker, target, amount, viaSummon) {
         }
       }
       if (nearWater && typeof trackDeerWaterKill === 'function') trackDeerWaterKill();
+    }
+    // Achievement: Napoleon unlock — M1 kills (any fighter, not via summon or special)
+    if (attacker && attacker.id === localPlayerId && !target.isSummon && _lastDealDamageWasM1) {
+      if (typeof trackNapoleonM1Kill === 'function') trackNapoleonM1Kill();
+    }
+    // Achievement: Napoleon unlock — track summon kills for win-with-summon
+    if (viaSummon && attacker && attacker.id === localPlayerId && !target.isSummon) {
+      _hadSummonKillThisGame = true;
     }
     // Achievement: Filbus boiled one kills
     if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'filbus' && attacker.boiledOneActive && !target.isSummon) {
@@ -5419,9 +6364,21 @@ function dealDamage(attacker, target, amount, viaSummon) {
       }
       target.summonId = null;
     }
-    // Tell server this player died
+    // Moderator Bug Fixing: clear disabled abilities on all players when someone dies
+    for (const p of gamePlayers) {
+      if (p.modDisabledAbilities && p.modDisabledAbilities.length > 0) {
+        p.modDisabledAbilities = [];
+        if (p.id === localPlayerId) {
+          combatLog.push({ text: '🔧 Bug fixes cleared — someone died!', timer: 3, color: '#2ecc71' });
+        }
+      }
+    }
+    // Tell server this player died (only host in authoritative mode, or legacy mode)
     if (typeof socket !== 'undefined' && socket.emit) {
-      socket.emit('player-died', { playerId: target.id });
+      // In host-authoritative, only the host should emit deaths to avoid duplicate server tracking
+      if (gameMode !== undefined || isHostAuthority) {
+        socket.emit('player-died', { playerId: target.id });
+      }
     }
   }
 }
@@ -5517,6 +6474,14 @@ function onGameOver(winnerId, winnerName) {
       if (localPlayer && localPlayer.fighter.id === 'poker' && !localPlayer.specialUsed && typeof trackPokerNoSpecialWin === 'function') {
         trackPokerNoSpecialWin();
       }
+      // Napoleon unlock: win a battle with a summon
+      if (_hadSummonKillThisGame && typeof trackNapoleonSummonWin === 'function') {
+        trackNapoleonSummonWin();
+      }
+      // Moderator achievement: win one game as moderator
+      if (localPlayer && localPlayer.fighter.id === 'moderator' && typeof trackModWin === 'function') {
+        trackModWin();
+      }
     }
   } else {
     gameCtx.fillStyle = '#f5a623';
@@ -5578,6 +6543,177 @@ function renderGame() {
         else if (tile === TILE.ROCK) drawRock(gameCtx, screenX, screenY, GAME_TILE);
         else if (tile === TILE.WATER) drawWater(gameCtx, screenX, screenY, GAME_TILE, r, c);
       }
+    }
+  }
+
+  // ── Apple Tree rendering ──────────────────────────────────
+  if (appleTree) {
+    const treeScreenX = appleTree.col * GAME_TILE - camX;
+    const treeScreenY = appleTree.row * GAME_TILE - camY;
+    const ts = GAME_TILE; // tile size
+    const tw = ts * 2;    // tree width (2 tiles)
+    const th = ts * 2;    // tree height (2 tiles)
+
+    if (appleTree.alive) {
+      // ── Trunk ──
+      const trunkW = tw * 0.22;
+      const trunkH = th * 0.45;
+      const trunkX = treeScreenX + tw / 2 - trunkW / 2;
+      const trunkY = treeScreenY + th - trunkH;
+
+      // Trunk shadow
+      gameCtx.fillStyle = 'rgba(0,0,0,0.18)';
+      gameCtx.beginPath();
+      gameCtx.ellipse(treeScreenX + tw / 2, treeScreenY + th - 2, tw * 0.35, th * 0.08, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+
+      // Trunk body
+      gameCtx.fillStyle = '#6b3e26';
+      gameCtx.fillRect(trunkX, trunkY, trunkW, trunkH);
+      // Bark texture lines
+      gameCtx.strokeStyle = '#4a2a18';
+      gameCtx.lineWidth = 1;
+      for (let i = 0; i < 4; i++) {
+        const bx = trunkX + trunkW * (0.2 + Math.random() * 0.6);
+        gameCtx.beginPath();
+        gameCtx.moveTo(bx, trunkY + trunkH * 0.1 + i * trunkH * 0.2);
+        gameCtx.lineTo(bx + (Math.random() - 0.5) * 3, trunkY + trunkH * 0.3 + i * trunkH * 0.2);
+        gameCtx.stroke();
+      }
+      // Trunk highlight
+      gameCtx.fillStyle = '#8b5a3a';
+      gameCtx.fillRect(trunkX + trunkW * 0.6, trunkY, trunkW * 0.15, trunkH);
+
+      // ── Canopy (multiple layered circles for a full, bushy look) ──
+      const cx = treeScreenX + tw / 2;
+      const cy = treeScreenY + th * 0.35;
+      const canopyR = tw * 0.42;
+
+      // Dark shadow layer
+      gameCtx.fillStyle = '#1e6b1e';
+      gameCtx.beginPath();
+      gameCtx.arc(cx, cy + canopyR * 0.15, canopyR * 1.05, 0, Math.PI * 2);
+      gameCtx.fill();
+
+      // Main canopy
+      gameCtx.fillStyle = '#2d8c2d';
+      gameCtx.beginPath();
+      gameCtx.arc(cx, cy, canopyR, 0, Math.PI * 2);
+      gameCtx.fill();
+
+      // Leaf clusters (overlapping arcs for depth)
+      gameCtx.fillStyle = '#3aad3a';
+      const clusters = [
+        { dx: -canopyR * 0.45, dy: -canopyR * 0.2, r: canopyR * 0.55 },
+        { dx: canopyR * 0.4, dy: -canopyR * 0.15, r: canopyR * 0.5 },
+        { dx: -canopyR * 0.2, dy: -canopyR * 0.5, r: canopyR * 0.45 },
+        { dx: canopyR * 0.15, dy: -canopyR * 0.45, r: canopyR * 0.4 },
+        { dx: 0, dy: canopyR * 0.25, r: canopyR * 0.5 },
+      ];
+      for (const cl of clusters) {
+        gameCtx.beginPath();
+        gameCtx.arc(cx + cl.dx, cy + cl.dy, cl.r, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+
+      // Bright highlights (top)
+      gameCtx.fillStyle = '#4fc44f';
+      gameCtx.beginPath();
+      gameCtx.arc(cx - canopyR * 0.15, cy - canopyR * 0.45, canopyR * 0.3, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.arc(cx + canopyR * 0.25, cy - canopyR * 0.35, canopyR * 0.22, 0, Math.PI * 2);
+      gameCtx.fill();
+
+      // Canopy outline
+      gameCtx.strokeStyle = 'rgba(0,0,0,0.2)';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.arc(cx, cy, canopyR * 1.02, 0, Math.PI * 2);
+      gameCtx.stroke();
+
+      // ── Tree HP bar ──
+      if (appleTree.hp < appleTree.maxHp) {
+        const barW = tw * 0.7;
+        const barH = 5;
+        const barX = treeScreenX + tw / 2 - barW / 2;
+        const barY = treeScreenY - 10;
+        gameCtx.fillStyle = 'rgba(0,0,0,0.5)';
+        gameCtx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+        gameCtx.fillStyle = '#555';
+        gameCtx.fillRect(barX, barY, barW, barH);
+        const hpFrac = appleTree.hp / appleTree.maxHp;
+        gameCtx.fillStyle = hpFrac > 0.5 ? '#2ecc71' : hpFrac > 0.25 ? '#f1c40f' : '#e74c3c';
+        gameCtx.fillRect(barX, barY, barW * hpFrac, barH);
+      }
+    } else {
+      // ── Dead tree: stump ──
+      const stumpW = tw * 0.3;
+      const stumpH = th * 0.25;
+      const stumpX = treeScreenX + tw / 2 - stumpW / 2;
+      const stumpY = treeScreenY + th - stumpH - 2;
+
+      // Stump shadow
+      gameCtx.fillStyle = 'rgba(0,0,0,0.15)';
+      gameCtx.beginPath();
+      gameCtx.ellipse(treeScreenX + tw / 2, treeScreenY + th - 2, tw * 0.25, th * 0.06, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+
+      // Stump body
+      gameCtx.fillStyle = '#5a3420';
+      gameCtx.fillRect(stumpX, stumpY, stumpW, stumpH);
+      // Stump top (rings)
+      gameCtx.fillStyle = '#7a5035';
+      gameCtx.beginPath();
+      gameCtx.ellipse(treeScreenX + tw / 2, stumpY, stumpW / 2, stumpH * 0.25, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#4a2a18';
+      gameCtx.lineWidth = 0.8;
+      gameCtx.beginPath();
+      gameCtx.ellipse(treeScreenX + tw / 2, stumpY, stumpW * 0.3, stumpH * 0.15, 0, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.beginPath();
+      gameCtx.ellipse(treeScreenX + tw / 2, stumpY, stumpW * 0.15, stumpH * 0.08, 0, 0, Math.PI * 2);
+      gameCtx.stroke();
+
+      // Regrow timer
+      if (appleTree.regrowTimer > 0) {
+        gameCtx.fillStyle = 'rgba(255,255,255,0.8)';
+        gameCtx.font = 'bold 10px "Press Start 2P", monospace';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText(Math.ceil(appleTree.regrowTimer) + 's', treeScreenX + tw / 2, stumpY - 8);
+        gameCtx.textAlign = 'left';
+      }
+    }
+
+    // ── Render apples ──
+    for (const apple of appleTree.apples) {
+      const ax = (apple.col + 0.5) * GAME_TILE - camX;
+      const ay = (apple.row + 0.5) * GAME_TILE - camY;
+      const ar = GAME_TILE * 0.25;
+
+      // Apple body
+      gameCtx.fillStyle = '#e74c3c';
+      gameCtx.beginPath();
+      gameCtx.arc(ax, ay, ar, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Apple highlight
+      gameCtx.fillStyle = '#ff6b6b';
+      gameCtx.beginPath();
+      gameCtx.arc(ax - ar * 0.25, ay - ar * 0.3, ar * 0.35, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Stem
+      gameCtx.strokeStyle = '#5a3420';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(ax, ay - ar);
+      gameCtx.lineTo(ax + 1, ay - ar - 4);
+      gameCtx.stroke();
+      // Leaf on stem
+      gameCtx.fillStyle = '#2ecc71';
+      gameCtx.beginPath();
+      gameCtx.ellipse(ax + 3, ay - ar - 3, 3, 1.5, 0.5, 0, Math.PI * 2);
+      gameCtx.fill();
     }
   }
 
@@ -5655,6 +6791,9 @@ function renderGame() {
 
     // ── Room visibility: only visible to its target player ──
     if (p.summonType === 'room' && p.summonTargetId !== localPlayerId) continue;
+
+    // ── Moderator Firewall: invisible to enemies while active ──
+    if (p.modFirewallTimer > 0 && p.id !== localPlayerId) continue;
 
     const sx = p.x - camX;
     const sy = p.y - camY;
@@ -6184,6 +7323,133 @@ function renderGame() {
         gameCtx.beginPath();
         gameCtx.arc(sx + 3, sy - 1, 1.5, 0, Math.PI * 2);
         gameCtx.fill();
+      } else if (p.summonType === 'napoleon-cannon') {
+        // ── Napoleon Cannon: wheeled cannon render ──
+        const cW = radius * 2.2;
+        const cH = radius * 1.2;
+        // Barrel
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#444';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - cW * 0.1, sy - cH * 0.35);
+        gameCtx.lineTo(sx + cW * 0.6, sy - cH * 0.2);
+        gameCtx.lineTo(sx + cW * 0.65, sy - cH * 0.05);
+        gameCtx.lineTo(sx + cW * 0.6, sy + cH * 0.1);
+        gameCtx.lineTo(sx - cW * 0.1, sy + cH * 0.05);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Barrel muzzle ring
+        gameCtx.strokeStyle = '#888';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.arc(sx + cW * 0.62, sy - cH * 0.05, cH * 0.18, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Carriage body
+        gameCtx.fillStyle = isDying ? '#600' : '#5c3a1e';
+        gameCtx.fillRect(sx - cW * 0.3, sy - cH * 0.1, cW * 0.4, cH * 0.5);
+        // Left wheel
+        gameCtx.strokeStyle = '#333';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx - cW * 0.2, sy + cH * 0.5, cH * 0.3, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Wheel spokes
+        for (let i = 0; i < 4; i++) {
+          const a = (i / 4) * Math.PI * 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx - cW * 0.2, sy + cH * 0.5);
+          gameCtx.lineTo(sx - cW * 0.2 + Math.cos(a) * cH * 0.3, sy + cH * 0.5 + Math.sin(a) * cH * 0.3);
+          gameCtx.stroke();
+        }
+        // Right wheel
+        gameCtx.beginPath();
+        gameCtx.arc(sx + cW * 0.05, sy + cH * 0.5, cH * 0.3, 0, Math.PI * 2);
+        gameCtx.stroke();
+        for (let i = 0; i < 4; i++) {
+          const a = (i / 4) * Math.PI * 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + cW * 0.05, sy + cH * 0.5);
+          gameCtx.lineTo(sx + cW * 0.05 + Math.cos(a) * cH * 0.3, sy + cH * 0.5 + Math.sin(a) * cH * 0.3);
+          gameCtx.stroke();
+        }
+        // HP bar above
+        const cHpFrac = Math.max(0, p.hp / p.maxHp);
+        gameCtx.fillStyle = '#600';
+        gameCtx.fillRect(sx - cW * 0.4, sy - cH * 0.8, cW * 0.8, 3);
+        gameCtx.fillStyle = '#0f0';
+        gameCtx.fillRect(sx - cW * 0.4, sy - cH * 0.8, cW * 0.8 * cHpFrac, 3);
+      } else if (p.summonType === 'napoleon-infantry') {
+        // ── Napoleon Infantry: small musketeer soldier ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#1a3a6b';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.8, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Shako hat (tall cylindrical)
+        gameCtx.fillStyle = '#111';
+        gameCtx.fillRect(sx - radius * 0.45, sy - radius * 1.8, radius * 0.9, radius * 1.0);
+        // Hat plume (red)
+        gameCtx.fillStyle = '#cc0000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius * 1.85, radius * 0.25, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Musket (diagonal line)
+        gameCtx.strokeStyle = '#5c3a1e';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.3, sy - radius * 0.2);
+        gameCtx.lineTo(sx + radius * 1.5, sy - radius * 1.2);
+        gameCtx.stroke();
+        // Bayonet tip
+        gameCtx.strokeStyle = '#aaa';
+        gameCtx.lineWidth = 1;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 1.5, sy - radius * 1.2);
+        gameCtx.lineTo(sx + radius * 1.7, sy - radius * 1.5);
+        gameCtx.stroke();
+        // White cross belt
+        gameCtx.strokeStyle = '#ddd';
+        gameCtx.lineWidth = 1;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.5, sy - radius * 0.4);
+        gameCtx.lineTo(sx + radius * 0.5, sy + radius * 0.4);
+        gameCtx.moveTo(sx + radius * 0.5, sy - radius * 0.4);
+        gameCtx.lineTo(sx - radius * 0.5, sy + radius * 0.4);
+        gameCtx.stroke();
+      } else if (p.summonType === 'napoleon-wall') {
+        // ── Defensive Tactics Wall: 2x2 tile outline (gold dashed border, no fill) ──
+        const ws = (p.wallSize || 2) * GAME_TILE;
+        const wx = sx - ws / 2;
+        const wy = sy - ws / 2;
+        gameCtx.strokeStyle = isDying ? '#8b0000' : '#d4af37';
+        gameCtx.lineWidth = 2.5;
+        gameCtx.setLineDash([6, 4]);
+        gameCtx.strokeRect(wx, wy, ws, ws);
+        gameCtx.setLineDash([]);
+        // Corner decorations (fleur-de-lis style dots)
+        gameCtx.fillStyle = '#d4af37';
+        const corners = [[wx, wy], [wx + ws, wy], [wx, wy + ws], [wx + ws, wy + ws]];
+        for (const [cx, cy] of corners) {
+          gameCtx.beginPath();
+          gameCtx.arc(cx, cy, 3, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+        // "Defended" text above
+        gameCtx.fillStyle = '#d4af37';
+        gameCtx.font = 'bold 8px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('⚜', sx, wy - 4);
+        // Timer indicator (wall is invincible, shows remaining seconds)
+        if (p.wallTimer !== undefined) {
+          const tSec = Math.ceil(p.wallTimer);
+          const tFrac = Math.max(0, p.wallTimer / 30);
+          gameCtx.fillStyle = '#333';
+          gameCtx.fillRect(wx, wy - 10, ws, 3);
+          gameCtx.fillStyle = '#d4af37';
+          gameCtx.fillRect(wx, wy - 10, ws * tFrac, 3);
+          gameCtx.fillStyle = '#d4af37';
+          gameCtx.font = 'bold 7px sans-serif';
+          gameCtx.textAlign = 'center';
+          gameCtx.fillText(tSec + 's', sx, wy - 13);
+        }
       }
     } else if (p.fighter && p.fighter.id === 'onexonexonex' && !p.isSummon) {
       // ── 1X1X1X1: Fully custom dot — dark base with neon green glitches + red eye ──
@@ -6325,6 +7591,68 @@ function renderGame() {
         gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
         gameCtx.fill();
       }
+    } else if (p.fighter && p.fighter.id === 'moderator') {
+      // Moderator: the dot IS a terminal window
+      const tw = radius * 2;
+      const th = radius * 2;
+      const txOff = sx - tw / 2;
+      const tyOff = sy - th / 2;
+      const cr = radius * 0.25;
+      // Terminal background (rounded rect)
+      gameCtx.fillStyle = isDying ? '#3a0000' : '#0c0c0c';
+      gameCtx.beginPath();
+      gameCtx.moveTo(txOff + cr, tyOff); gameCtx.lineTo(txOff + tw - cr, tyOff);
+      gameCtx.quadraticCurveTo(txOff + tw, tyOff, txOff + tw, tyOff + cr);
+      gameCtx.lineTo(txOff + tw, tyOff + th - cr);
+      gameCtx.quadraticCurveTo(txOff + tw, tyOff + th, txOff + tw - cr, tyOff + th);
+      gameCtx.lineTo(txOff + cr, tyOff + th);
+      gameCtx.quadraticCurveTo(txOff, tyOff + th, txOff, tyOff + th - cr);
+      gameCtx.lineTo(txOff, tyOff + cr);
+      gameCtx.quadraticCurveTo(txOff, tyOff, txOff + cr, tyOff);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Title bar
+      const tbH = th * 0.2;
+      gameCtx.fillStyle = isDying ? '#5a0000' : '#2d2d2d';
+      gameCtx.beginPath();
+      gameCtx.moveTo(txOff + cr, tyOff); gameCtx.lineTo(txOff + tw - cr, tyOff);
+      gameCtx.quadraticCurveTo(txOff + tw, tyOff, txOff + tw, tyOff + cr);
+      gameCtx.lineTo(txOff + tw, tyOff + tbH);
+      gameCtx.lineTo(txOff, tyOff + tbH);
+      gameCtx.lineTo(txOff, tyOff + cr);
+      gameCtx.quadraticCurveTo(txOff, tyOff, txOff + cr, tyOff);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Title bar dots (red/yellow/green)
+      const dotSz = Math.max(1.2, radius * 0.12);
+      const dotGap = dotSz * 2.8;
+      const dotYPos = tyOff + tbH * 0.5;
+      gameCtx.fillStyle = '#ff5f56'; gameCtx.beginPath(); gameCtx.arc(txOff + dotGap, dotYPos, dotSz, 0, Math.PI * 2); gameCtx.fill();
+      gameCtx.fillStyle = '#ffbd2e'; gameCtx.beginPath(); gameCtx.arc(txOff + dotGap * 2, dotYPos, dotSz, 0, Math.PI * 2); gameCtx.fill();
+      gameCtx.fillStyle = '#27c93f'; gameCtx.beginPath(); gameCtx.arc(txOff + dotGap * 3, dotYPos, dotSz, 0, Math.PI * 2); gameCtx.fill();
+      // Green terminal text
+      if (!isDying) {
+        gameCtx.fillStyle = '#00ff41';
+        const fontSize = Math.max(5, radius * 0.55);
+        gameCtx.font = 'bold ' + fontSize + 'px monospace';
+        gameCtx.textAlign = 'left';
+        gameCtx.textBaseline = 'middle';
+        gameCtx.fillText('> mod_', txOff + 2, sy + th * 0.12);
+      }
+      // Green border glow
+      gameCtx.strokeStyle = isDying ? '#8b0000' : '#00ff41';
+      gameCtx.lineWidth = 1.2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(txOff + cr, tyOff); gameCtx.lineTo(txOff + tw - cr, tyOff);
+      gameCtx.quadraticCurveTo(txOff + tw, tyOff, txOff + tw, tyOff + cr);
+      gameCtx.lineTo(txOff + tw, tyOff + th - cr);
+      gameCtx.quadraticCurveTo(txOff + tw, tyOff + th, txOff + tw - cr, tyOff + th);
+      gameCtx.lineTo(txOff + cr, tyOff + th);
+      gameCtx.quadraticCurveTo(txOff, tyOff + th, txOff, tyOff + th - cr);
+      gameCtx.lineTo(txOff, tyOff + cr);
+      gameCtx.quadraticCurveTo(txOff, tyOff, txOff + cr, tyOff);
+      gameCtx.closePath();
+      gameCtx.stroke();
     } else {
       // Normal player dot
       gameCtx.fillStyle = isDying ? '#8b0000' : (p.boiledOneActive ? '#8b0000' : p.color);
@@ -6572,6 +7900,112 @@ function renderGame() {
         gameCtx.font = 'bold 8px monospace';
         gameCtx.textAlign = 'center';
         gameCtx.fillText(p.catCards + '', sx, sy + radius + 10);
+      }
+    } else if (p.fighter && p.fighter.id === 'napoleon') {
+      // Napoleon: grand bicorne hat covering the whole head
+      const hatW = radius * 2.2;
+      const hatH = radius * 1.1;
+      const hatY = sy - radius * 0.45;
+      // Hat body (dark navy bicorne — large and grand)
+      gameCtx.fillStyle = '#0a0a1a';
+      gameCtx.beginPath();
+      // Left upswept brim — dramatic sweep
+      gameCtx.moveTo(sx - hatW * 0.55, hatY + hatH * 0.1);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.5, hatY - hatH * 0.7, sx - hatW * 0.08, hatY - hatH * 0.35);
+      // Top crest — tall peak
+      gameCtx.quadraticCurveTo(sx, hatY - hatH * 0.5, sx + hatW * 0.08, hatY - hatH * 0.35);
+      // Right upswept brim — dramatic sweep
+      gameCtx.quadraticCurveTo(sx + hatW * 0.5, hatY - hatH * 0.7, sx + hatW * 0.55, hatY + hatH * 0.1);
+      // Bottom curve wrapping around head
+      gameCtx.quadraticCurveTo(sx + hatW * 0.25, hatY + hatH * 0.35, sx, hatY + hatH * 0.25);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.25, hatY + hatH * 0.35, sx - hatW * 0.55, hatY + hatH * 0.1);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Outer edge highlight
+      gameCtx.strokeStyle = '#1a1a3a';
+      gameCtx.lineWidth = 1;
+      gameCtx.stroke();
+      // Gold trim band — thick and prominent
+      gameCtx.strokeStyle = '#d4af37';
+      gameCtx.lineWidth = 2.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - hatW * 0.48, hatY + hatH * 0.08);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.2, hatY + hatH * 0.3, sx, hatY + hatH * 0.22);
+      gameCtx.quadraticCurveTo(sx + hatW * 0.2, hatY + hatH * 0.3, sx + hatW * 0.48, hatY + hatH * 0.08);
+      gameCtx.stroke();
+      // Second gold trim line at brim tips
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - hatW * 0.52, hatY + hatH * 0.05);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.45, hatY - hatH * 0.55, sx - hatW * 0.1, hatY - hatH * 0.3);
+      gameCtx.stroke();
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + hatW * 0.52, hatY + hatH * 0.05);
+      gameCtx.quadraticCurveTo(sx + hatW * 0.45, hatY - hatH * 0.55, sx + hatW * 0.1, hatY - hatH * 0.3);
+      gameCtx.stroke();
+      // Cockade (tricolor rosette — larger)
+      gameCtx.fillStyle = '#003399';
+      gameCtx.beginPath(); gameCtx.arc(sx, hatY + hatH * 0.05, 4.5, 0, Math.PI * 2); gameCtx.fill();
+      gameCtx.fillStyle = '#fff';
+      gameCtx.beginPath(); gameCtx.arc(sx, hatY + hatH * 0.05, 3, 0, Math.PI * 2); gameCtx.fill();
+      gameCtx.fillStyle = '#cc0000';
+      gameCtx.beginPath(); gameCtx.arc(sx, hatY + hatH * 0.05, 1.8, 0, Math.PI * 2); gameCtx.fill();
+      // Gold button center
+      gameCtx.fillStyle = '#d4af37';
+      gameCtx.beginPath(); gameCtx.arc(sx, hatY + hatH * 0.05, 0.8, 0, Math.PI * 2); gameCtx.fill();
+      // White plume feather curving from left tip
+      gameCtx.strokeStyle = '#fff';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - hatW * 0.5, hatY - hatH * 0.5);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.6, hatY - hatH * 0.9, sx - hatW * 0.35, hatY - hatH * 1.0);
+      gameCtx.stroke();
+      gameCtx.lineWidth = 1.2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - hatW * 0.48, hatY - hatH * 0.55);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.55, hatY - hatH * 0.85, sx - hatW * 0.3, hatY - hatH * 0.95);
+      gameCtx.stroke();
+      // Cavalry glow when mounted
+      if (p.napoleonCavalry) {
+        gameCtx.strokeStyle = 'rgba(200, 169, 110, 0.6)';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Speed lines
+        gameCtx.strokeStyle = 'rgba(200, 169, 110, 0.4)';
+        gameCtx.lineWidth = 1.5;
+        for (let i = 0; i < 3; i++) {
+          const a = (i / 3) * Math.PI * 2 + Date.now() * 0.005;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + Math.cos(a) * (radius + 3), sy + Math.sin(a) * (radius + 3));
+          gameCtx.lineTo(sx + Math.cos(a) * (radius + 10), sy + Math.sin(a) * (radius + 10));
+          gameCtx.stroke();
+        }
+      }
+      // Cannon indicator
+      if (p.napoleonCannonId) {
+        gameCtx.fillStyle = '#555';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'moderator') {
+      // Moderator: Firewall glow when active
+      if (p.modFirewallTimer > 0) {
+        gameCtx.strokeStyle = 'rgba(0, 200, 255, 0.6)';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+        gameCtx.stroke();
+      }
+      // Server Update glow when buffed
+      if (p.modServerUpdateTimer > 0) {
+        gameCtx.strokeStyle = 'rgba(50, 255, 100, 0.5)';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+        gameCtx.stroke();
       }
     } else {
       // Fighter: Sword indicator on the dot
@@ -6896,6 +8330,19 @@ function renderGame() {
       gameCtx.beginPath();
       gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
       gameCtx.fill();
+    }
+
+    // Apple heal glow
+    if (p.effects.some((fx) => fx.type === 'apple-heal')) {
+      gameCtx.fillStyle = 'rgba(46, 204, 113, 0.35)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#2ecc71';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('+300', sx, sy - radius - 8);
+      gameCtx.textAlign = 'left';
     }
 
     // Blind ring (Poker)
@@ -7358,6 +8805,38 @@ function renderGame() {
       gameCtx.strokeStyle = '#fff';
       gameCtx.lineWidth = 1;
       gameCtx.stroke();
+    } else if (proj.type === 'cannonball') {
+      // ── Napoleon Cannonball: dark iron sphere with smoke trail ──
+      // Smoke trail
+      gameCtx.fillStyle = 'rgba(120, 120, 120, 0.3)';
+      for (let i = 1; i <= 3; i++) {
+        const tx = px - proj.vx * i * 0.3;
+        const ty = py - proj.vy * i * 0.3;
+        gameCtx.beginPath();
+        gameCtx.arc(tx, ty, 4 - i * 0.8, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Main cannonball
+      gameCtx.fillStyle = '#222';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 5, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Metallic highlight
+      gameCtx.fillStyle = 'rgba(200, 200, 200, 0.35)';
+      gameCtx.beginPath();
+      gameCtx.arc(px - 1.5, py - 1.5, 2, 0, Math.PI * 2);
+      gameCtx.fill();
+    } else if (proj.type === 'infantry-bullet') {
+      // ── Napoleon Infantry Bullet: small bright musket ball ──
+      gameCtx.fillStyle = '#ffcc44';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 2.5, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Muzzle flash glow
+      gameCtx.fillStyle = 'rgba(255, 200, 60, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 5, 0, Math.PI * 2);
+      gameCtx.fill();
     }
   }
 
@@ -7781,6 +9260,14 @@ function checkWinCondition() {
           trackGearDmgAbsorbed(_gearDmgAbsorbedRemainder);
           _gearDmgAbsorbedRemainder = 0;
         }
+        // Napoleon unlock: win a battle with a summon
+        if (_hadSummonKillThisGame && typeof trackNapoleonSummonWin === 'function') {
+          trackNapoleonSummonWin();
+        }
+        // Moderator achievement: win one game as moderator
+        if (localPlayer && localPlayer.fighter.id === 'moderator' && typeof trackModWin === 'function') {
+          trackModWin();
+        }
       } else {
         gameCtx.fillStyle = '#e94560';
         const winnerName = alive.length === 1 ? alive[0].name : 'Nobody';
@@ -7984,6 +9471,20 @@ function buildGameStateSnapshot() {
     // Summon target tracking (for backrooms-chaser, alternate, and room)
     summonTargetId: p.summonTargetId || null,
     roomDPS: p.roomDPS || 0,
+    // Moderator state
+    modFirewallTimer: p.modFirewallTimer || 0,
+    modServerUpdateTimer: p.modServerUpdateTimer || 0,
+    modFearTimer: p.modFearTimer || 0,
+    modFearSourceId: p.modFearSourceId || null,
+    modServerResetUses: p.modServerResetUses || 0,
+    modDisabledAbilities: p.modDisabledAbilities || [],
+    // Napoleon state
+    napoleonCavalry: p.napoleonCavalry || false,
+    napoleonCannonId: p.napoleonCannonId || null,
+    napoleonWallId: p.napoleonWallId || null,
+    napoleonInfantryIds: p.napoleonInfantryIds || [],
+    // Movement state for non-host position correction
+    specialJumping: p.specialJumping || false,
     // visual effects (include aimNx/aimNy for directional rendering, stolenType for cat-steal-fire)
     effects: (p.effects || []).map(fx => ({ type: fx.type, timer: fx.timer, aimNx: fx.aimNx, aimNy: fx.aimNy, stolenType: fx.stolenType })),
     // fighter id so client knows what it is
@@ -7993,7 +9494,17 @@ function buildGameStateSnapshot() {
     x: p.x, y: p.y, vx: p.vx, vy: p.vy,
     type: p.type, timer: p.timer, ownerId: p.ownerId,
   }));
-  return { players, projectiles: projs, zoneInset, zoneTimer };
+  return {
+    players, projectiles: projs, zoneInset, zoneTimer,
+    appleTree: appleTree ? {
+      col: appleTree.col, row: appleTree.row,
+      hp: appleTree.hp, maxHp: appleTree.maxHp,
+      alive: appleTree.alive,
+      regrowTimer: appleTree.regrowTimer,
+      appleTimer: appleTree.appleTimer,
+      apples: appleTree.apples.slice(),
+    } : null,
+  };
 }
 
 // Non-host client: receive full state snapshot from host and apply it
@@ -8025,13 +9536,31 @@ function onRemoteGameState(snapshot) {
     if (sp.name) p.name = sp.name;
     if (sp.color) p.color = sp.color;
     // For local player: DON'T overwrite position — local prediction handles movement.
-    // Only accept non-position state from host (HP, alive, effects, etc.)
+    // Exception: when the host controls movement (stunned, dashing, knocked back, dead)
+    // accept the host's position to prevent desync during non-predicted states.
     // For remote players: set interpolation target so movement is smooth
     if (sp.id !== localPlayerId) {
       p._targetX = sp.x; p._targetY = sp.y;
       // If first snapshot or teleported far, snap immediately
       const dx = sp.x - p.x, dy = sp.y - p.y;
       if (dx * dx + dy * dy > 10000) { p.x = sp.x; p.y = sp.y; }
+    } else {
+      // Local player: accept host position when in non-predicted states
+      if (sp.stunned > 0 || !sp.alive || sp.noliVoidRushActive || sp.specialJumping) {
+        p.x = sp.x; p.y = sp.y;
+      } else {
+        // Soft correction: gently pull local prediction toward host position to prevent drift
+        const dx = sp.x - p.x, dy = sp.y - p.y;
+        const distSq = dx * dx + dy * dy;
+        if (distSq > (GAME_TILE * 3) * (GAME_TILE * 3)) {
+          // Teleport snap if very far (>3 tiles away from host)
+          p.x = sp.x; p.y = sp.y;
+        } else if (distSq > (GAME_TILE * 0.5) * (GAME_TILE * 0.5)) {
+          // Gentle correction toward host position (prevents slow drift)
+          p.x += dx * 0.1;
+          p.y += dy * 0.1;
+        }
+      }
     }
     // Detect death transition for local player (init spectator camera)
     if (sp.id === localPlayerId && p.alive && !sp.alive) {
@@ -8117,6 +9646,19 @@ function onRemoteGameState(snapshot) {
     p.alternateId = sp.alternateId || null;
     p.summonTargetId = sp.summonTargetId || null;
     p.roomDPS = sp.roomDPS || 0;
+    // Moderator
+    p.modFirewallTimer = sp.modFirewallTimer || 0;
+    p.modServerUpdateTimer = sp.modServerUpdateTimer || 0;
+    p.modFearTimer = sp.modFearTimer || 0;
+    p.modFearSourceId = sp.modFearSourceId || null;
+    p.modServerResetUses = sp.modServerResetUses || 0;
+    p.modDisabledAbilities = sp.modDisabledAbilities || [];
+    // Napoleon
+    p.napoleonCavalry = sp.napoleonCavalry || false;
+    p.napoleonCannonId = sp.napoleonCannonId || null;
+    p.napoleonWallId = sp.napoleonWallId || null;
+    p.napoleonInfantryIds = sp.napoleonInfantryIds || [];
+    p.specialJumping = sp.specialJumping || false;
     if (sp.effects) p.effects = sp.effects;
   }
 
@@ -8126,6 +9668,35 @@ function onRemoteGameState(snapshot) {
     type: sp.type, timer: sp.timer, ownerId: sp.ownerId,
     damage: 0, // client doesn't resolve damage — host does
   }));
+
+  // Sync apple tree state
+  if (snapshot.appleTree) {
+    if (!appleTree) appleTree = {};
+    appleTree.col = snapshot.appleTree.col;
+    appleTree.row = snapshot.appleTree.row;
+    appleTree.hp = snapshot.appleTree.hp;
+    appleTree.maxHp = snapshot.appleTree.maxHp;
+    appleTree.alive = snapshot.appleTree.alive;
+    appleTree.regrowTimer = snapshot.appleTree.regrowTimer;
+    appleTree.appleTimer = snapshot.appleTree.appleTimer;
+    appleTree.apples = snapshot.appleTree.apples || [];
+    // Sync map tiles for dead tree (stump = ROCK)
+    if (!appleTree.alive) {
+      for (let dr = 0; dr < 2; dr++) {
+        for (let dc = 0; dc < 2; dc++) {
+          gameMap.tiles[appleTree.row + dr][appleTree.col + dc] = TILE.ROCK;
+        }
+      }
+    } else {
+      for (let dr = 0; dr < 2; dr++) {
+        for (let dc = 0; dc < 2; dc++) {
+          if (gameMap.tiles[appleTree.row + dr][appleTree.col + dc] === TILE.ROCK) {
+            gameMap.tiles[appleTree.row + dr][appleTree.col + dc] = TILE.GROUND;
+          }
+        }
+      }
+    }
+  }
 
   // Re-bind localPlayer reference (could have been replaced above)
   localPlayer = gamePlayers.find(p => p.id === localPlayerId);
@@ -8153,12 +9724,9 @@ function onRemotePosition(data) {
   if (isHostAuthority) {
     // Host: directly update remote player's position for authoritative combat resolution
     p.x = x; p.y = y;
-  } else {
-    // Non-host: smoothly interpolate toward received position
-    p._targetX = x; p._targetY = y;
-    const dx = x - p.x, dy = y - p.y;
-    if (dx * dx + dy * dy > 10000) { p.x = x; p.y = y; } // teleport-snap if very far
   }
+  // Non-host: ignore position relay — remote positions come from host snapshot only
+  // This prevents two conflicting position sources from causing jitter
 }
 
 // Apply movement from a remote input object to a player (host-side)
