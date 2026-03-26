@@ -48,6 +48,7 @@ let combatLog = [];    // [{text, timer, color}]
 let spectateIndex = -1;   // index into gamePlayers, -1 = free camera
 let freeCamX = 0, freeCamY = 0;
 let deathOverlayTimer = 0; // seconds since local player died — used to fade out "YOU DIED"
+let diedInOtherWorld = false; // true if local player died while in backrooms or with alternate
 
 // Training dummy respawn timer
 let dummyRespawnTimer = 0;
@@ -192,7 +193,7 @@ function startGame(mapIndex, players, myId, mode) {
     gamePlayers.push(dummy);
     dummyRespawnTimer = 0;
     // Spawn a practice bot that fights back (easy difficulty)
-    const botFighters = getAllFighterIds().filter(f => f !== localPlayer.fighter.id);
+    const botFighters = getAllFighterIds().filter(f => f !== localPlayer.fighter.id && f !== 'moderator');
     const botFighterId = botFighters[Math.floor(Math.random() * botFighters.length)];
     const botFighter = getFighter(botFighterId);
     const botSpawn = validSpawns[1] || { r: centerR + 3, c: centerC + 3 };
@@ -210,7 +211,7 @@ function startGame(mapIndex, players, myId, mode) {
     gamePlayers.push(bot);
   } else if (gameMode === 'fight') {
     // Fight: 4 CPU opponents — 1 easy, 1 medium, 1 hard, 1 hard
-    const allFighters = getAllFighterIds();
+    const allFighters = getAllFighterIds().filter(f => f !== 'moderator');
     const difficulties = ['easy', 'medium', 'hard', 'hard'];
     const shuffledNames = CPU_NAMES.slice().sort(() => Math.random() - 0.5);
     const shuffledColors = CPU_COLORS.slice().sort(() => Math.random() - 0.5);
@@ -436,6 +437,7 @@ function createPlayerState(p, spawn, fighter) {
     napoleonInfantryIds: [],     // ids of infantry summons
     // Moderator-specific state
     modBugFixedTargets: [],      // [{targetId, abilityIndex}] — disabled moves
+    modDisabledAbilities: [],    // ability slots disabled by Bug Fixing
     modServerResetUses: 0,       // uses of Server Reset (max 3)
     modFirewallTimer: 0,         // seconds remaining of Firewall
     modServerUpdateTimer: 0,     // buff timer for Server Update
@@ -617,7 +619,7 @@ function updateGame(dt) {
       if (col < 0 || col >= gameMap.cols || row < 0 || row >= gameMap.rows) {
         projectiles.splice(i, 1); continue;
       }
-      if (gameMap.tiles[row][col] === TILE.ROCK) {
+      if (gameMap.tiles[row][col] === TILE.ROCK || isStumpTile(col, row)) {
         projectiles.splice(i, 1); continue;
       }
     }
@@ -1294,12 +1296,8 @@ function updateGame(dt) {
         appleTree.hp = appleTree.maxHp;
         appleTree.regrowTimer = 0;
         appleTree.appleTimer = 15;
-        // Restore tree tiles to GROUND (in case they were changed)
-        for (let dr = 0; dr < 2; dr++) {
-          for (let dc = 0; dc < 2; dc++) {
-            gameMap.tiles[appleTree.row + dr][appleTree.col + dc] = TILE.GROUND;
-          }
-        }
+        // Tiles are already GROUND — stump blocking was via isStumpTile() which
+        // now returns false since alive=true. No tile changes needed.
       }
     }
 
@@ -1463,6 +1461,13 @@ function updateMovement(dt) {
   // Igloo containment removed — igloo is now freely walkable (slow applied in speed calc)
 }
 
+// Check if a tile is part of the dead apple tree stump (blocks movement like rock)
+function isStumpTile(col, row) {
+  if (!appleTree || appleTree.alive) return false;
+  return col >= appleTree.col && col <= appleTree.col + 1 &&
+         row >= appleTree.row && row <= appleTree.row + 1;
+}
+
 function canMoveTo(px, py, radius) {
   const offsets = [
     { x: -radius, y: -radius }, { x: radius, y: -radius },
@@ -1474,6 +1479,7 @@ function canMoveTo(px, py, radius) {
     if (col < 0 || col >= gameMap.cols || row < 0 || row >= gameMap.rows) return false;
     const tile = gameMap.tiles[row][col];
     if (tile === TILE.ROCK || tile === TILE.WATER) return false;
+    if (isStumpTile(col, row)) return false;
   }
   return true;
 }
@@ -1527,8 +1533,7 @@ function updateProjectiles(dt) {
       projectiles.splice(i, 1); continue;
     }
     const tile = gameMap.tiles[row][col];
-    if (tile === TILE.ROCK) {
-      // Check if this rock is actually a dead apple tree stump — projectile still stops
+    if (tile === TILE.ROCK || isStumpTile(col, row)) {
       projectiles.splice(i, 1); continue;
     }
 
@@ -1543,9 +1548,49 @@ function updateProjectiles(dt) {
           appleTree.alive = false;
           appleTree.regrowTimer = 30;
           appleTree.apples = [];
-          for (let dr = 0; dr < 2; dr++) {
-            for (let dc = 0; dc < 2; dc++) {
-              gameMap.tiles[appleTree.row + dr][appleTree.col + dc] = TILE.ROCK;
+          // Tiles stay as GROUND — isStumpTile() handles blocking movement
+          // Push any players standing on the stump to a safe position nearby
+          const stumpCenterX = (appleTree.col + 1) * GAME_TILE;
+          const stumpCenterY = (appleTree.row + 1) * GAME_TILE;
+          const pr = GAME_TILE * PLAYER_RADIUS_RATIO;
+          for (const pl of gamePlayers) {
+            if (!pl.alive) continue;
+            // Check if player overlaps the 2x2 stump area
+            const pCol = Math.floor(pl.x / GAME_TILE);
+            const pRow = Math.floor(pl.y / GAME_TILE);
+            if (pCol >= appleTree.col && pCol <= appleTree.col + 1 &&
+                pRow >= appleTree.row && pRow <= appleTree.row + 1) {
+              // Push outward from stump center to nearest safe position
+              let pushDx = pl.x - stumpCenterX;
+              let pushDy = pl.y - stumpCenterY;
+              const pushDist = Math.sqrt(pushDx * pushDx + pushDy * pushDy) || 1;
+              pushDx /= pushDist; pushDy /= pushDist;
+              let placed = false;
+              for (let step = 1; step <= 8; step++) {
+                const tryX = stumpCenterX + pushDx * GAME_TILE * (1.2 + step * 0.3);
+                const tryY = stumpCenterY + pushDy * GAME_TILE * (1.2 + step * 0.3);
+                if (canMoveTo(tryX, tryY, pr)) {
+                  pl.x = tryX; pl.y = tryY; placed = true; break;
+                }
+              }
+              // If direct push failed, try 8 compass directions
+              if (!placed) {
+                for (let a = 0; a < 8 && !placed; a++) {
+                  const angle = (a / 8) * Math.PI * 2;
+                  for (let step = 1; step <= 6 && !placed; step++) {
+                    const tryX = stumpCenterX + Math.cos(angle) * GAME_TILE * (1.2 + step * 0.3);
+                    const tryY = stumpCenterY + Math.sin(angle) * GAME_TILE * (1.2 + step * 0.3);
+                    if (canMoveTo(tryX, tryY, pr)) {
+                      pl.x = tryX; pl.y = tryY; placed = true;
+                    }
+                  }
+                }
+              }
+              // Last resort: random safe position
+              if (!placed) {
+                const safe = getRandomSafePosition();
+                pl.x = safe.x; pl.y = safe.y;
+              }
             }
           }
           combatLog.push({ text: '🪓 Apple tree destroyed!', timer: 4, color: '#e67e22' });
@@ -2078,25 +2123,27 @@ function updateSummons(dt) {
       }
     }
 
-    // Clean up summon if owner died
-    if (owner && !owner.alive) {
+    // Clean up summon if owner died or left the game entirely
+    if (!owner || !owner.alive) {
       s.alive = false;
       s.hp = 0;
       s.effects.push({ type: 'death', timer: 2 });
-      // Clear owner's reference to this summon
-      if (s.summonType === 'coolkidd' && owner.coolkiddId === s.id) owner.coolkiddId = null;
-      if (s.summonType === 'bowler' && owner.bowlerId === s.id) owner.bowlerId = null;
-      if (s.summonType === 'crab' && owner.crabIds) {
-        const cidx = owner.crabIds.indexOf(s.id);
-        if (cidx >= 0) owner.crabIds.splice(cidx, 1);
-      }
-      if (s.summonType === 'johndoe' && owner.johnDoeId === s.id) owner.johnDoeId = null;
-      if ((s.summonType === 'destructive-unicorn' || s.summonType === 'queenbee-unicorn' || s.summonType === 'seductive-unicorn') && owner.catUnicornId === s.id) owner.catUnicornId = null;
-      if (s.summonType === 'napoleon-cannon' && owner.napoleonCannonId === s.id) owner.napoleonCannonId = null;
-      if (s.summonType === 'napoleon-wall' && owner.napoleonWallId === s.id) owner.napoleonWallId = null;
-      if (s.summonType === 'napoleon-infantry' && owner.napoleonInfantryIds) {
-        const idx = owner.napoleonInfantryIds.indexOf(s.id);
-        if (idx >= 0) owner.napoleonInfantryIds.splice(idx, 1);
+      // Clear owner's reference to this summon (only if owner still exists)
+      if (owner) {
+        if (s.summonType === 'coolkidd' && owner.coolkiddId === s.id) owner.coolkiddId = null;
+        if (s.summonType === 'bowler' && owner.bowlerId === s.id) owner.bowlerId = null;
+        if (s.summonType === 'crab' && owner.crabIds) {
+          const cidx = owner.crabIds.indexOf(s.id);
+          if (cidx >= 0) owner.crabIds.splice(cidx, 1);
+        }
+        if (s.summonType === 'johndoe' && owner.johnDoeId === s.id) owner.johnDoeId = null;
+        if ((s.summonType === 'destructive-unicorn' || s.summonType === 'queenbee-unicorn' || s.summonType === 'seductive-unicorn') && owner.catUnicornId === s.id) owner.catUnicornId = null;
+        if (s.summonType === 'napoleon-cannon' && owner.napoleonCannonId === s.id) owner.napoleonCannonId = null;
+        if (s.summonType === 'napoleon-wall' && owner.napoleonWallId === s.id) owner.napoleonWallId = null;
+        if (s.summonType === 'napoleon-infantry' && owner.napoleonInfantryIds) {
+          const idx = owner.napoleonInfantryIds.indexOf(s.id);
+          if (idx >= 0) owner.napoleonInfantryIds.splice(idx, 1);
+        }
       }
     }
   }
@@ -2789,11 +2836,16 @@ function cpuAttack(cpu, params) {
       if (cpu.modServerResetUses < 3) {
         cpu.modServerResetUses++;
         cpu.cdT = fighter.abilities[3].cooldown;
+        const resetRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
         for (const p of gamePlayers) {
           if (!p.alive || p.isSummon) continue;
-          if (p.spawnX != null && p.spawnY != null) {
+          if (p.spawnX != null && p.spawnY != null && canMoveTo(p.spawnX, p.spawnY, resetRadius)) {
             p.x = p.spawnX;
             p.y = p.spawnY;
+          } else {
+            const safe = getRandomSafePosition();
+            p.x = safe.x;
+            p.y = safe.y;
           }
         }
         cpu.effects.push({ type: 'server-reset', timer: 2 });
@@ -4494,11 +4546,23 @@ function useAbility(key) {
       const enemies = gamePlayers.filter(p => p.alive && !p.isSummon && p.id !== lp.id);
       if (enemies.length > 0) {
         const victim = enemies[Math.floor(Math.random() * enemies.length)];
-        // TP victim near the moderator (safe position close by)
+        // TP victim near the moderator (safe position close by, not on rocks or inside moderator)
         const pr = GAME_TILE * PLAYER_RADIUS_RATIO;
-        let nx = lp.x + (Math.random() - 0.5) * GAME_TILE;
-        let ny = lp.y + (Math.random() - 0.5) * GAME_TILE;
-        if (!canMoveTo(nx, ny, pr)) { nx = lp.x; ny = lp.y; }
+        const minDist = GAME_TILE * 0.6; // minimum distance from moderator to avoid overlap
+        let nx = null, ny = null;
+        for (let attempt = 0; attempt < 16; attempt++) {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = GAME_TILE * (0.8 + Math.random() * 0.7); // 0.8–1.5 tiles away
+          const tx = lp.x + Math.cos(angle) * dist;
+          const ty = lp.y + Math.sin(angle) * dist;
+          if (canMoveTo(tx, ty, pr)) {
+            const dx = tx - lp.x, dy = ty - lp.y;
+            if (Math.sqrt(dx * dx + dy * dy) >= minDist) {
+              nx = tx; ny = ty; break;
+            }
+          }
+        }
+        if (nx === null) { const safe = getRandomSafePosition(); nx = safe.x; ny = safe.y; }
         victim.x = nx; victim.y = ny;
         victim.stunned = abil.stunDuration || 1;
         victim.modFearTimer = abil.fearDuration || 5;
@@ -5222,11 +5286,17 @@ function useAbility(key) {
         return;
       }
       lp.modServerResetUses++;
+      const resetRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
       for (const p of gamePlayers) {
         if (!p.alive || p.isSummon) continue;
-        if (p.spawnX != null && p.spawnY != null) {
+        if (p.spawnX != null && p.spawnY != null && canMoveTo(p.spawnX, p.spawnY, resetRadius)) {
           p.x = p.spawnX;
           p.y = p.spawnY;
+        } else {
+          // Spawn blocked (rock/water) — use a safe fallback position
+          const safe = getRandomSafePosition();
+          p.x = safe.x;
+          p.y = safe.y;
         }
         p.effects.push({ type: 'server-reset', timer: 1.5 });
       }
@@ -5587,6 +5657,23 @@ function useAbility(key) {
         combatLog.push({ text: '❌ Cannot use Analogus with only 2 players left!', timer: 2, color: '#999' });
         return;
       }
+      // With exactly 3 players: the third player (not Filbus, not the target) must have >50% HP
+      if (aliveNonSummon.length === 3) {
+        // Find closest enemy first to determine who the target would be
+        let checkClosestDist = Infinity, checkClosestTarget = null;
+        for (const t of gamePlayers) {
+          if (t.id === lp.id || !t.alive || t.isSummon) continue;
+          const d = Math.sqrt((t.x - lp.x) ** 2 + (t.y - lp.y) ** 2);
+          if (d < checkClosestDist) { checkClosestDist = d; checkClosestTarget = t; }
+        }
+        if (checkClosestTarget) {
+          const thirdPlayer = aliveNonSummon.find(p => p.id !== lp.id && p.id !== checkClosestTarget.id);
+          if (thirdPlayer && thirdPlayer.hp <= thirdPlayer.maxHp * 0.5) {
+            combatLog.push({ text: '❌ Cannot use Analogus — remaining player is too weak!', timer: 2, color: '#999' });
+            return;
+          }
+        }
+      }
       // Find closest enemy
       let closestDist = Infinity, closestTarget = null;
       for (const t of gamePlayers) {
@@ -5642,15 +5729,22 @@ function useAbility(key) {
           { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
           chaserFighter
         );
-        // Place chaser far from target
-        chaser.x = lp.x;
-        chaser.y = lp.y;
+        // Place chaser at Filbus position — verify it's walkable, otherwise use safe position
+        const chaserRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (canMoveTo(lp.x, lp.y, chaserRadius)) {
+          chaser.x = lp.x;
+          chaser.y = lp.y;
+        } else {
+          const safeChaserPos = getRandomSafePosition();
+          chaser.x = safeChaserPos.x;
+          chaser.y = safeChaserPos.y;
+        }
         chaser.hp = 999999;
         chaser.maxHp = 999999;
         chaser.isSummon = true;
         chaser.summonOwner = lp.id;
         chaser.summonType = 'backrooms-chaser';
-        chaser.summonSpeed = closestTarget.fighter.speed * 0.85; // slightly slower
+        chaser.summonSpeed = closestTarget.fighter.speed * 0.7; // noticeably slower than the player
         chaser.summonDamage = 999999; // instant kill on touch
         chaser.summonAttackCD = 0.5;
         chaser.summonAttackTimer = 0;
@@ -5674,8 +5768,22 @@ function useAbility(key) {
           { r: Math.floor(closestTarget.y / GAME_TILE), c: Math.floor(closestTarget.x / GAME_TILE) },
           altFighter
         );
-        alt.x = closestTarget.x + (Math.random() - 0.5) * GAME_TILE * 3;
-        alt.y = closestTarget.y + (Math.random() - 0.5) * GAME_TILE * 3;
+        // Spawn alternate 6-8 tiles away in a random direction, ensuring safe position
+        const altRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+        let altPlaced = false;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = GAME_TILE * (6 + Math.random() * 2); // 6-8 tiles away
+          const tryX = closestTarget.x + Math.cos(angle) * dist;
+          const tryY = closestTarget.y + Math.sin(angle) * dist;
+          if (canMoveTo(tryX, tryY, altRadius)) {
+            alt.x = tryX; alt.y = tryY; altPlaced = true; break;
+          }
+        }
+        if (!altPlaced) {
+          const safeAltPos = getRandomSafePosition();
+          alt.x = safeAltPos.x; alt.y = safeAltPos.y;
+        }
         alt.hp = 500;
         alt.maxHp = 500;
         alt.isSummon = true;
@@ -5711,9 +5819,22 @@ function useAbility(key) {
             { r: Math.floor(target.y / GAME_TILE), c: Math.floor(target.x / GAME_TILE) },
             roomFighter
           );
-          // Spawn near the target
-          room.x = target.x + (Math.random() - 0.5) * GAME_TILE * 4;
-          room.y = target.y + (Math.random() - 0.5) * GAME_TILE * 4;
+          // Spawn near the target — ensure safe position
+          const roomRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+          let roomPlaced = false;
+          for (let ra = 0; ra < 16; ra++) {
+            const angle = Math.random() * Math.PI * 2;
+            const dist = GAME_TILE * (2 + Math.random() * 2);
+            const tryX = target.x + Math.cos(angle) * dist;
+            const tryY = target.y + Math.sin(angle) * dist;
+            if (canMoveTo(tryX, tryY, roomRadius)) {
+              room.x = tryX; room.y = tryY; roomPlaced = true; break;
+            }
+          }
+          if (!roomPlaced) {
+            const safeRoomPos = getRandomSafePosition();
+            room.x = safeRoomPos.x; room.y = safeRoomPos.y;
+          }
           room.hp = 500;
           room.maxHp = 500;
           room.isSummon = true;
@@ -6085,6 +6206,11 @@ function dealDamage(attacker, target, amount, viaSummon) {
   if (target.inBackrooms && attacker && attacker.summonType !== 'backrooms-chaser') return;
   // Backrooms: players outside backrooms can't be hit by backrooms entities
   if (!target.inBackrooms && attacker && attacker.summonType === 'backrooms-chaser') return;
+  // Backrooms: player IN backrooms cannot attack players in the normal dimension
+  if (attacker && attacker.inBackrooms && !target.inBackrooms && target.summonType !== 'backrooms-chaser') return;
+  // Alternate: player being hunted by an alternate can only attack the alternate, not other players
+  if (attacker && attacker.hasAlternate && !target.isSummon) return;
+  if (attacker && attacker.hasAlternate && target.isSummon && target.summonType !== 'alternate') return;
   // Seductive Unicorn: owner is invulnerable while their seductive unicorn is alive
   if (!target.isSummon) {
     const seductiveUnicorn = gamePlayers.find(p => p.alive && p.isSummon && p.summonType === 'seductive-unicorn' && p.summonOwner === target.id);
@@ -6363,6 +6489,24 @@ function dealDamage(attacker, target, amount, viaSummon) {
         summon.effects.push({ type: 'death', timer: 2 });
       }
       target.summonId = null;
+    }
+    // Napoleon death: immediately kill all Napoleon summons
+    if (target.napoleonCannonId) {
+      const c = gamePlayers.find(p => p.id === target.napoleonCannonId);
+      if (c && c.alive) { c.alive = false; c.hp = 0; c.effects.push({ type: 'death', timer: 2 }); }
+      target.napoleonCannonId = null;
+    }
+    if (target.napoleonWallId) {
+      const w = gamePlayers.find(p => p.id === target.napoleonWallId);
+      if (w && w.alive) { w.alive = false; w.hp = 0; w.effects.push({ type: 'death', timer: 2 }); }
+      target.napoleonWallId = null;
+    }
+    if (target.napoleonInfantryIds && target.napoleonInfantryIds.length > 0) {
+      for (const iid of target.napoleonInfantryIds) {
+        const inf = gamePlayers.find(p => p.id === iid);
+        if (inf && inf.alive) { inf.alive = false; inf.hp = 0; inf.effects.push({ type: 'death', timer: 2 }); }
+      }
+      target.napoleonInfantryIds = [];
     }
     // Moderator Bug Fixing: clear disabled abilities on all players when someone dies
     for (const p of gamePlayers) {
@@ -6739,6 +6883,12 @@ function renderGame() {
       gameCtx.beginPath();
       gameCtx.arc(doorSX + doorW * 0.25, doorSY, 2.5, 0, Math.PI * 2);
       gameCtx.fill();
+      // EXIT label above door
+      gameCtx.fillStyle = '#ffd700';
+      gameCtx.font = 'bold 9px "Press Start 2P", monospace';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('EXIT', doorSX, doorSY - doorH / 2 - 8);
+      gameCtx.textAlign = 'left';
       // Pulsing glow around door
       const doorPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
       gameCtx.strokeStyle = `rgba(255, 215, 0, ${0.4 + doorPulse * 0.4})`;
@@ -8966,10 +9116,11 @@ function renderGame() {
       gameCtx.globalAlpha = fadeAlpha;
       gameCtx.font = 'bold 36px "Press Start 2P", monospace';
       gameCtx.textAlign = 'center';
+      const deathMsg = diedInOtherWorld ? 'YOU DIED IN ANOTHER WORLD' : 'YOU DIED';
       gameCtx.fillStyle = '#000';
-      gameCtx.fillText('YOU DIED', cw / 2 + 2, ch / 2 - 40 + 2);
-      gameCtx.fillStyle = '#8b0000';
-      gameCtx.fillText('YOU DIED', cw / 2, ch / 2 - 40);
+      gameCtx.fillText(deathMsg, cw / 2 + 2, ch / 2 - 40 + 2);
+      gameCtx.fillStyle = diedInOtherWorld ? '#4a0080' : '#8b0000';
+      gameCtx.fillText(deathMsg, cw / 2, ch / 2 - 40);
       gameCtx.globalAlpha = 1.0;
     }
     // Spectator hint (always visible)
