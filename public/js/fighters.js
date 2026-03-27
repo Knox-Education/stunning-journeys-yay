@@ -878,7 +878,7 @@ const FIGHTERS = {
       {
         key: 'R',
         name: 'Dragon Beam',
-        description: '550 DMG beam, 2 blocks wide, infinite length, goes through obstacles. 3s charge, 2s recovery.',
+        description: '550 DMG beam, 2 blocks wide, infinite length, goes through obstacles. 3s charge (aim slowly), 2s recovery.',
         damage: 550,
         chargeTime: 3,
         recoveryTime: 2,

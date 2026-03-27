@@ -1006,8 +1006,38 @@ function updateGame(dt) {
           }
         }
       }
-      // Beam charge
+      // Beam charge — slowly rotate aim toward mouse/target
       if (p.dragonBeamCharging) {
+        const beamTurnRate = 0.8; // radians per second (slow)
+        const curAngle = Math.atan2(p.dragonBeamAimNy, p.dragonBeamAimNx);
+        let desiredAngle = curAngle;
+        if (p.id === localPlayerId && !p.isCPU) {
+          const cw = gameCanvas.width, ch = gameCanvas.height;
+          const camX = p.x - cw / 2, camY = p.y - ch / 2;
+          const mx = mouseX + camX, my = mouseY + camY;
+          desiredAngle = Math.atan2(my - p.y, mx - p.x);
+        } else if (p.isCPU) {
+          // CPU: track closest alive enemy
+          let bestD = Infinity, bestT = null;
+          for (const t of gamePlayers) {
+            if (t.id === p.id || !t.alive || t.isSummon) continue;
+            const d = Math.sqrt((t.x - p.x) ** 2 + (t.y - p.y) ** 2);
+            if (d < bestD) { bestD = d; bestT = t; }
+          }
+          if (bestT) desiredAngle = Math.atan2(bestT.y - p.y, bestT.x - p.x);
+        } else {
+          // Remote player: use relayed aim
+          const ri = remoteInputs[p.id];
+          if (ri) desiredAngle = Math.atan2((ri.aimWorldY || 0) - p.y, (ri.aimWorldX || 0) - p.x);
+        }
+        let diff = desiredAngle - curAngle;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        const maxTurn = beamTurnRate * wallDt;
+        const turn = Math.max(-maxTurn, Math.min(maxTurn, diff));
+        const newAngle = curAngle + turn;
+        p.dragonBeamAimNx = Math.cos(newAngle);
+        p.dragonBeamAimNy = Math.sin(newAngle);
         p.dragonBeamChargeTimer -= wallDt;
         if (p.dragonBeamChargeTimer <= 0) {
           // Fire the beam
@@ -3268,11 +3298,11 @@ function cpuAttack(cpu, params) {
         const pick = enemies[Math.floor(Math.random() * enemies.length)];
         pick.x = cpu.x + (Math.random() - 0.5) * GAME_TILE;
         pick.y = cpu.y + (Math.random() - 0.5) * GAME_TILE;
-        pick.stunTimer = 1;
+        pick.stunned = 1;
         pick.modFearTimer = 5;
         pick.modFearSourceId = cpu.id;
         cpu.cdE = fighter.abilities[1].cooldown;
-        cpu.effects.push({ type: 'scare', timer: 1.5 });
+        cpu.effects.push({ type: 'scare-tp', timer: 1.5 });
       }
       return;
     } else if (isDnd) {
@@ -5915,7 +5945,7 @@ function useAbility(key) {
       lp.dragonBeamCharging = true;
       lp.dragonBeamChargeTimer = abil.chargeTime || 3;
       lp.dragonBreathActive = false; // cancel breath
-      // Lock aim direction at cast
+      // Set initial aim direction (will slowly track mouse during charge)
       const cw = gameCanvas.width; const ch = gameCanvas.height;
       const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
       const aimX = mouseX + camX; const aimY = mouseY + camY;
@@ -5923,8 +5953,8 @@ function useAbility(key) {
       const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
       lp.dragonBeamAimNx = aimDx / aimDist;
       lp.dragonBeamAimNy = aimDy / aimDist;
-      lp.effects.push({ type: 'dragon-beam-charge', timer: (abil.chargeTime || 3) + 0.5, aimNx: lp.dragonBeamAimNx, aimNy: lp.dragonBeamAimNy });
-      combatLog.push({ text: '❄️ Dragon Beam charging... 3s!', timer: 3, color: '#00ccff' });
+      lp.effects.push({ type: 'dragon-beam-charge', timer: (abil.chargeTime || 3) + 0.5 });
+      combatLog.push({ text: '❄️ Dragon Beam charging — aim slowly!', timer: 3, color: '#00ccff' });
     } else {
       const range = abil.range * GAME_TILE;
       let baseDmgR = abil.damage;
@@ -9647,7 +9677,7 @@ function renderGame() {
         gameCtx.stroke();
         gameCtx.globalAlpha = 1;
       }
-      // Beam charging indicator
+      // Beam charging indicator (aim moves slowly)
       if (p.dragonBeamCharging) {
         const chargeProgress = 1 - (p.dragonBeamChargeTimer / 3);
         gameCtx.strokeStyle = '#00ccff';
@@ -9655,10 +9685,11 @@ function renderGame() {
         gameCtx.beginPath();
         gameCtx.arc(sx, sy, radius * 1.5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * chargeProgress);
         gameCtx.stroke();
-        // Show beam direction
-        const bLen = GAME_TILE * 3 * chargeProgress;
-        gameCtx.strokeStyle = 'rgba(0, 204, 255, 0.3)';
-        gameCtx.lineWidth = (p.fighter.abilities[2].beamWidth || 2) * GAME_TILE * chargeProgress;
+        // Show beam direction — long preview so player can see where it aims
+        const bLen = GAME_TILE * 12;
+        const bW = (p.fighter.abilities[2].beamWidth || 2) * GAME_TILE;
+        gameCtx.strokeStyle = 'rgba(0, 204, 255, ' + (0.15 + 0.2 * chargeProgress) + ')';
+        gameCtx.lineWidth = bW * (0.3 + 0.7 * chargeProgress);
         gameCtx.beginPath();
         gameCtx.moveTo(sx, sy);
         gameCtx.lineTo(sx + p.dragonBeamAimNx * bLen, sy + p.dragonBeamAimNy * bLen);
@@ -10002,7 +10033,21 @@ function renderGame() {
         gameCtx.fill();
       }
     } else if (p.fighter && p.fighter.id === 'moderator') {
-      // Moderator: Firewall glow when active
+      // Moderator: terminal screen on head
+      const termW = radius * 1.4, termH = radius * 1.0;
+      const termX = sx - termW / 2, termY = sy - radius * 1.1;
+      gameCtx.fillStyle = '#0c0c0c';
+      gameCtx.fillRect(termX, termY, termW, termH);
+      gameCtx.strokeStyle = '#333';
+      gameCtx.lineWidth = 1;
+      gameCtx.strokeRect(termX, termY, termW, termH);
+      // Green cursor blink
+      gameCtx.fillStyle = '#0f0';
+      gameCtx.font = 'bold 6px monospace';
+      gameCtx.textAlign = 'left';
+      gameCtx.fillText('>', termX + 2, termY + termH - 3);
+      gameCtx.textAlign = 'left';
+      // Firewall glow when active
       if (p.modFirewallTimer > 0) {
         gameCtx.strokeStyle = 'rgba(0, 200, 255, 0.6)';
         gameCtx.lineWidth = 2;
@@ -10017,6 +10062,20 @@ function renderGame() {
         gameCtx.beginPath();
         gameCtx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
         gameCtx.stroke();
+      }
+      // Fear indicator on feared players
+      if (p.modFearTimer > 0) {
+        gameCtx.fillStyle = '#ff4444';
+        gameCtx.font = 'bold 8px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('😱 ' + Math.ceil(p.modFearTimer) + 's', sx, sy - radius - 10);
+      }
+      // Disabled ability indicator
+      if (p.modDisabledAbilities && p.modDisabledAbilities.length > 0 && p.id === localPlayerId) {
+        gameCtx.fillStyle = '#e67e22';
+        gameCtx.font = 'bold 8px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('🐛 ' + p.modDisabledAbilities.length + ' disabled', sx, sy + radius + 10);
       }
     } else {
       // Fighter: Sword indicator on the dot
@@ -10153,6 +10212,87 @@ function renderGame() {
       const aRad = Math.atan2(swordFx.aimNy, swordFx.aimNx);
       gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
       gameCtx.stroke();
+    }
+
+    // Moderator: Ban Hammer swing effect (red arc)
+    if (p.effects.some((fx) => fx.type === 'ban-hammer')) {
+      gameCtx.strokeStyle = '#ff4444';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, GAME_TILE * 1.3, -0.8, 0.8);
+      gameCtx.stroke();
+    }
+    // Moderator: Ban Teleport flash on target
+    if (p.effects.some((fx) => fx.type === 'ban-teleport')) {
+      gameCtx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 15, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#ff0000';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('BANNED!', sx, sy - radius - 12);
+    }
+    // Moderator: Scare TP flash
+    if (p.effects.some((fx) => fx.type === 'scare-tp')) {
+      gameCtx.fillStyle = 'rgba(155, 89, 182, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#9b59b6';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('😱', sx, sy - radius - 12);
+    }
+    // Moderator: Bug Fix effect
+    if (p.effects.some((fx) => fx.type === 'bug-fix')) {
+      gameCtx.strokeStyle = '#e67e22';
+      gameCtx.lineWidth = 2;
+      gameCtx.setLineDash([3, 3]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      gameCtx.fillStyle = '#e67e22';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🐛 BUG FIX', sx, sy - radius - 12);
+    }
+    // Moderator: Server Reset flash (blue pulse)
+    if (p.effects.some((fx) => fx.type === 'server-reset')) {
+      gameCtx.fillStyle = 'rgba(52, 152, 219, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#3498db';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+    // Moderator: Server Update buff glow (green pulsing ring)
+    if (p.effects.some((fx) => fx.type === 'server-update')) {
+      gameCtx.fillStyle = 'rgba(46, 204, 113, 0.2)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 14, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#2ecc71';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 14, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+    // Moderator: Firewall activation flash (bright cyan ring)
+    if (p.effects.some((fx) => fx.type === 'firewall')) {
+      gameCtx.strokeStyle = 'rgba(0, 200, 255, 0.7)';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(0, 200, 255, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.fill();
     }
 
     // D&D Axe swing effect (orange arc, wider)
@@ -10831,6 +10971,22 @@ function renderGame() {
       gameCtx.fillText('☣ POISON', sx, sy - radius - 8);
     }
 
+    // Moderator Fear indicator (on any player)
+    if (p.modFearTimer > 0 && !(p.fighter && p.fighter.id === 'moderator')) {
+      gameCtx.fillStyle = '#ff4444';
+      gameCtx.font = 'bold 8px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('😱 FEAR ' + Math.ceil(p.modFearTimer) + 's', sx, sy - radius - 10);
+    }
+
+    // Moderator Bug Fix disabled abilities (on any player)
+    if (p.modDisabledAbilities && p.modDisabledAbilities.length > 0 && p.id === localPlayerId && !(p.fighter && p.fighter.id === 'moderator')) {
+      gameCtx.fillStyle = '#e67e22';
+      gameCtx.font = 'bold 8px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🐛 ' + p.modDisabledAbilities.length + ' move(s) disabled', sx, sy + radius + 10);
+    }
+
     // Unstable Eye: speed indicator
     if (p.unstableEyeTimer > 0) {
       gameCtx.strokeStyle = '#00ff66';
@@ -11064,7 +11220,7 @@ function renderGame() {
       gameCtx.restore();
     } else if (proj.type === 'dnd-fireball') {
       // ── D&D Fireball: large 3×3 orange-red ball with flame trail ──
-      const fbR = (proj.aoeRadius || 1.5 * GAME_TILE) * camera.zoom;
+      const fbR = (proj.aoeRadius || 1.5 * GAME_TILE) * 0.5;
       // Flame trail
       for (let i = 1; i <= 6; i++) {
         const tx = px - proj.vx * i * 0.12;
