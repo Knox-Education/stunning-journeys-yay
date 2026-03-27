@@ -770,7 +770,7 @@ const FIGHTERS = {
     healTick: 4,
     speed: 3.4,
     multiplayerOnly: true,
-    description: 'A server moderator who bans, scares, bug-fixes, and resets. Multiplayer only.',
+    description: 'A server moderator who bans, bugs, and resets. Multiplayer only.',
     abilities: [
       {
         key: 'M1',
@@ -854,8 +854,8 @@ const FIGHTERS = {
       {
         key: 'M1',
         name: 'Dragon Breath',
-        description: '100 DMG/sec icy breath. Hold to use (max 5s fuel). 0.2s windup. Slows you by half.',
-        dps: 100,
+        description: '150 DMG/sec icy breath. Hold to use (max 5s fuel). 0.2s windup. Slows you by half.',
+        dps: 150,
         maxFuel: 5,
         fuelRegen: 1,   // 1 sec of fuel per 1 sec of not using
         range: 4,        // range in tiles
@@ -901,7 +901,7 @@ const FIGHTERS = {
       {
         key: 'SPACE',
         name: 'Power of the Evil',
-        description: 'Summon a Yellow Ochre (2×2 jelly, 1000HP, 50dps area) or a Lich (700HP, 100dmg lightning, fast autoheal).',
+        description: 'Summon a Yellow Ochre (3×3 jelly, 1000HP, 50dps area + slow) or a Lich (700HP, 100dmg lightning, fast autoheal).',
         cooldown: 0,
         type: 'special',
         bind: ' ',
@@ -954,8 +954,8 @@ const FIGHTERS = {
         potionHeal: 300,
         potionDuration: 3,
         spellFireballDmg: 300,
-        spellFireballSpeed: 8,
-        spellFireballRadius: 1.5,
+        spellFireballSpeed: 30,
+        spellFireballRadius: 3,
         spellBlurDmg: 300,
         spellBlurSpeed: 50,
         spellBlurDuration: 10,

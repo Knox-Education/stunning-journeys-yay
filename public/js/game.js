@@ -731,7 +731,7 @@ function updateGame(dt) {
     if (p.stunned > 0) p.stunned = Math.max(0, p.stunned - wallDt);
 
     // Auto-heal: if not damaged for healDelay seconds, heal healAmount every healTick
-    if (p.alive && p.hp < p.maxHp && !p.noCloneHeal) {
+    if (p.alive && p.hp < p.maxHp && !p.noCloneHeal && !p.inBackrooms && !p.hasAlternate) {
       p.noDamageTimer += wallDt;
       if (!p.isHealing && p.noDamageTimer >= p.fighter.healDelay) {
         p.isHealing = true;
@@ -1421,6 +1421,9 @@ function updateGame(dt) {
   for (const p of gamePlayers) {
     if (!p.alive || !p.inBackrooms) continue;
     p.backroomsTimer -= dt;
+    // 10 DPS while trapped in backrooms
+    const brDmg = Math.round(10 * wallDt);
+    if (brDmg > 0) dealDamage(null, p, brDmg);
     // Check if reached door
     const doorDx = p.x - p.backroomsDoorX;
     const doorDy = p.y - p.backroomsDoorY;
@@ -1438,6 +1441,11 @@ function updateGame(dt) {
   // ── Alternate tick: check if alternate was killed ──
   for (const p of gamePlayers) {
     if (!p.hasAlternate || !p.alternateId) continue;
+    // 10 DPS while hunted by alternate
+    if (p.alive) {
+      const altDmg = Math.round(10 * wallDt);
+      if (altDmg > 0) dealDamage(null, p, altDmg);
+    }
     const alt = gamePlayers.find(a => a.id === p.alternateId);
     if (!alt || !alt.alive) {
       // Alternate killed — player becomes visible again
@@ -1910,8 +1918,27 @@ function updateProjectiles(dt) {
         const dx = target.x - p.x;
         const dy = target.y - p.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        const hitRadius = p.type === 'shockwave' ? radius + 12 : radius + 4;
+        const hitRadius = p.type === 'shockwave' ? radius + 12
+                        : p.dndFireball ? (p.aoeRadius || 1.5 * GAME_TILE)
+                        : radius + 4;
         if (dist < hitRadius) {
+          // D&D Fireball: AoE explosion — damage ALL targets in radius, then remove
+          if (p.dndFireball) {
+            const aoeR = p.aoeRadius || (1.5 * GAME_TILE);
+            for (const t2 of gamePlayers) {
+              if (t2.id === p.ownerId || !t2.alive || t2.inBackrooms) continue;
+              if (t2.isSummon && t2.summonOwner === p.ownerId && t2.summonType !== 'dnd-orc') continue;
+              if (gameMode === 'teams' && owner) {
+                const oT = owner.isSummon ? (gamePlayers.find(o => o.id === owner.summonOwner) || {}).team : owner.team;
+                const tT = t2.isSummon ? (gamePlayers.find(o => o.id === t2.summonOwner) || {}).team : t2.team;
+                if (oT && tT && oT === tT) continue;
+              }
+              const d2 = Math.sqrt((t2.x - p.x) ** 2 + (t2.y - p.y) ** 2);
+              if (d2 < aoeR) dealDamage(owner, t2, Math.round(p.damage));
+            }
+            projectiles.splice(i, 1);
+            break;
+          }
           // Cricket Drive reflect: if target has active reflect window, bounce projectile back
           if (target.driveReflectTimer > 0 && target.fighter && target.fighter.id === 'cricket') {
             const driveAbil = target.fighter.abilities[1];
@@ -2322,7 +2349,7 @@ function updateSummons(dt) {
         if (canMoveTo(newX, s.y, radius)) s.x = newX;
         if (canMoveTo(s.x, newY, radius)) s.y = newY;
         // Constant DPS regardless of distance
-        const roomDPS = s.roomDPS || 40;
+        const roomDPS = s.roomDPS || 50;
         const dmgThisTick = Math.round(roomDPS * dt);
         if (dmgThisTick > 0) {
           dealDamage(owner || s, prey, dmgThisTick, true);
@@ -2498,7 +2525,8 @@ function updateSummons(dt) {
         }
       }
     } else if (s.summonType === 'dragon-ochre') {
-      // Yellow Ochre: 2x2 jelly, goes through obstacles but not sea
+      // Yellow Ochre: 3x3 jelly, goes through obstacles but not sea
+      const ochreRadius = radius * 3;
       if (bestTarget) {
         const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -2506,11 +2534,11 @@ function updateSummons(dt) {
         const nx = dx / dist; const ny = dy / dist;
         const newX = s.x + nx * moveSpeed;
         const newY = s.y + ny * moveSpeed;
-        if (canMoveToNoSea(newX, s.y, radius * 2)) s.x = newX;
-        if (canMoveToNoSea(s.x, newY, radius * 2)) s.y = newY;
+        if (canMoveToNoSea(newX, s.y, ochreRadius)) s.x = newX;
+        if (canMoveToNoSea(s.x, newY, ochreRadius)) s.y = newY;
       }
-      // Area DPS to all enemies within 2x2 area (2 tile radius)
-      const aoeRange = GAME_TILE * 2;
+      // Area DPS + slow to all enemies within 3x3 area
+      const aoeRange = GAME_TILE * 3;
       for (const target of gamePlayers) {
         if (target.id === s.id || target.id === s.summonOwner || !target.alive) continue;
         if (target.isSummon && target.summonOwner === s.summonOwner) continue;
@@ -2518,6 +2546,8 @@ function updateSummons(dt) {
         const tdist = Math.sqrt(tdx * tdx + tdy * tdy);
         if (tdist < aoeRange) {
           dealDamage(owner || s, target, (s.summonDamage || 50) * dt, true);
+          // Slow enemies inside the ochre
+          target.buffSlowed = Math.max(target.buffSlowed || 0, 0.5);
         }
       }
     } else if (s.summonType === 'dragon-lich') {
@@ -3144,7 +3174,7 @@ function cpuAttack(cpu, params) {
             effects: [],
             isSummon: true, summonOwner: cpu.id, summonType: 'dragon-ochre',
             summonSpeed: 1.5, summonDamage: 50,
-            summonAttackCD: 0.5, summonAttackTimer: 0,
+            summonAttackCD: 0, summonAttackTimer: 0,
           });
         } else {
           // Lich
@@ -3415,14 +3445,14 @@ function cpuAttack(cpu, params) {
               summonAttackCD: 2.0, summonAttackTimer: 0,
             });
           } else if (roll < 0.66) {
-            // Fireball
+            // Fireball (3×3 AoE)
             const spd = 30 * GAME_TILE / 10;
             projectiles.push({
               x: cpu.x, y: cpu.y,
               vx: aimNx * spd, vy: aimNy * spd,
               ownerId: cpu.id, damage: 300,
               timer: 3, type: 'dnd-fireball',
-              dndFireball: true,
+              dndFireball: true, aoeRadius: 3 * GAME_TILE,
             });
           } else {
             // Blur bolt
@@ -5846,14 +5876,15 @@ function useAbility(key) {
           combatLog.push({ text: '🧟 Zombie Spell! 2 zombies summoned.', timer: 3, color: '#2d5e1e' });
           lp.effects.push({ type: 'dnd-spell', timer: 1.5 });
         } else if (spellRoll < 0.66) {
-          // Large slow fireball (goes through walls, stops at sea)
-          const speed = (abil.spellFireballSpeed || 8) * GAME_TILE / 10;
+          // Large fast 3×3 fireball (goes through walls, stops at sea)
+          const speed = (abil.spellFireballSpeed || 30) * GAME_TILE / 10;
+          const fbAoe = (abil.spellFireballRadius || 3) * GAME_TILE;
           projectiles.push({
             x: lp.x, y: lp.y,
             vx: aimNx * speed, vy: aimNy * speed,
             ownerId: lp.id, damage: abil.spellFireballDmg || 300,
             timer: 999, type: 'dnd-fireball', color: '#ff4500',
-            dndFireball: true, // flag: goes through walls, stops at sea
+            dndFireball: true, aoeRadius: fbAoe,
           });
           combatLog.push({ text: '🔥 Fireball launched!', timer: 3, color: '#ff4500' });
           lp.effects.push({ type: 'dnd-spell', timer: 1.5 });
@@ -6750,7 +6781,7 @@ function useAbility(key) {
       }
       const roll = Math.random();
       if (roll < 0.5) {
-        // Yellow Ochre: 2x2 jelly, 1000HP, 50dps area, slow
+        // Yellow Ochre: 3x3 jelly, 1000HP, 50dps area + slow
         const ochreId = 'dragon-ochre-' + lp.id + '-' + Date.now();
         const ochre = createPlayerState(
           { id: ochreId, name: 'Yellow Ochre', color: '#c8a832', fighterId: 'fighter' },
@@ -6770,7 +6801,7 @@ function useAbility(key) {
         gamePlayers.push(ochre);
         lp.dragonSummonId = ochreId;
         lp.effects.push({ type: 'dragon-summon', timer: 2.0 });
-        combatLog.push({ text: '👹 Yellow Ochre summoned! (2×2 jelly, 1000HP)', timer: 4, color: '#c8a832' });
+        combatLog.push({ text: '👹 Yellow Ochre summoned! (3×3 jelly, 1000HP)', timer: 4, color: '#c8a832' });
       } else {
         // Lich: 700HP, 100dmg lightning, 0.4s CD, fast autoheal
         const lichId = 'dragon-lich-' + lp.id + '-' + Date.now();
@@ -6933,7 +6964,7 @@ function useAbility(key) {
         lp.effects.push({ type: 'analogus-cast', timer: 1.5 });
         combatLog.push({ text: '🚪 Analogus: ' + closestTarget.name + ' sent to the Backrooms!', timer: 4, color: '#8b8000' });
         if (closestTarget.id === localPlayerId) {
-          combatLog.push({ text: '⚠️ You are in the Backrooms! Find the door to escape!', timer: 5, color: '#ff4444' });
+          combatLog.push({ text: '⚠️ You are in the Backrooms! Find the door to escape! (10 DPS, no healing)', timer: 5, color: '#ff4444' });
         }
       } else if (roll < 0.66) {
         // ── ALTERNATE ──
@@ -6979,7 +7010,7 @@ function useAbility(key) {
         lp.effects.push({ type: 'analogus-cast', timer: 1.5 });
         combatLog.push({ text: '👤 Analogus: ' + closestTarget.name + '\'s Alternate has appeared!', timer: 4, color: '#6a0dad' });
         if (closestTarget.id === localPlayerId) {
-          combatLog.push({ text: '⚠️ Your Alternate is hunting you! Others can only see it, not you!', timer: 5, color: '#ff4444' });
+          combatLog.push({ text: '⚠️ Your Alternate is hunting you! You can\'t see others or heal! (10 DPS)', timer: 5, color: '#ff4444' });
         }
       } else {
         // ── BOISVERT ──
@@ -7021,13 +7052,13 @@ function useAbility(key) {
           room.summonAttackCD = 1;
           room.summonAttackTimer = 0;
           room.summonTargetId = target.id; // only targets this player
-          room.roomDPS = 40; // constant 40 DPS regardless of distance
+          room.roomDPS = 50; // constant 50 DPS regardless of distance
           room.isCPU = true;
           room.noCloneHeal = true;
           gamePlayers.push(room);
           roomCount++;
           if (target.id === localPlayerId) {
-            combatLog.push({ text: '⚠️ A Room has appeared! It deals 40 DPS until killed!', timer: 5, color: '#333' });
+            combatLog.push({ text: '⚠️ A Room has appeared! It deals 50 DPS until killed!', timer: 5, color: '#333' });
           }
         }
         combatLog.push({ text: '🏚️ Boisvert: ' + roomCount + ' Room(s) spawned!', timer: 4, color: '#333' });
@@ -8260,6 +8291,9 @@ function renderGame() {
 
     // ── Alternate visibility: the real player is invisible to everyone except themselves ──
     if (p.hasAlternate && p.id !== localPlayerId) continue;
+    // Player being hunted by alternate can only see themselves and their alternate
+    if (localPlayer && localPlayer.hasAlternate && p.id !== localPlayerId
+        && p.id !== localPlayer.alternateId && !p.isSummon) continue;
 
     // ── Room visibility: only visible to its target player ──
     if (p.summonType === 'room' && p.summonTargetId !== localPlayerId) continue;
@@ -9060,8 +9094,8 @@ function renderGame() {
         gameCtx.textBaseline = 'middle';
         gameCtx.fillText('SK', sx, sy);
       } else if (p.summonType === 'dragon-ochre') {
-        // ── Yellow Ochre: 2x2 golden jelly blob ──
-        const jR = radius * 1.8; // bigger than normal (2x2)
+        // ── Yellow Ochre: 3x3 golden jelly blob ──
+        const jR = radius * 3.0; // bigger than normal (3x3)
         gameCtx.fillStyle = isDying ? '#8b0000' : '#c8a832';
         gameCtx.beginPath();
         // Blobby shape using overlapping circles
@@ -11029,25 +11063,31 @@ function renderGame() {
       gameCtx.fill();
       gameCtx.restore();
     } else if (proj.type === 'dnd-fireball') {
-      // ── D&D Fireball: large orange-red ball with flame trail ──
+      // ── D&D Fireball: large 3×3 orange-red ball with flame trail ──
+      const fbR = (proj.aoeRadius || 1.5 * GAME_TILE) * camera.zoom;
       // Flame trail
-      for (let i = 1; i <= 4; i++) {
-        const tx = px - proj.vx * i * 0.15;
-        const ty = py - proj.vy * i * 0.15;
-        gameCtx.fillStyle = 'rgba(255, ' + (100 + i * 30) + ', 0, ' + (0.4 - i * 0.08) + ')';
+      for (let i = 1; i <= 6; i++) {
+        const tx = px - proj.vx * i * 0.12;
+        const ty = py - proj.vy * i * 0.12;
+        gameCtx.fillStyle = 'rgba(255, ' + (80 + i * 25) + ', 0, ' + (0.35 - i * 0.05) + ')';
         gameCtx.beginPath();
-        gameCtx.arc(tx, ty, 7 - i, 0, Math.PI * 2);
+        gameCtx.arc(tx, ty, fbR * (1 - i * 0.12), 0, Math.PI * 2);
         gameCtx.fill();
       }
+      // Outer glow
+      gameCtx.fillStyle = 'rgba(255, 69, 0, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, fbR * 1.15, 0, Math.PI * 2);
+      gameCtx.fill();
       // Main ball
       gameCtx.fillStyle = '#ff4500';
       gameCtx.beginPath();
-      gameCtx.arc(px, py, 7, 0, Math.PI * 2);
+      gameCtx.arc(px, py, fbR * 0.7, 0, Math.PI * 2);
       gameCtx.fill();
       // Inner bright core
       gameCtx.fillStyle = '#ffcc00';
       gameCtx.beginPath();
-      gameCtx.arc(px, py, 3, 0, Math.PI * 2);
+      gameCtx.arc(px, py, fbR * 0.3, 0, Math.PI * 2);
       gameCtx.fill();
     } else if (proj.type === 'dnd-blur-bolt') {
       // ── D&D Blur Bolt: purple spinning bolt ──
@@ -11960,7 +12000,9 @@ function onRemoteGameState(snapshot) {
     p.bowlerId = sp.bowlerId || null;
     p.crabIds = sp.crabIds || [];
     p.johnDoeId = sp.johnDoeId || null;
-    // Filbus Analogus state
+    // Filbus Analogus state — detect transitions for combat log on non-host target
+    const wasInBackrooms = p.inBackrooms;
+    const hadAlternate = p.hasAlternate;
     p.inBackrooms = sp.inBackrooms || false;
     p.backroomsDoorX = sp.backroomsDoorX || 0;
     p.backroomsDoorY = sp.backroomsDoorY || 0;
@@ -11968,6 +12010,15 @@ function onRemoteGameState(snapshot) {
     p.backroomsTimer = sp.backroomsTimer || 0;
     p.hasAlternate = sp.hasAlternate || false;
     p.alternateId = sp.alternateId || null;
+    // Show combat log warnings for the local player entering backrooms/alternate
+    if (p.id === localPlayerId && !isHostAuthority) {
+      if (!wasInBackrooms && p.inBackrooms) {
+        combatLog.push({ text: '⚠️ You are in the Backrooms! Find the door to escape! (10 DPS, no healing)', timer: 5, color: '#ff4444' });
+      }
+      if (!hadAlternate && p.hasAlternate) {
+        combatLog.push({ text: "⚠️ Your Alternate is hunting you! You can't see others or heal! (10 DPS)", timer: 5, color: '#ff4444' });
+      }
+    }
     p.summonTargetId = sp.summonTargetId || null;
     p.roomDPS = sp.roomDPS || 0;
     // Moderator
