@@ -599,6 +599,8 @@ function gameLoop(now) {
         const input = {
           aimWorldX: mouseX + camX, aimWorldY: mouseY + camY, mouseDown,
           pendingAbilities: pending,
+          keys: { w: !!keys['w'] || !!keys['W'], a: !!keys['a'] || !!keys['A'], s: !!keys['s'] || !!keys['S'], d: !!keys['d'] || !!keys['D'],
+                  up: !!keys['ArrowUp'], down: !!keys['ArrowDown'], left: !!keys['ArrowLeft'], right: !!keys['ArrowRight'] },
         };
         localPlayer._pendingAbilities = [];
         socket.emit('player-input', input);
@@ -1107,9 +1109,33 @@ function updateGame(dt) {
           p.noliVoidRushVx = (newNx / newDist) * curSpeed;
           p.noliVoidRushVy = (newNy / newDist) * curSpeed;
         }
+      } else if (isHostAuthority && !p.isCPU) {
+        // Host: steer remote player's Void Rush using their relayed keys
+        const rk = remoteInputs[p.id] && remoteInputs[p.id].keys;
+        if (rk) {
+          let steerDx = 0, steerDy = 0;
+          if (rk.up || rk.w) steerDy -= 1;
+          if (rk.down || rk.s) steerDy += 1;
+          if (rk.left || rk.a) steerDx -= 1;
+          if (rk.right || rk.d) steerDx += 1;
+          if (steerDx !== 0 || steerDy !== 0) {
+            const steerLen = Math.sqrt(steerDx * steerDx + steerDy * steerDy);
+            const wantNx = steerDx / steerLen;
+            const wantNy = steerDy / steerLen;
+            const curSpeed = Math.sqrt(p.noliVoidRushVx * p.noliVoidRushVx + p.noliVoidRushVy * p.noliVoidRushVy) || 1;
+            const curNx = p.noliVoidRushVx / curSpeed;
+            const curNy = p.noliVoidRushVy / curSpeed;
+            const blendAmt = Math.min(1, steerRate * wallDt);
+            const newNx = curNx + (wantNx - curNx) * blendAmt;
+            const newNy = curNy + (wantNy - curNy) * blendAmt;
+            const newDist = Math.sqrt(newNx * newNx + newNy * newNy) || 1;
+            p.noliVoidRushVx = (newNx / newDist) * curSpeed;
+            p.noliVoidRushVy = (newNy / newDist) * curSpeed;
+          }
+        }
       }
-      // Only update position for local player and CPU; remote player position comes from relay
-      if (p.id === localPlayerId || p.isCPU) {
+      // Update position for local player, CPU, and remote players under host authority
+      if (p.id === localPlayerId || p.isCPU || isHostAuthority) {
         p.x += p.noliVoidRushVx * wallDt * 60;
         p.y += p.noliVoidRushVy * wallDt * 60;
       }
@@ -12031,12 +12057,13 @@ function onRemoteGameState(snapshot) {
 // Host: receive input from a non-host client and store it
 function onRemoteInput(input) {
   if (!isHostAuthority) return;
-  const { playerId, aimWorldX: awx, aimWorldY: awy, mouseDown: md, pendingAbilities: pa } = input;
-  if (!remoteInputs[playerId]) remoteInputs[playerId] = { aimWorldX: 0, aimWorldY: 0, mouseDown: false, pendingAbilities: [] };
+  const { playerId, aimWorldX: awx, aimWorldY: awy, mouseDown: md, pendingAbilities: pa, keys: k } = input;
+  if (!remoteInputs[playerId]) remoteInputs[playerId] = { aimWorldX: 0, aimWorldY: 0, mouseDown: false, pendingAbilities: [], keys: {} };
   const ri = remoteInputs[playerId];
   ri.aimWorldX = awx || 0;
   ri.aimWorldY = awy || 0;
   ri.mouseDown = md || false;
+  if (k) ri.keys = k;
   // Append pending abilities (don't overwrite, accumulate between frames)
   if (pa && pa.length) ri.pendingAbilities.push(...pa);
 }
