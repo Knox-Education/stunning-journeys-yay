@@ -520,24 +520,25 @@ function onKeyDown(e) {
   }
 
   // Ability presses (single-fire, not held)
+  const _mpNonHost = (gameMode === undefined || gameMode === 'teams') && !isHostAuthority;
   if (e.key === 'e' || e.key === 'E') {
-    if (gameMode === undefined && !isHostAuthority) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('E'); }
+    if (_mpNonHost) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('E'); }
     else useAbility('E');
   }
   if (e.key === 'r' || e.key === 'R') {
-    if (gameMode === undefined && !isHostAuthority) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('R'); }
+    if (_mpNonHost) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('R'); }
     else useAbility('R');
   }
   if (e.key === 't' || e.key === 'T') {
-    if (gameMode === undefined && !isHostAuthority) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('T'); }
+    if (_mpNonHost) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('T'); }
     else useAbility('T');
   }
   if (e.key === 'f' || e.key === 'F') {
-    if (gameMode === undefined && !isHostAuthority) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('F'); }
+    if (_mpNonHost) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('F'); }
     else useAbility('F');
   }
   if (e.key === ' ') {
-    if (gameMode === undefined && !isHostAuthority) {
+    if (_mpNonHost) {
       if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = [];
       localPlayer._pendingAbilities.push('SPACE');
       // Also trigger local aiming mode for visual feedback (not for Noli — instant special)
@@ -574,7 +575,7 @@ function gameLoop(now) {
   if (typeof socket !== 'undefined' && socket.emit && localPlayer) {
     // NON-HOST clients broadcast own position every 20ms for host to use
     // Host doesn't need to broadcast position (it's in the snapshot)
-    if (gameMode === undefined && !isHostAuthority) {
+    if ((gameMode === undefined || gameMode === 'teams') && !isHostAuthority) {
       if (!gameLoop._lastPosSend || now - gameLoop._lastPosSend > 20) {
         gameLoop._lastPosSend = now;
         socket.emit('player-position', { x: localPlayer.x, y: localPlayer.y });
@@ -587,7 +588,7 @@ function gameLoop(now) {
         const snapshot = buildGameStateSnapshot();
         socket.emit('game-state', snapshot);
       }
-    } else if (gameMode === undefined) {
+    } else if (gameMode === undefined || gameMode === 'teams') {
       // NON-HOST: send ability inputs throttled to ~50 Hz (every 20ms)
       if (!gameLoop._lastInputSend || now - gameLoop._lastInputSend > 20) {
         gameLoop._lastInputSend = now;
@@ -620,7 +621,7 @@ function updateGame(dt) {
   if (!localPlayer) return;
 
   // NON-HOST CLIENT in multiplayer: predict local movement, render visuals, but host runs all combat
-  if (gameMode === undefined && !isHostAuthority) {
+  if ((gameMode === undefined || gameMode === 'teams') && !isHostAuthority) {
     lastWallClock = Date.now();
     // Local aiming prediction for specials (visual feedback while host processes)
     if (localPlayer.alive && localPlayer.specialAiming) {
@@ -1513,7 +1514,9 @@ function updateGame(dt) {
 
   // M1 – auto-fire while mouse held (only if alive)
   if (localPlayer.alive && mouseDown && localPlayer.cdM1 <= 0) {
-    useAbility('M1');
+    const _m1NonHost = (gameMode === undefined || gameMode === 'teams') && !isHostAuthority;
+    if (!_m1NonHost) useAbility('M1');
+    // Non-host M1 is relayed via mouseDown in player-input, host runs it
   }
   // Dragon breath: stop when mouse released
   if (localPlayer.dragonBreathActive && !mouseDown) {
