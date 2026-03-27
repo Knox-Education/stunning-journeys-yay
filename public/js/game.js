@@ -13,6 +13,7 @@ const GAME_TILE = 48;
 const CAMERA_RANGE = 3;
 const PLAYER_RADIUS_RATIO = 0.38;
 const BASE_MOVE_SPEED = 3.2;
+const TEAM_HEAL_RANGE = 3; // tiles — range for team heal/buff sharing
 
 let gameRunning = false;
 let gameCanvas, gameCtx;
@@ -91,6 +92,7 @@ function startGame(mapIndex, players, myId, mode) {
   _gearDmgAbsorbedRemainder = 0;
   _filbusBoiledKillsThisGame = 0;
   _hadSummonKillThisGame = false;
+  _dragonBeamKillsThisGame = 0;
   _lastDealDamageWasM1 = false;
   window._spikeEntities = [];
 
@@ -167,8 +169,8 @@ function startGame(mapIndex, players, myId, mode) {
   }
 
   // Determine if we are the host in multiplayer
-  // mode is undefined for multiplayer, 'training'/'fight' for singleplayer
-  if (gameMode === undefined) {
+  // mode is undefined or 'teams' for multiplayer, 'training'/'fight' for singleplayer
+  if (gameMode === undefined || gameMode === 'teams') {
     // Check if OUR player entry has isHost flag (not just players[0])
     const myEntry = players.find(p => p.id === myId);
     isHostAuthority = !!(myEntry && myEntry.isHost);
@@ -209,10 +211,12 @@ function startGame(mapIndex, players, myId, mode) {
       lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false,
     };
     gamePlayers.push(bot);
-  } else if (gameMode === 'fight') {
-    // Fight: 4 CPU opponents — 1 easy, 1 medium, 1 hard, 1 hard
+  } else if (gameMode === 'fight' || gameMode === 'fight-hard') {
+    // Fight: CPU opponents
     const allFighters = getAllFighterIds().filter(f => f !== 'moderator');
-    const difficulties = ['easy', 'medium', 'hard', 'hard'];
+    const difficulties = gameMode === 'fight-hard'
+      ? ['expert', 'expert', 'expert', 'expert']
+      : ['easy', 'medium', 'hard', 'hard'];
     const shuffledNames = CPU_NAMES.slice().sort(() => Math.random() - 0.5);
     const shuffledColors = CPU_COLORS.slice().sort(() => Math.random() - 0.5);
     for (let i = 0; i < 4; i++) {
@@ -323,6 +327,8 @@ function createPlayerState(p, spawn, fighter) {
     y: (spawn.r + 0.5) * GAME_TILE,
     spawnX: (spawn.c + 0.5) * GAME_TILE,
     spawnY: (spawn.r + 0.5) * GAME_TILE,
+    // Team (multiplayer teams mode)
+    team: p.team || null,
     // Combat
     hp: fighter.hp,
     maxHp: fighter.hp,
@@ -444,6 +450,34 @@ function createPlayerState(p, spawn, fighter) {
     modScaredId: null,           // id of Scare target (for Fear effect)
     modFearTimer: 0,             // Fear duration on this player
     modFearSourceId: null,       // who scared this player
+    // D&D Campaigner state
+    dndGP: 0,                    // gold pieces earned from questing
+    dndRace: 'human',            // current race: 'human', 'elf', 'dwarf'
+    dndWeaponBonus: 0,           // permanent M1 bonus from better weapon purchases
+    dndCharm: false,             // charm purchased (doubled autoheal)
+    dndD20Active: false,         // D20 buff active (M1 = 1000 dmg)
+    dndBlurTimer: 0,             // blur debuff timer (from D&D spell)
+    dndHealPool: 0,              // remaining HP to heal from potion
+    dndHealTimer: 0,             // potion heal tick timer
+    dndOrcIds: [],               // ids of active quest orcs
+    dndSidekickId: null,         // id of active sidekick summon
+    // Dragon of Icespire state
+    dragonBreathFuel: 5,         // current breath fuel (seconds)
+    dragonBreathActive: false,   // currently breathing
+    dragonBreathAimNx: 0,       // aim direction
+    dragonBreathAimNy: 0,
+    dragonBreathWindup: 0,       // 0.2s windup before damage starts
+    dragonBreathRegenDelay: 0,   // 3s delay before fuel regen if fuel hit <=0.5
+    dragonFlyTimer: 0,           // dragon ride remaining time
+    dragonFlying: false,         // currently flying
+    dragonBeamCharging: false,   // beam charging
+    dragonBeamChargeTimer: 0,    // beam charge timer (3s)
+    dragonBeamFiring: false,     // beam active (firing frame)
+    dragonBeamRecovery: 0,       // recovery timer (can't move)
+    dragonBeamAimNx: 0,         // beam aim direction
+    dragonBeamAimNy: 0,
+    dragonRoarActive: false,     // roar speed buff active
+    dragonSummonId: null,        // id of active summon (ochre or lich)
   };
 }
 
@@ -706,6 +740,19 @@ function updateGame(dt) {
         if (p.healTickTimer <= 0) {
           p.hp = Math.min(p.maxHp, p.hp + p.fighter.healAmount);
           p.healTickTimer = p.fighter.healTick;
+          // Team heal sharing: nearby allies get half the heal
+          if (gameMode === 'teams' && p.team && !p.isSummon && p.fighter.id !== 'filbus') {
+            const healRange = TEAM_HEAL_RANGE * GAME_TILE;
+            const allyHeal = Math.round(p.fighter.healAmount * 0.5);
+            for (const ally of gamePlayers) {
+              if (ally.id === p.id || !ally.alive || ally.isSummon || ally.team !== p.team) continue;
+              const adx = ally.x - p.x; const ady = ally.y - p.y;
+              if (Math.sqrt(adx * adx + ady * ady) <= healRange && ally.hp < ally.maxHp) {
+                ally.hp = Math.min(ally.maxHp, ally.hp + allyHeal);
+                ally.effects.push({ type: 'team-heal', timer: 0.3 });
+              }
+            }
+          }
         }
       }
     }
@@ -874,6 +921,161 @@ function updateGame(dt) {
     if (p.modServerUpdateTimer > 0) p.modServerUpdateTimer = Math.max(0, p.modServerUpdateTimer - wallDt);
     if (p.modFearTimer > 0) p.modFearTimer = Math.max(0, p.modFearTimer - wallDt);
 
+    // Tick D&D Campaigner timers
+    if (p.dndBlurTimer > 0) p.dndBlurTimer = Math.max(0, p.dndBlurTimer - wallDt);
+    if (p.dndHealPool > 0 && p.alive) {
+      const potionDur = 3;
+      const healPerSec = 300 / potionDur;
+      const healAmt = healPerSec * wallDt;
+      p.hp = Math.min(p.maxHp, p.hp + healAmt);
+      p.dndHealPool = Math.max(0, p.dndHealPool - healAmt);
+      // Team potion heal sharing
+      if (gameMode === 'teams' && p.team && !p.isSummon) {
+        const healRange = TEAM_HEAL_RANGE * GAME_TILE;
+        const allyAmt = healAmt * 0.5;
+        for (const ally of gamePlayers) {
+          if (ally.id === p.id || !ally.alive || ally.isSummon || ally.team !== p.team) continue;
+          const adx = ally.x - p.x; const ady = ally.y - p.y;
+          if (Math.sqrt(adx * adx + ady * ady) <= healRange && ally.hp < ally.maxHp) {
+            ally.hp = Math.min(ally.maxHp, ally.hp + allyAmt);
+          }
+        }
+      }
+    }
+    // D&D Charm: doubled autoheal rate
+    if (p.dndCharm && p.isHealing) {
+      // Apply extra heal matching normal rate (effectively doubling it)
+      const extraHeal = (p.fighter ? p.fighter.healAmount : 100) * wallDt / (p.fighter ? p.fighter.healTick : 4);
+      p.hp = Math.min(p.maxHp, p.hp + extraHeal);
+    }
+
+    // Tick Dragon of Icespire timers
+    if (p.fighter && p.fighter.id === 'dragon') {
+      // Breath fuel regen when not breathing
+      if (!p.dragonBreathActive) {
+        // If regen delay is active (fuel hit <=0.5), count it down first
+        if (p.dragonBreathRegenDelay > 0) {
+          p.dragonBreathRegenDelay -= wallDt;
+          if (p.dragonBreathRegenDelay < 0) p.dragonBreathRegenDelay = 0;
+        } else {
+          const maxFuel = (p.fighter.abilities[0].maxFuel || 5);
+          const regen = (p.fighter.abilities[0].fuelRegen || 1) * wallDt;
+          p.dragonBreathFuel = Math.min(maxFuel, (p.dragonBreathFuel || 0) + regen);
+        }
+      }
+      // Breath windup timer
+      if (p.dragonBreathActive && p.dragonBreathWindup > 0) {
+        p.dragonBreathWindup -= wallDt;
+        if (p.dragonBreathWindup < 0) p.dragonBreathWindup = 0;
+      }
+      // Fly timer
+      if (p.dragonFlying) {
+        p.dragonFlyTimer -= wallDt;
+        if (p.dragonFlyTimer <= 0) {
+          p.dragonFlying = false;
+          p.dragonFlyTimer = 0;
+          // Check if landed on obstacle — push to nearest safe tile + 500 dmg
+          const pr = GAME_TILE * PLAYER_RADIUS_RATIO;
+          if (!canMoveTo(p.x, p.y, pr)) {
+            // Take landing damage
+            p.hp -= (p.fighter.abilities[1].landDamage || 500);
+            p.effects.push({ type: 'hit', timer: 0.3 });
+            if (p.hp <= 0) {
+              p.hp = 0;
+              p.alive = false;
+              p.effects.push({ type: 'death', timer: 2 });
+            }
+            // Push to nearest safe position
+            let placed = false;
+            for (let a = 0; a < 16 && !placed; a++) {
+              const angle = (a / 16) * Math.PI * 2;
+              for (let step = 1; step <= 10 && !placed; step++) {
+                const tryX = p.x + Math.cos(angle) * GAME_TILE * step * 0.5;
+                const tryY = p.y + Math.sin(angle) * GAME_TILE * step * 0.5;
+                if (canMoveTo(tryX, tryY, pr)) {
+                  p.x = tryX; p.y = tryY; placed = true;
+                }
+              }
+            }
+            if (!placed) { const safe = getRandomSafePosition(); p.x = safe.x; p.y = safe.y; }
+            if (p.id === localPlayerId) {
+              combatLog.push({ text: '💥 Crash landing! Took 500 damage!', timer: 3, color: '#ff4444' });
+            }
+          }
+        }
+      }
+      // Beam charge
+      if (p.dragonBeamCharging) {
+        p.dragonBeamChargeTimer -= wallDt;
+        if (p.dragonBeamChargeTimer <= 0) {
+          // Fire the beam
+          p.dragonBeamCharging = false;
+          p.dragonBeamFiring = true;
+          p.dragonBeamRecovery = (p.fighter.abilities[2].recoveryTime || 2);
+          // Deal damage to all enemies in the beam path
+          const beamWidth = (p.fighter.abilities[2].beamWidth || 2) * GAME_TILE;
+          const beamDmg = p.fighter.abilities[2].damage || 450;
+          const nx = p.dragonBeamAimNx; const ny = p.dragonBeamAimNy;
+          for (const target of gamePlayers) {
+            if (target.id === p.id || !target.alive) continue;
+            if (target.isSummon && target.summonOwner === p.id) continue;
+            // Project target onto beam line
+            const tx = target.x - p.x; const ty = target.y - p.y;
+            const along = tx * nx + ty * ny;
+            if (along < 0) continue; // behind the player
+            const perpDist = Math.abs(tx * (-ny) + ty * nx);
+            if (perpDist < beamWidth / 2 + GAME_TILE * PLAYER_RADIUS_RATIO) {
+              dealDamage(p, target, beamDmg, false);
+            }
+          }
+          p.effects.push({ type: 'dragon-beam-fire', timer: 0.5, aimNx: nx, aimNy: ny });
+          if (p.id === localPlayerId) {
+            combatLog.push({ text: '❄️ Dragon Beam fired!', timer: 3, color: '#00ccff' });
+          }
+        }
+      }
+      // Beam recovery
+      if (p.dragonBeamRecovery > 0) {
+        p.dragonBeamRecovery -= wallDt;
+        if (p.dragonBeamRecovery <= 0) {
+          p.dragonBeamRecovery = 0;
+          p.dragonBeamFiring = false;
+        }
+      }
+      // Dragon breath DPS (continuous while active, skip during windup)
+      if (p.dragonBreathActive && p.alive) {
+        if (p.dragonBreathWindup <= 0) {
+          const dps = p.fighter.abilities[0].dps || 100;
+          const range = (p.fighter.abilities[0].range || 4) * GAME_TILE;
+          const nx = p.dragonBreathAimNx || 0;
+          const ny = p.dragonBreathAimNy || 0;
+          // Cone-shaped: 60 degree spread
+          for (const target of gamePlayers) {
+            if (target.id === p.id || !target.alive) continue;
+            if (target.isSummon && target.summonOwner === p.id) continue;
+            const tx = target.x - p.x; const ty = target.y - p.y;
+            const tdist = Math.sqrt(tx * tx + ty * ty);
+            if (tdist > range || tdist < 1) continue;
+            const dot = (tx * nx + ty * ny) / tdist;
+            if (dot > 0.5) { // ~60 degree cone
+              const dmgAmt = dps * wallDt;
+              if (dmgAmt > 0 && isFinite(dmgAmt)) dealDamage(p, target, dmgAmt, false);
+            }
+          }
+        }
+        // Consume fuel
+        p.dragonBreathFuel -= wallDt;
+        if (p.dragonBreathFuel <= 0.5) {
+          // If fuel hits <=0.5, trigger 3s regen delay
+          p.dragonBreathRegenDelay = 3;
+        }
+        if (p.dragonBreathFuel <= 0) {
+          p.dragonBreathFuel = 0;
+          p.dragonBreathActive = false;
+        }
+      }
+    }
+
     // Tick Noli Void Rush dash
     if (p.noliVoidRushActive && p.alive) {
       p.noliVoidRushTimer -= wallDt;
@@ -919,6 +1121,11 @@ function updateGame(dt) {
       for (const t of gamePlayers) {
         if (t.id === p.id || !t.alive || (t.isSummon && t.summonOwner === p.id)) continue;
         if (t.id === p.noliVoidRushLastHitId) continue; // can't hit same target consecutively
+        // Skip teammates in team mode
+        if (gameMode === 'teams' && p.team) {
+          const tTeam = t.isSummon ? (gamePlayers.find(o => o.id === t.summonOwner) || {}).team : t.team;
+          if (tTeam === p.team) continue;
+        }
         const dx = t.x - p.x, dy = t.y - p.y;
         if (Math.sqrt(dx * dx + dy * dy) < GAME_TILE * 1.5) {
           // Hit! Unlimited chain — damage & speed scale up each hit
@@ -932,7 +1139,7 @@ function updateGame(dt) {
           const _vrTargetWasAlive = t.alive;
           dealDamage(p, t, Math.round(dmg));
           // Achievement: Noli Void Rush kills in MP
-          if (_vrTargetWasAlive && !t.alive && p.id === localPlayerId && gameMode !== 'training' && gameMode !== 'fight') {
+          if (_vrTargetWasAlive && !t.alive && p.id === localPlayerId && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard') {
             _noliVoidRushKillsThisGame++;
             if (_noliVoidRushKillsThisGame >= 2 && typeof trackNoliVoidRushAch === 'function') {
               trackNoliVoidRushAch();
@@ -1126,6 +1333,10 @@ function updateGame(dt) {
 
       // NOTE: p.x/p.y for remote players is updated by onRemotePosition (no applyRemoteMovement needed)
       if (inp.mouseDown && p.cdM1 <= 0) applyRemoteAbility(p, 'M1', inp);
+      // Dragon breath: stop when remote player releases mouse
+      if (p.dragonBreathActive && !inp.mouseDown) {
+        p.dragonBreathActive = false;
+      }
       if (inp.pendingAbilities && inp.pendingAbilities.length > 0) {
         for (const abilKey of inp.pendingAbilities) applyRemoteAbility(p, abilKey, inp);
         inp.pendingAbilities = [];
@@ -1144,9 +1355,22 @@ function updateGame(dt) {
       const totalHeal = fAbil ? (fAbil.healAmount || 300) : 300;
       const totalDur = fAbil ? (fAbil.healDuration || 3) : 3;
       const healPerSec = totalHeal / totalDur;
-      p.hp = Math.min(p.maxHp, p.hp + healPerSec * dt);
+      const healAmt = healPerSec * dt;
+      p.hp = Math.min(p.maxHp, p.hp + healAmt);
       p.potionHealTimer -= dt;
       if (p.potionHealTimer <= 0) p.potionHealTimer = 0;
+      // Team potion heal sharing
+      if (gameMode === 'teams' && p.team && !p.isSummon) {
+        const healRange = TEAM_HEAL_RANGE * GAME_TILE;
+        const allyAmt = healAmt * 0.5;
+        for (const ally of gamePlayers) {
+          if (ally.id === p.id || !ally.alive || ally.isSummon || ally.team !== p.team) continue;
+          const adx = ally.x - p.x; const ady = ally.y - p.y;
+          if (Math.sqrt(adx * adx + ady * ady) <= healRange && ally.hp < ally.maxHp) {
+            ally.hp = Math.min(ally.maxHp, ally.hp + allyAmt);
+          }
+        }
+      }
     }
   }
   // Spike entity tick (Noli F — John Doe spikes)
@@ -1227,9 +1451,14 @@ function updateGame(dt) {
   if (localPlayer.alive && mouseDown && localPlayer.cdM1 <= 0) {
     useAbility('M1');
   }
+  // Dragon breath: stop when mouse released
+  if (localPlayer.dragonBreathActive && !mouseDown) {
+    localPlayer.dragonBreathActive = false;
+    // No cooldown — just fuel-gated
+  }
 
   // CPU AI update (use wallDt for consistent timer behaviour with player)
-  if (gameMode === 'fight') {
+  if (gameMode === 'fight' || gameMode === 'fight-hard') {
     updateCPUs(wallDt);
   }
 
@@ -1371,6 +1600,13 @@ function updateMovement(dt) {
   }
   // Cricket Gear Up: slower speed
   if (localPlayer.gearUpTimer > 0) speed *= 0.6;
+  // D&D Human: 1.2x speed
+  if (localPlayer.dndRace === 'human') speed *= 1.2;
+  // Dragon: roar speed buff, fly speed, beam immobilization, breath slow
+  if (localPlayer.dragonRoarActive) speed *= 1.3;
+  if (localPlayer.dragonFlying) speed *= 2.5; // same as Napoleon cavalry
+  if (localPlayer.dragonBreathActive) speed *= 0.5;
+  if (localPlayer.dragonBeamCharging || localPlayer.dragonBeamRecovery > 0) speed = 0;
   // Buff slow debuff
   if (localPlayer.buffSlowed > 0) speed *= 0.6;
   // Cricket Wicket line: 50% speed boost when on the line between both wickets
@@ -1433,8 +1669,16 @@ function updateMovement(dt) {
   const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
 
   const prevX = localPlayer.x, prevY = localPlayer.y;
-  if (canMoveTo(newX, localPlayer.y, radius)) localPlayer.x = newX;
-  if (canMoveTo(localPlayer.x, newY, radius)) localPlayer.y = newY;
+  if (localPlayer.dragonFlying) {
+    // Flying: ignore obstacles but stay in map bounds
+    const nxClamped = Math.max(radius, Math.min(newX, gameMap.cols * GAME_TILE - radius));
+    const nyClamped = Math.max(radius, Math.min(newY, gameMap.rows * GAME_TILE - radius));
+    localPlayer.x = nxClamped;
+    localPlayer.y = nyClamped;
+  } else {
+    if (canMoveTo(newX, localPlayer.y, radius)) localPlayer.x = newX;
+    if (canMoveTo(localPlayer.x, newY, radius)) localPlayer.y = newY;
+  }
 
   // Spike collision (John Doe spikes): push player out of spike radius, but allow sliding
   if (window._spikeEntities && window._spikeEntities.length > 0) {
@@ -1480,6 +1724,22 @@ function canMoveTo(px, py, radius) {
     const tile = gameMap.tiles[row][col];
     if (tile === TILE.ROCK || tile === TILE.WATER) return false;
     if (isStumpTile(col, row)) return false;
+  }
+  return true;
+}
+
+// Ochre jelly: goes through obstacles (rocks/trees) but NOT water or out-of-bounds
+function canMoveToNoSea(px, py, radius) {
+  const offsets = [
+    { x: -radius, y: -radius }, { x: radius, y: -radius },
+    { x: -radius, y: radius },  { x: radius, y: radius },
+  ];
+  for (const off of offsets) {
+    const col = Math.floor((px + off.x) / GAME_TILE);
+    const row = Math.floor((py + off.y) / GAME_TILE);
+    if (col < 0 || col >= gameMap.cols || row < 0 || row >= gameMap.rows) return false;
+    const tile = gameMap.tiles[row][col];
+    if (tile === TILE.WATER) return false;
   }
   return true;
 }
@@ -1534,6 +1794,10 @@ function updateProjectiles(dt) {
     }
     const tile = gameMap.tiles[row][col];
     if (tile === TILE.ROCK || isStumpTile(col, row)) {
+      if (!p.dndFireball) { projectiles.splice(i, 1); continue; }
+    }
+    // Fireball stops at water/sea
+    if (p.dndFireball && tile === TILE.WATER) {
       projectiles.splice(i, 1); continue;
     }
 
@@ -1606,9 +1870,15 @@ function updateProjectiles(dt) {
       const owner = isLocalProj ? localPlayer : gamePlayers.find(pl => pl.id === p.ownerId);
       for (const target of gamePlayers) {
         if (target.id === p.ownerId || !target.alive) continue;
-        if (target.isSummon && target.summonOwner === p.ownerId) continue;
+        if (target.isSummon && target.summonOwner === p.ownerId && target.summonType !== 'dnd-orc') continue;
         // Skip backrooms players (they're in another dimension)
         if (target.inBackrooms) continue;
+        // Skip teammates in team mode (projectiles shouldn't hit allies)
+        if (gameMode === 'teams' && owner) {
+          const ownerTeam = owner.isSummon ? (gamePlayers.find(o => o.id === owner.summonOwner) || {}).team : owner.team;
+          const targetTeam = target.isSummon ? (gamePlayers.find(o => o.id === target.summonOwner) || {}).team : target.team;
+          if (ownerTeam && targetTeam && ownerTeam === targetTeam) continue;
+        }
         // Shockwave: skip already-hit targets
         if (p.hitTargets && p.hitTargets.has(target.id)) continue;
         const dx = target.x - p.x;
@@ -1676,6 +1946,10 @@ function updateProjectiles(dt) {
             p.hitTargets.add(target.id);
             continue; // don't splice — shockwave passes through
           }
+          // D&D Blur bolt: apply blur debuff to target
+          if (p.dndBlurDuration && p.dndBlurDuration > 0) {
+            target.dndBlurTimer = p.dndBlurDuration;
+          }
           projectiles.splice(i, 1);
           break;
         }
@@ -1696,12 +1970,19 @@ function updateSummons(dt) {
     const owner = gamePlayers.find(p => p.id === s.summonOwner);
     const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
 
-    // Find nearest enemy (not owner, not fellow summons of same owner)
+    // Find nearest enemy (not owner, not fellow summons of same owner, not teammates)
     let bestTarget = null;
     let bestDist = Infinity;
+    const ownerTeam = owner ? owner.team : null;
     for (const p of gamePlayers) {
       if (p.id === s.id || p.id === s.summonOwner || !p.alive) continue;
       if (p.isSummon && p.summonOwner === s.summonOwner) continue;
+      // Skip teammates in team mode
+      if (ownerTeam && !p.isSummon && p.team === ownerTeam) continue;
+      if (ownerTeam && p.isSummon) {
+        const pOwner = gamePlayers.find(o => o.id === p.summonOwner);
+        if (pOwner && pOwner.team === ownerTeam) continue;
+      }
       const dx = p.x - s.x; const dy = p.y - s.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       if (dist < bestDist) { bestDist = dist; bestTarget = p; }
@@ -2121,6 +2402,134 @@ function updateSummons(dt) {
           continue;
         }
       }
+    } else if (s.summonType === 'dnd-orc') {
+      // D&D Orc: chase the summoner (its target), melee attack
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      const prey = s.summonTargetId ? gamePlayers.find(t => t.id === s.summonTargetId) : null;
+      if (prey && prey.alive) {
+        const dx = prey.x - s.x; const dy = prey.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 2.0) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        if (dist < radius * 2.5 && s.summonAttackTimer <= 0) {
+          dealDamage(s, prey, s.summonDamage, true);
+          s.summonAttackTimer = s.summonAttackCD || 1.5;
+          s.effects.push({ type: 'orc-slash', timer: 0.2, aimNx: nx, aimNy: ny });
+        }
+      }
+    } else if (s.summonType === 'dnd-zombie') {
+      // D&D Zombie: chase nearest enemy (not owner), melee attack
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 1.5) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        if (bestDist < radius * 2.5 && s.summonAttackTimer <= 0) {
+          dealDamage(owner || s, bestTarget, s.summonDamage, true);
+          s.summonAttackTimer = s.summonAttackCD || 2.0;
+          s.effects.push({ type: 'zombie-slash', timer: 0.2, aimNx: nx, aimNy: ny });
+        }
+      }
+    } else if (s.summonType === 'dnd-sidekick') {
+      // D&D Sidekick: chase nearest enemy (not owner), attack based on race
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 3.0) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        const attackRange = s.dndRace === 'elf' ? 10 * GAME_TILE : radius * 2.5;
+        if (bestDist < attackRange && s.summonAttackTimer <= 0) {
+          if (s.dndRace === 'elf') {
+            const spd = 60 * GAME_TILE / 10;
+            projectiles.push({
+              x: s.x, y: s.y,
+              vx: nx * spd, vy: ny * spd,
+              ownerId: owner ? owner.id : s.id,
+              damage: s.summonDamage, timer: 999, type: 'dnd-arrow',
+            });
+            s.summonAttackTimer = s.summonAttackCD || 0.5;
+            s.effects.push({ type: 'bow-shot', timer: 0.3 });
+          } else {
+            const dmg = s.dndRace === 'dwarf' ? 300 + (s.summonDamage - 100) : s.summonDamage;
+            dealDamage(owner || s, bestTarget, dmg, true);
+            s.summonAttackTimer = s.summonAttackCD || (s.dndRace === 'dwarf' ? 2 : 0.5);
+            s.effects.push({ type: s.dndRace === 'dwarf' ? 'axe-swing' : 'sword-slash', timer: 0.3, aimNx: nx, aimNy: ny });
+          }
+        }
+      }
+    } else if (s.summonType === 'dragon-ochre') {
+      // Yellow Ochre: 2x2 jelly, goes through obstacles but not sea
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 1.5) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
+        if (canMoveToNoSea(newX, s.y, radius * 2)) s.x = newX;
+        if (canMoveToNoSea(s.x, newY, radius * 2)) s.y = newY;
+      }
+      // Area DPS to all enemies within 2x2 area (2 tile radius)
+      const aoeRange = GAME_TILE * 2;
+      for (const target of gamePlayers) {
+        if (target.id === s.id || target.id === s.summonOwner || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === s.summonOwner) continue;
+        const tdx = target.x - s.x; const tdy = target.y - s.y;
+        const tdist = Math.sqrt(tdx * tdx + tdy * tdy);
+        if (tdist < aoeRange) {
+          dealDamage(owner || s, target, (s.summonDamage || 50) * dt, true);
+        }
+      }
+    } else if (s.summonType === 'dragon-lich') {
+      // Lich: medium speed, short-range lightning attacks, autoheal
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      // Fast autoheal (20% maxHP per second)
+      if (s.hp < s.maxHp) {
+        s.hp = Math.min(s.maxHp, s.hp + s.maxHp * 0.2 * dt);
+      }
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 2.0) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        // Move toward target — stay in melee range
+        if (dist > 1.2 * GAME_TILE) {
+          const newX = s.x + nx * moveSpeed;
+          const newY = s.y + ny * moveSpeed;
+          if (canMoveTo(newX, s.y, radius)) s.x = newX;
+          if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        }
+        // Lightning strike: very short melee range (same as M1)
+        if (bestDist < 1.5 * GAME_TILE && s.summonAttackTimer <= 0) {
+          const prevHp = bestTarget.hp;
+          dealDamage(owner || s, bestTarget, s.summonDamage || 100, true);
+          s.summonAttackTimer = s.summonAttackCD || 0.4;
+          s.effects.push({ type: 'lich-lightning', timer: 0.2, targetX: bestTarget.x, targetY: bestTarget.y });
+          // Track kills — lich dies after 2
+          if (bestTarget.hp <= 0 && prevHp > 0 && !bestTarget.isSummon) {
+            s.lichKillCount = (s.lichKillCount || 0) + 1;
+            if (s.lichKillCount >= 2) {
+              s.alive = false; s.hp = 0;
+              s.effects.push({ type: 'death', timer: 2 });
+              if (owner && owner.dragonSummonId === s.id) owner.dragonSummonId = null;
+            }
+          }
+        }
+      }
     }
 
     // Clean up summon if owner died or left the game entirely
@@ -2144,6 +2553,12 @@ function updateSummons(dt) {
           const idx = owner.napoleonInfantryIds.indexOf(s.id);
           if (idx >= 0) owner.napoleonInfantryIds.splice(idx, 1);
         }
+        if (s.summonType === 'dnd-orc' && owner.dndOrcIds) {
+          const idx = owner.dndOrcIds.indexOf(s.id);
+          if (idx >= 0) owner.dndOrcIds.splice(idx, 1);
+        }
+        if (s.summonType === 'dnd-sidekick' && owner.dndSidekickId === s.id) owner.dndSidekickId = null;
+        if ((s.summonType === 'dragon-ochre' || s.summonType === 'dragon-lich') && owner.dragonSummonId === s.id) owner.dragonSummonId = null;
       }
     }
   }
@@ -2155,9 +2570,10 @@ function updateSummons(dt) {
 
 // Difficulty tuning
 const AI_PARAMS = {
-  easy:   { thinkDelay: 1.0, aimError: 0.30, abilityDelay: 2.5, aggroRange: 8,  retreatHp: 0.15, reactionTime: 0.7 },
-  medium: { thinkDelay: 0.5, aimError: 0.15, abilityDelay: 1.2, aggroRange: 11, retreatHp: 0.25, reactionTime: 0.35 },
-  hard:   { thinkDelay: 0.2, aimError: 0.05, abilityDelay: 0.6, aggroRange: 15, retreatHp: 0.35, reactionTime: 0.12 },
+  easy:   { thinkDelay: 0.9, aimError: 0.25, abilityDelay: 2.0, aggroRange: 9,  retreatHp: 0.15, reactionTime: 0.6 },
+  medium: { thinkDelay: 0.45, aimError: 0.12, abilityDelay: 1.0, aggroRange: 12, retreatHp: 0.25, reactionTime: 0.30 },
+  hard:   { thinkDelay: 0.18, aimError: 0.04, abilityDelay: 0.5, aggroRange: 16, retreatHp: 0.35, reactionTime: 0.10 },
+  expert: { thinkDelay: 0.12, aimError: 0.02, abilityDelay: 0.35, aggroRange: 20, retreatHp: 0.40, reactionTime: 0.06 },
 };
 
 function updateCPUs(dt) {
@@ -2203,8 +2619,11 @@ function updateCPUs(dt) {
     // Combat
     ai.abilityTimer -= dt;
     if (ai.abilityTimer <= 0 && ai.attackTarget) {
-      cpuAttack(cpu, params);
-      ai.abilityTimer = params.abilityDelay * (0.7 + Math.random() * 0.6);
+      // Hard/expert CPUs can attack while retreating (kiting)
+      if (!ai.retreating || cpu.difficulty === 'hard' || cpu.difficulty === 'expert') {
+        cpuAttack(cpu, params);
+        ai.abilityTimer = params.abilityDelay * (0.7 + Math.random() * 0.6);
+      }
     }
   }
 }
@@ -2212,10 +2631,15 @@ function updateCPUs(dt) {
 function cpuChooseTarget(cpu, params) {
   const ai = cpu.aiState;
   const aggroRange = params.aggroRange * GAME_TILE;
+  const isExpert = cpu.difficulty === 'expert';
 
-  // Find closest alive enemy within aggro range
+  // Target stickiness: prefer staying on current target unless a much better one exists
+  const stickyBias = (cpu.difficulty === 'expert' || cpu.difficulty === 'hard') ? 1.5 * GAME_TILE : 0;
+
+  // Find best enemy within aggro range
   let bestTarget = null;
   let bestDist = Infinity;
+  let bestScore = Infinity;
   for (const p of gamePlayers) {
     if (p.id === cpu.id || !p.alive) continue;
     if (p.isSummon && p.summonOwner === cpu.id) continue; // skip own summons
@@ -2224,9 +2648,22 @@ function cpuChooseTarget(cpu, params) {
     if (cpuIsHidden(p, cpu)) continue;
     const dx = p.x - cpu.x; const dy = p.y - cpu.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestTarget = p;
+    if (isExpert || cpu.difficulty === 'hard') {
+      // Smart: score = weighted combo of distance and HP fraction (prefer low-HP & close)
+      const hpFraction = p.hp / p.maxHp;
+      let score = dist + hpFraction * 5 * GAME_TILE;
+      // Stickiness: bias toward current target so we don't constantly switch
+      if (ai.attackTarget && ai.attackTarget.id === p.id) score -= stickyBias;
+      if (score < bestScore) {
+        bestScore = score;
+        bestDist = dist;
+        bestTarget = p;
+      }
+    } else {
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestTarget = p;
+      }
     }
   }
 
@@ -2301,6 +2738,13 @@ function cpuMove(cpu, dt, params) {
   if (cpu.napoleonCavalry) speed *= 2.5;
   // Gear Up: speed penalty
   if (cpu.gearUpTimer > 0) speed *= (cpu.fighter.abilities[2].speedPenalty || 0.6);
+  // D&D Human: 1.2x speed
+  if (cpu.dndRace === 'human') speed *= 1.2;
+  // Dragon: roar speed buff, fly speed, beam immobilization, breath slow
+  if (cpu.dragonRoarActive) speed *= 1.3;
+  if (cpu.dragonFlying) speed *= 2.5; // same as Napoleon cavalry
+  if (cpu.dragonBreathActive) speed *= 0.5;
+  if (cpu.dragonBeamCharging || cpu.dragonBeamRecovery > 0) speed = 0;
   // Buff slow debuff
   if (cpu.buffSlowed > 0) speed *= 0.6;
   // Deer Fear: speed boost when retreating
@@ -2334,8 +2778,26 @@ function cpuMove(cpu, dt, params) {
 
     if (ai.retreating) {
       // Run away from target
-      goalX = cpu.x - dx / (dist || 1) * GAME_TILE * 3;
-      goalY = cpu.y - dy / (dist || 1) * GAME_TILE * 3;
+      if (cpu.difficulty === 'expert' && appleTree && appleTree.apples.length > 0) {
+        // Expert retreat: run toward nearest apple for healing
+        let closestApple = null, closestAppleDist = Infinity;
+        for (const a of appleTree.apples) {
+          const ax = (a.col + 0.5) * GAME_TILE;
+          const ay = (a.row + 0.5) * GAME_TILE;
+          const d = Math.sqrt((ax - cpu.x) ** 2 + (ay - cpu.y) ** 2);
+          if (d < closestAppleDist) { closestAppleDist = d; closestApple = a; }
+        }
+        if (closestApple) {
+          goalX = (closestApple.col + 0.5) * GAME_TILE;
+          goalY = (closestApple.row + 0.5) * GAME_TILE;
+        } else {
+          goalX = cpu.x - dx / (dist || 1) * GAME_TILE * 3;
+          goalY = cpu.y - dy / (dist || 1) * GAME_TILE * 3;
+        }
+      } else {
+        goalX = cpu.x - dx / (dist || 1) * GAME_TILE * 3;
+        goalY = cpu.y - dy / (dist || 1) * GAME_TILE * 3;
+      }
     } else {
       // Approach to ideal range based on fighter type
       const idealRange = cpu.fighter.id === 'poker' ? 5 * GAME_TILE : cpu.fighter.id === 'filbus' ? 1.5 * GAME_TILE : cpu.fighter.id === 'cricket' ? 1.0 * GAME_TILE : cpu.fighter.id === 'deer' ? 1.0 * GAME_TILE : 1.2 * GAME_TILE;
@@ -2354,7 +2816,7 @@ function cpuMove(cpu, dt, params) {
         goalX = cpu.x + perpX * ai.strafeDir * GAME_TILE * 2;
         goalY = cpu.y + perpY * ai.strafeDir * GAME_TILE * 2;
         // Switch strafe direction more frequently (harder CPUs strafe more)
-        const strafeFlipChance = cpu.difficulty === 'hard' ? 0.04 : cpu.difficulty === 'medium' ? 0.025 : 0.01;
+        const strafeFlipChance = cpu.difficulty === 'expert' ? 0.06 : cpu.difficulty === 'hard' ? 0.04 : cpu.difficulty === 'medium' ? 0.025 : 0.01;
         if (Math.random() < strafeFlipChance) ai.strafeDir *= -1;
       }
     }
@@ -2387,11 +2849,49 @@ function cpuMove(cpu, dt, params) {
       ai.moveTarget = null;
     }
   } else {
-    // Wander toward zone center
+    const isExpert = cpu.difficulty === 'expert';
     const centerX = (gameMap.cols / 2) * GAME_TILE;
     const centerY = (gameMap.rows / 2) * GAME_TILE;
-    goalX = centerX + (Math.random() - 0.5) * GAME_TILE * 4;
-    goalY = centerY + (Math.random() - 0.5) * GAME_TILE * 4;
+
+    // Expert: seek apples or apple tree area when idle
+    if (isExpert && appleTree) {
+      const treeX = (appleTree.col + 1) * GAME_TILE;
+      const treeY = (appleTree.row + 1) * GAME_TILE;
+      // Go pick up nearby apples if we need healing
+      if (appleTree.apples.length > 0 && cpu.hp < cpu.maxHp * 0.85) {
+        let closestApple = null, closestAppleDist = Infinity;
+        for (const a of appleTree.apples) {
+          const ax = (a.col + 0.5) * GAME_TILE;
+          const ay = (a.row + 0.5) * GAME_TILE;
+          const d = Math.sqrt((ax - cpu.x) ** 2 + (ay - cpu.y) ** 2);
+          if (d < closestAppleDist) { closestAppleDist = d; closestApple = a; }
+        }
+        if (closestApple) {
+          goalX = (closestApple.col + 0.5) * GAME_TILE;
+          goalY = (closestApple.row + 0.5) * GAME_TILE;
+        }
+      } else {
+        // Wander near the apple tree to control it
+        goalX = treeX + (Math.random() - 0.5) * GAME_TILE * 3;
+        goalY = treeY + (Math.random() - 0.5) * GAME_TILE * 3;
+      }
+    } else {
+      // Wander toward zone center
+      goalX = centerX + (Math.random() - 0.5) * GAME_TILE * 4;
+      goalY = centerY + (Math.random() - 0.5) * GAME_TILE * 4;
+    }
+
+    // Anti-corner: if near a corner, strongly push toward center
+    if (isExpert) {
+      const mapW = gameMap.cols * GAME_TILE, mapH = gameMap.rows * GAME_TILE;
+      const edgeMargin = GAME_TILE * 3;
+      const nearLeft = cpu.x < edgeMargin, nearRight = cpu.x > mapW - edgeMargin;
+      const nearTop = cpu.y < edgeMargin, nearBottom = cpu.y > mapH - edgeMargin;
+      if ((nearLeft || nearRight) && (nearTop || nearBottom)) {
+        goalX = centerX;
+        goalY = centerY;
+      }
+    }
   }
 
   if (goalX === undefined) return;
@@ -2403,7 +2903,12 @@ function cpuMove(cpu, dt, params) {
   moveX /= moveDist;
   moveY /= moveDist;
 
-  // Stay in zone — strongly prefer moving toward zone center if out of bounds
+  // Natural jitter: add slight random drift to movement so CPUs don't move in perfectly straight lines
+  const jitter = cpu.difficulty === 'easy' ? 0.15 : 0.08;
+  moveX += (Math.random() - 0.5) * jitter;
+  moveY += (Math.random() - 0.5) * jitter;
+
+  // Stay in zone — prefer moving toward zone center if out of bounds
   if (zoneInset > 0) {
     const pCol = Math.floor(cpu.x / GAME_TILE);
     const pRow = Math.floor(cpu.y / GAME_TILE);
@@ -2412,8 +2917,32 @@ function cpuMove(cpu, dt, params) {
       const centerX = (gameMap.cols / 2) * GAME_TILE;
       const centerY = (gameMap.rows / 2) * GAME_TILE;
       const toCenter = Math.sqrt((centerX - cpu.x) ** 2 + (centerY - cpu.y) ** 2) || 1;
-      moveX = (centerX - cpu.x) / toCenter;
-      moveY = (centerY - cpu.y) / toCenter;
+      const toCenterX = (centerX - cpu.x) / toCenter;
+      const toCenterY = (centerY - cpu.y) / toCenter;
+      if (cpu.difficulty === 'expert') {
+        // Expert: soft pull toward center (0.7 blend) — allows zone entry to avoid worse outcomes
+        moveX = moveX * 0.3 + toCenterX * 0.7;
+        moveY = moveY * 0.3 + toCenterY * 0.7;
+      } else {
+        // Others: hard override to center
+        moveX = toCenterX;
+        moveY = toCenterY;
+      }
+    }
+    // Expert: preemptive zone awareness — avoid moving INTO the zone edge
+    if (cpu.difficulty === 'expert') {
+      const futureX = cpu.x + moveX * GAME_TILE * 2;
+      const futureY = cpu.y + moveY * GAME_TILE * 2;
+      const fCol = Math.floor(futureX / GAME_TILE);
+      const fRow = Math.floor(futureY / GAME_TILE);
+      if (fCol < zoneInset + 1 || fCol >= gameMap.cols - zoneInset - 1 ||
+          fRow < zoneInset + 1 || fRow >= gameMap.rows - zoneInset - 1) {
+        const centerX = (gameMap.cols / 2) * GAME_TILE;
+        const centerY = (gameMap.rows / 2) * GAME_TILE;
+        const toCenter = Math.sqrt((centerX - cpu.x) ** 2 + (centerY - cpu.y) ** 2) || 1;
+        moveX = moveX * 0.5 + (centerX - cpu.x) / toCenter * 0.5;
+        moveY = moveY * 0.5 + (centerY - cpu.y) / toCenter * 0.5;
+      }
     }
   }
 
@@ -2474,8 +3003,13 @@ function cpuMove(cpu, dt, params) {
   const move = speed * dt * 60; // frame-rate independent
   const newX = cpu.x + moveX * move;
   const newY = cpu.y + moveY * move;
-  if (canMoveTo(newX, cpu.y, radius)) cpu.x = newX;
-  if (canMoveTo(cpu.x, newY, radius)) cpu.y = newY;
+  if (cpu.dragonFlying) {
+    cpu.x = Math.max(radius, Math.min(newX, gameMap.cols * GAME_TILE - radius));
+    cpu.y = Math.max(radius, Math.min(newY, gameMap.rows * GAME_TILE - radius));
+  } else {
+    if (canMoveTo(newX, cpu.y, radius)) cpu.x = newX;
+    if (canMoveTo(cpu.x, newY, radius)) cpu.y = newY;
+  }
 }
 
 function cpuAttack(cpu, params) {
@@ -2495,6 +3029,8 @@ function cpuAttack(cpu, params) {
   const isCat = fighter.id === 'explodingcat';
   const isNapoleon = fighter.id === 'napoleon';
   const isModerator = fighter.id === 'moderator';
+  const isDnd = fighter.id === 'dnd';
+  const isDragon = fighter.id === 'dragon';
 
   // Add aim error based on difficulty
   const errorAngle = (Math.random() - 0.5) * params.aimError * 2;
@@ -2554,6 +3090,60 @@ function cpuAttack(cpu, params) {
       // Reset cooldowns
       cpu.cdE = 0; cpu.cdR = 0; cpu.cdT = 0;
       return;
+    } else if (isDnd) {
+      // D20: buff self (CPU solo — no teammates to buff)
+      cpu.specialUsed = true;
+      cpu.dndD20Active = true;
+      cpu.effects.push({ type: 'd20-roll', timer: 3.0 });
+      return;
+    } else if (isDragon) {
+      // Power of Evil: summon Yellow Ochre or Lich
+      if (!cpu.dragonSummonId || !gamePlayers.find(p => p.id === cpu.dragonSummonId && p.alive)) {
+        cpu.specialUsed = true;
+        const sumId = 'summon-' + cpu.id + '-dragon-' + Date.now();
+        const safe = getRandomSafePosition();
+        if (Math.random() < 0.5) {
+          // Yellow Ochre
+          gamePlayers.push({
+            id: sumId, name: '🟡 Yellow Ochre', color: '#c8a832',
+            x: safe.x, y: safe.y,
+            hp: 1000, maxHp: 1000,
+            fighter: fighter, alive: true,
+            cdM1: 0, cdE: 0, cdR: 0, cdT: 0, cdF: 0,
+            totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+            supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+            noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+            specialJumping: false, specialAiming: false,
+            specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+            effects: [],
+            isSummon: true, summonOwner: cpu.id, summonType: 'dragon-ochre',
+            summonSpeed: 1.5, summonDamage: 50,
+            summonAttackCD: 0.5, summonAttackTimer: 0,
+          });
+        } else {
+          // Lich
+          gamePlayers.push({
+            id: sumId, name: '💀 Lich', color: '#3a0066',
+            x: safe.x, y: safe.y,
+            hp: 700, maxHp: 700,
+            fighter: fighter, alive: true,
+            cdM1: 0, cdE: 0, cdR: 0, cdT: 0, cdF: 0,
+            totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+            supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+            noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+            specialJumping: false, specialAiming: false,
+            specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+            effects: [],
+            isSummon: true, summonOwner: cpu.id, summonType: 'dragon-lich',
+            summonSpeed: 2.0, summonDamage: 100,
+            summonAttackCD: 0.4, summonAttackTimer: 0,
+            lichKillCount: 0,
+          });
+        }
+        cpu.dragonSummonId = sumId;
+        cpu.effects.push({ type: 'summon', timer: 1.5 });
+        return;
+      }
     } else {
       if (dist < 10 * GAME_TILE) {
         cpuUseSpecialFighter(cpu, target);
@@ -2629,6 +3219,47 @@ function cpuAttack(cpu, params) {
         cpu.effects.push({ type: 'scare', timer: 1.5 });
       }
       return;
+    } else if (isDnd) {
+      // Questing: spawn orc that chases self (CPU spawns orcs to farm GP)
+      const abil = fighter.abilities[1];
+      if (cpu.dndOrcIds.length < 3) {
+        cpu.cdE = abil.cooldown;
+        const orcId = 'summon-' + cpu.id + '-orc-' + Date.now();
+        const safe = getRandomSafePosition();
+        const orc = {
+          id: orcId, name: '⚔ Orc', color: '#556b2f',
+          x: safe.x, y: safe.y,
+          hp: abil.orcHp || 600, maxHp: abil.orcHp || 600,
+          fighter: fighter, alive: true,
+          cdM1: 0, cdE: 0, cdR: 0, cdT: 0, cdF: 0,
+          totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+          supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+          noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+          specialJumping: false, specialAiming: false,
+          specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+          effects: [],
+          isSummon: true, summonOwner: cpu.id, summonType: 'dnd-orc',
+          summonTargetId: cpu.id,
+          summonSpeed: 2.0, summonDamage: abil.damage || 200,
+          summonAttackCD: 1.5, summonAttackTimer: 0,
+        };
+        gamePlayers.push(orc);
+        cpu.dndOrcIds.push(orcId);
+        return;
+      }
+      return;
+    } else if (isDragon) {
+      // Dragon Ride: fly when low HP or to close distance
+      if (!cpu.dragonFlying && !cpu.dragonBeamCharging && !cpu.dragonBeamFiring) {
+        const shouldFly = cpu.hp < cpu.maxHp * 0.3 || dist > 8 * GAME_TILE;
+        if (shouldFly) {
+          cpu.cdE = fighter.abilities[1].cooldown;
+          cpu.dragonFlying = true;
+          cpu.dragonFlyTimer = fighter.abilities[1].flyDuration || 5;
+          cpu.effects.push({ type: 'dragon-fly', timer: 1.5 });
+          return;
+        }
+      }
     } else {
       cpu.cdE = fighter.abilities[1].cooldown;
       cpu.supportBuff = fighter.abilities[1].duration;
@@ -2719,6 +3350,86 @@ function cpuAttack(cpu, params) {
         cpu.effects.push({ type: 'bug-fix', timer: 1.5 });
       }
       return;
+    } else if (isDnd) {
+      // Buy/Use: spend GP based on amount
+      const gp = cpu.dndGP || 0;
+      if (gp >= 1) {
+        cpu.cdR = fighter.abilities[2].cooldown || 1;
+        if (gp >= 8 && !cpu.dndCharm) {
+          // Buy charm + M1 buff
+          cpu.dndGP = 0;
+          cpu.dndCharm = true;
+          cpu.dndWeaponBonus = (cpu.dndWeaponBonus || 0) + 50;
+        } else if (gp >= 5) {
+          // Buy weapon upgrade
+          cpu.dndGP = 0;
+          cpu.dndWeaponBonus = (cpu.dndWeaponBonus || 0) + 50;
+        } else if (gp >= 2) {
+          // Random spell
+          cpu.dndGP = 0;
+          const roll = Math.random();
+          if (roll < 0.33) {
+            // Zombie summon
+            const zId = 'summon-' + cpu.id + '-zombie-' + Date.now();
+            const safe = getRandomSafePosition();
+            gamePlayers.push({
+              id: zId, name: '🧟 Zombie', color: '#2d5a1e',
+              x: safe.x, y: safe.y,
+              hp: 400, maxHp: 400,
+              fighter: fighter, alive: true,
+              cdM1: 0, cdE: 0, cdR: 0, cdT: 0, cdF: 0,
+              totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+              supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+              noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+              specialJumping: false, specialAiming: false,
+              specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+              effects: [],
+              isSummon: true, summonOwner: cpu.id, summonType: 'dnd-zombie',
+              summonSpeed: 1.5, summonDamage: 150,
+              summonAttackCD: 2.0, summonAttackTimer: 0,
+            });
+          } else if (roll < 0.66) {
+            // Fireball
+            const spd = 30 * GAME_TILE / 10;
+            projectiles.push({
+              x: cpu.x, y: cpu.y,
+              vx: aimNx * spd, vy: aimNy * spd,
+              ownerId: cpu.id, damage: 300,
+              timer: 3, type: 'dnd-fireball',
+              dndFireball: true,
+            });
+          } else {
+            // Blur bolt
+            const spd = 35 * GAME_TILE / 10;
+            projectiles.push({
+              x: cpu.x, y: cpu.y,
+              vx: aimNx * spd, vy: aimNy * spd,
+              ownerId: cpu.id, damage: 300,
+              timer: 2, type: 'dnd-blur-bolt',
+              dndBlurDuration: 10,
+            });
+          }
+        } else {
+          // Potion
+          cpu.dndGP = 0;
+          cpu.dndHealPool = (cpu.dndHealPool || 0) + 300;
+        }
+        return;
+      }
+      return;
+    } else if (isDragon) {
+      // Dragon Beam: fire at medium range when not already charging/flying
+      if (!cpu.dragonBeamCharging && !cpu.dragonBeamFiring && cpu.dragonBeamRecovery <= 0 && !cpu.dragonFlying) {
+        if (dist < 12 * GAME_TILE && dist > 3 * GAME_TILE) {
+          cpu.cdR = fighter.abilities[2].cooldown;
+          cpu.dragonBeamCharging = true;
+          cpu.dragonBeamChargeTimer = fighter.abilities[2].chargeTime || 3;
+          cpu.dragonBeamAimNx = aimNx;
+          cpu.dragonBeamAimNy = aimNy;
+          cpu.effects.push({ type: 'dragon-beam-charge', timer: fighter.abilities[2].chargeTime || 3 });
+          return;
+        }
+      }
     } else {
       if (dist < fighter.abilities[2].range * GAME_TILE) {
         cpuPowerSwing(cpu, target, aimNx, aimNy);
@@ -2851,6 +3562,23 @@ function cpuAttack(cpu, params) {
         cpu.effects.push({ type: 'server-reset', timer: 2 });
         return;
       }
+    } else if (isDnd) {
+      // Race Change: cycle races
+      cpu.cdT = fighter.abilities[3].cooldown;
+      const races = ['human', 'elf', 'dwarf'].filter(r => r !== (cpu.dndRace || 'human'));
+      cpu.dndRace = races[Math.floor(Math.random() * races.length)];
+      cpu.effects.push({ type: 'race-change', timer: 1.5 });
+      return;
+    } else if (isDragon) {
+      // Draconic Roar: +30% speed self, +20% allies, -200HP, use once
+      if (!cpu.dragonRoarActive && cpu.hp > 300) {
+        cpu.cdT = fighter.abilities[3].cooldown;
+        cpu.dragonRoarActive = true;
+        cpu.hp -= (fighter.abilities[3].selfDamage || 200);
+        if (cpu.hp <= 0) cpu.hp = 1;
+        cpu.effects.push({ type: 'dragon-roar', timer: 2 });
+        return;
+      }
     } else {
       const sightRange = CAMERA_RANGE * GAME_TILE * 2;
       if (dist <= sightRange) {
@@ -2929,6 +3657,61 @@ function cpuAttack(cpu, params) {
           }
         }
         cpu.effects.push({ type: 'ban-hammer', timer: 0.4 });
+      }
+    } else if (isDnd) {
+      // D&D M1: race-dependent attack
+      const race = cpu.dndRace || 'human';
+      const abil = fighter.abilities[0];
+      if (race === 'elf') {
+        // Bow: ranged attack — unlimited range (stops at wall/sea)
+        if (dist < 15 * GAME_TILE) {
+          cpu.cdM1 = abil.cooldown;
+          const spd = (abil.bowSpeed || 40) * GAME_TILE / 10;
+          let dmg = abil.damage + (cpu.dndWeaponBonus || 0);
+          if (cpu.dndD20Active) dmg = 650;
+          projectiles.push({
+            x: cpu.x, y: cpu.y,
+            vx: aimNx * spd, vy: aimNy * spd,
+            ownerId: cpu.id, damage: dmg,
+            timer: 999, type: 'dnd-arrow',
+          });
+          cpu.effects.push({ type: 'bow-shot', timer: 0.3 });
+        }
+      } else if (race === 'dwarf') {
+        // Axe: melee, higher damage, slower CD
+        if (dist < (abil.range || 1.5) * GAME_TILE) {
+          cpu.cdM1 = abil.axeCooldown || 2;
+          let dmg = (abil.axeDamage || 300) + (cpu.dndWeaponBonus || 0);
+          if (cpu.dndD20Active) dmg = 750;
+          dealDamage(cpu, target, dmg, false);
+          _lastDealDamageWasM1 = true;
+          cpu.effects.push({ type: 'axe-swing', timer: 0.4 });
+        }
+      } else {
+        // Human: sword melee
+        if (dist < (abil.range || 1.5) * GAME_TILE) {
+          cpu.cdM1 = abil.cooldown;
+          let dmg = abil.damage + (cpu.dndWeaponBonus || 0);
+          if (cpu.dndD20Active) dmg = 650;
+          dealDamage(cpu, target, dmg, false);
+          _lastDealDamageWasM1 = true;
+          cpu.effects.push({ type: 'sword-slash', timer: 0.3, aimNx, aimNy });
+        }
+      }
+    } else if (isDragon) {
+      // Dragon Breath: continuous DPS toward target
+      const range = (fighter.abilities[0].range || 4) * GAME_TILE;
+      if (dist < range && (cpu.dragonBreathFuel || 0) > 0.5 && !cpu.dragonBeamCharging && !cpu.dragonBeamFiring) {
+        if (!cpu.dragonBreathActive) {
+          cpu.dragonBreathWindup = 0.2; // windup on first activation
+        }
+        cpu.dragonBreathActive = true;
+        cpu.dragonBreathAimNx = aimNx;
+        cpu.dragonBreathAimNy = aimNy;
+        cpu.cdM1 = 0.05;
+        cpu.effects.push({ type: 'dragon-breath', timer: 0.2, aimNx, aimNy });
+      } else {
+        cpu.dragonBreathActive = false;
       }
     } else {
       if (dist < fighter.abilities[0].range * GAME_TILE) {
@@ -3962,6 +4745,8 @@ function useAbility(key) {
   const isCat = fighter.id === 'explodingcat';
   const isNapoleon = fighter.id === 'napoleon';
   const isModerator = fighter.id === 'moderator';
+  const isDnd = fighter.id === 'dnd';
+  const isDragon = fighter.id === 'dragon';
 
   // Filbus: channeling interrupts
   if (isFilbus && (key !== 'E' && key !== 'R')) {
@@ -4243,6 +5028,65 @@ function useAbility(key) {
       }
       _lastDealDamageWasM1 = false;
       lp.effects.push({ type: 'ban-hammer', timer: 0.3 });
+    } else if (isDnd) {
+      // D&D M1: Sword (Human) / Bow (Elf) / Axe (Dwarf)
+      const race = lp.dndRace || 'human';
+      let baseDmg = race === 'dwarf' ? (abil.axeDamage || 150) : (abil.damage || 100);
+      baseDmg += (lp.dndWeaponBonus || 0);
+      if (lp.dndD20Active) baseDmg = race === 'dwarf' ? 750 : 650;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      baseDmg = Math.floor(baseDmg);
+      lp.cdM1 = race === 'dwarf' ? (abil.axeCooldown || 1.5) : (abil.cooldown || 1);
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      if (race === 'elf') {
+        // Bow: ranged projectile — fast, unlimited range (stops at wall/sea)
+        const speed = (abil.bowSpeed || 40) * GAME_TILE / 10;
+        projectiles.push({
+          x: lp.x, y: lp.y,
+          vx: aimNx * speed, vy: aimNy * speed,
+          ownerId: lp.id, damage: baseDmg,
+          timer: 999,
+          type: 'dnd-arrow', color: '#8b4513',
+        });
+        lp.effects.push({ type: 'dnd-bow', timer: 0.2, aimNx, aimNy });
+      } else {
+        // Sword/Axe: melee
+        const range = (abil.range || 1.5) * GAME_TILE;
+        for (const target of gamePlayers) {
+          if (target.id === lp.id || !target.alive) continue;
+          if (target.isSummon && target.summonOwner === lp.id && target.summonType !== 'dnd-orc') continue;
+          const dx = target.x - lp.x; const dy = target.y - lp.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist > range) continue;
+          const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+          if (dot < 0) continue;
+          dealDamage(lp, target, baseDmg);
+        }
+        lp.effects.push({ type: race === 'dwarf' ? 'dnd-axe' : 'sword', timer: 0.2, aimNx, aimNy });
+      }
+    } else if (isDragon) {
+      // Dragon M1: Dragon Breath — start/continue continuous icy breath
+      if (lp.dragonBreathFuel <= 0) return;
+      if (lp.dragonBeamCharging || lp.dragonBeamRecovery > 0) return;
+      // Set windup on first activation (not when already breathing)
+      if (!lp.dragonBreathActive) {
+        lp.dragonBreathWindup = 0.2;
+      }
+      lp.dragonBreathActive = true;
+      lp.cdM1 = 0.05; // very short CD so auto-fire updates aim each frame
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      lp.dragonBreathAimNx = aimDx / aimDist;
+      lp.dragonBreathAimNy = aimDy / aimDist;
     } else {
       // Fighter: Sword (original M1)
       const range = abil.range * GAME_TILE;
@@ -4294,10 +5138,45 @@ function useAbility(key) {
             appleTree.alive = false;
             appleTree.regrowTimer = 30;
             appleTree.apples = [];
-            // Make tree tiles solid (trunk obstacle)
-            for (let dr = 0; dr < 2; dr++) {
-              for (let dc = 0; dc < 2; dc++) {
-                gameMap.tiles[appleTree.row + dr][appleTree.col + dc] = TILE.ROCK;
+            // Tiles stay as GROUND — isStumpTile() handles blocking movement
+            // Push any players standing on the stump to a safe position nearby
+            const stumpCenterX = (appleTree.col + 1) * GAME_TILE;
+            const stumpCenterY = (appleTree.row + 1) * GAME_TILE;
+            const pr = GAME_TILE * PLAYER_RADIUS_RATIO;
+            for (const pl of gamePlayers) {
+              if (!pl.alive) continue;
+              const pCol = Math.floor(pl.x / GAME_TILE);
+              const pRow = Math.floor(pl.y / GAME_TILE);
+              if (pCol >= appleTree.col && pCol <= appleTree.col + 1 &&
+                  pRow >= appleTree.row && pRow <= appleTree.row + 1) {
+                let pushDx = pl.x - stumpCenterX;
+                let pushDy = pl.y - stumpCenterY;
+                const pushDist = Math.sqrt(pushDx * pushDx + pushDy * pushDy) || 1;
+                pushDx /= pushDist; pushDy /= pushDist;
+                let placed = false;
+                for (let step = 1; step <= 8; step++) {
+                  const tryX = stumpCenterX + pushDx * GAME_TILE * (1.2 + step * 0.3);
+                  const tryY = stumpCenterY + pushDy * GAME_TILE * (1.2 + step * 0.3);
+                  if (canMoveTo(tryX, tryY, pr)) {
+                    pl.x = tryX; pl.y = tryY; placed = true; break;
+                  }
+                }
+                if (!placed) {
+                  for (let a = 0; a < 8 && !placed; a++) {
+                    const angle = (a / 8) * Math.PI * 2;
+                    for (let step = 1; step <= 6 && !placed; step++) {
+                      const tryX = stumpCenterX + Math.cos(angle) * GAME_TILE * (1.2 + step * 0.3);
+                      const tryY = stumpCenterY + Math.sin(angle) * GAME_TILE * (1.2 + step * 0.3);
+                      if (canMoveTo(tryX, tryY, pr)) {
+                        pl.x = tryX; pl.y = tryY; placed = true;
+                      }
+                    }
+                  }
+                }
+                if (!placed) {
+                  const safe = getRandomSafePosition();
+                  pl.x = safe.x; pl.y = safe.y;
+                }
               }
             }
             combatLog.push({ text: '🪓 Apple tree chopped down!', timer: 4, color: '#e67e22' });
@@ -4543,7 +5422,11 @@ function useAbility(key) {
     } else if (isModerator) {
       // Moderator E: Scare — TP a random enemy to you, stun 1s, add Fear
       lp.cdE = abil.cooldown;
-      const enemies = gamePlayers.filter(p => p.alive && !p.isSummon && p.id !== lp.id);
+      const enemies = gamePlayers.filter(p => {
+        if (!p.alive || p.isSummon || p.id === lp.id) return false;
+        if (gameMode === 'teams' && lp.team && p.team === lp.team) return false;
+        return true;
+      });
       if (enemies.length > 0) {
         const victim = enemies[Math.floor(Math.random() * enemies.length)];
         // TP victim near the moderator (safe position close by, not on rocks or inside moderator)
@@ -4575,15 +5458,74 @@ function useAbility(key) {
       } else {
         combatLog.push({ text: 'No enemies to scare!', timer: 2, color: '#999' });
       }
+    } else if (isDnd) {
+      // D&D E: Questing — spawn an orc that attacks ONLY this player. Earn 1GP on kill.
+      lp.cdE = abil.cooldown || 0;
+      const orcId = 'dnd-orc-' + lp.id + '-' + Date.now();
+      const orcFighter = getFighter('fighter');
+      const orc = createPlayerState(
+        { id: orcId, name: 'Orc', color: '#556b2f', fighterId: 'fighter' },
+        { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+        orcFighter
+      );
+      // Spawn 3-5 tiles away in random direction, safe position
+      const orcRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+      let orcPlaced = false;
+      for (let a = 0; a < 16; a++) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = GAME_TILE * (3 + Math.random() * 2);
+        const tx = lp.x + Math.cos(angle) * dist;
+        const ty = lp.y + Math.sin(angle) * dist;
+        if (canMoveTo(tx, ty, orcRadius)) { orc.x = tx; orc.y = ty; orcPlaced = true; break; }
+      }
+      if (!orcPlaced) { const safe = getRandomSafePosition(); orc.x = safe.x; orc.y = safe.y; }
+      orc.hp = abil.orcHp || 600;
+      orc.maxHp = abil.orcHp || 600;
+      orc.isSummon = true;
+      orc.summonOwner = lp.id;
+      orc.summonType = 'dnd-orc';
+      orc.summonSpeed = abil.orcSpeed || 2.5;
+      orc.summonDamage = abil.damage || 200;
+      orc.summonAttackCD = abil.orcAttackCD || 1;
+      orc.summonAttackTimer = 0;
+      orc.summonTargetId = lp.id; // attacks its OWN summoner
+      orc.isCPU = true;
+      gamePlayers.push(orc);
+      if (!lp.dndOrcIds) lp.dndOrcIds = [];
+      lp.dndOrcIds.push(orcId);
+      lp.effects.push({ type: 'dnd-quest', timer: 1.0 });
+      combatLog.push({ text: '⚔️ Quest started! An Orc appears!', timer: 3, color: '#556b2f' });
+    } else if (isDragon) {
+      // Dragon E: Dragon Ride — fly over obstacles for 5s
+      lp.cdE = abil.cooldown;
+      lp.dragonFlying = true;
+      lp.dragonFlyTimer = abil.flyDuration || 5;
+      lp.effects.push({ type: 'dragon-fly', timer: (abil.flyDuration || 5) + 0.5 });
+      combatLog.push({ text: '🐉 Dragon Ride! Flying for 5s!', timer: 3, color: '#5b8fa8' });
     } else {
       // Fighter: Buff — damage boost + slow nearby enemies
       lp.supportBuff = abil.duration;
       lp.effects.push({ type: 'support', timer: 1.5 });
+      // Team buff sharing: nearby allies get half-duration support buff
+      if (gameMode === 'teams' && lp.team && !lp.isSummon) {
+        const buffRange = TEAM_HEAL_RANGE * GAME_TILE;
+        const allyDur = Math.round(abil.duration * 0.5);
+        for (const ally of gamePlayers) {
+          if (ally.id === lp.id || !ally.alive || ally.isSummon || ally.team !== lp.team) continue;
+          const adx = ally.x - lp.x; const ady = ally.y - lp.y;
+          if (Math.sqrt(adx * adx + ady * ady) <= buffRange) {
+            ally.supportBuff = Math.max(ally.supportBuff, allyDur);
+            ally.effects.push({ type: 'team-buff', timer: 0.5 });
+          }
+        }
+      }
       // Slow nearby enemies
       const slowRange = (abil.slowRange || 8) * GAME_TILE;
       const slowDur = abil.slowDuration || 7;
       for (const target of gamePlayers) {
         if (target.id === lp.id || !target.alive || (target.isSummon && target.summonOwner === lp.id)) continue;
+        // Skip teammates in team mode
+        if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
         const sdx = target.x - lp.x, sdy = target.y - lp.y;
         if (Math.sqrt(sdx * sdx + sdy * sdy) < slowRange) {
           target.buffSlowed = slowDur;
@@ -4781,7 +5723,11 @@ function useAbility(key) {
     } else if (isModerator) {
       // Moderator R: Bug Fixing — disable a random enemy's random move until next death
       lp.cdR = abil.cooldown;
-      const enemies = gamePlayers.filter(p => p.alive && !p.isSummon && p.id !== lp.id && p.fighter);
+      const enemies = gamePlayers.filter(p => {
+        if (!p.alive || p.isSummon || p.id === lp.id || !p.fighter) return false;
+        if (gameMode === 'teams' && lp.team && p.team === lp.team) return false;
+        return true;
+      });
       if (enemies.length > 0) {
         const victim = enemies[Math.floor(Math.random() * enemies.length)];
         const aliveNonSummons = gamePlayers.filter(p => p.alive && !p.isSummon && p.fighter).length;
@@ -4810,8 +5756,119 @@ function useAbility(key) {
       } else {
         combatLog.push({ text: 'No enemies to bug fix!', timer: 2, color: '#999' });
       }
+    } else if (isDnd) {
+      // D&D R: Buy/Use — spend GP to buy items (highest affordable tier)
+      const gp = lp.dndGP || 0;
+      if (gp <= 0) {
+        combatLog.push({ text: '💰 No GP! Complete quests first.', timer: 2, color: '#999' });
+        return;
+      }
+      lp.cdR = 0;
+      if (gp >= 8 && !lp.dndCharm) {
+        // Charm: doubled autoheal + permanent M1 buff
+        lp.dndCharm = true;
+        lp.dndWeaponBonus = (lp.dndWeaponBonus || 0) + 50;
+        lp.dndGP = 0;
+        lp.effects.push({ type: 'dnd-charm', timer: 2.0 });
+        combatLog.push({ text: '✨ Charm of Healing purchased! Autoheal doubled + M1 permanently buffed +50.', timer: 4, color: '#ffd700' });
+      } else if (gp >= 8 && lp.dndCharm) {
+        // Charm already purchased — don't spend GP, fall through to 5GP tier
+        if (gp >= 5) {
+          lp.dndWeaponBonus = (lp.dndWeaponBonus || 0) + 50;
+          lp.dndGP = 0;
+          lp.effects.push({ type: 'dnd-weapon', timer: 2.0 });
+          combatLog.push({ text: 'Charm already purchased! Bought weapon instead. M1 +50 (total +' + lp.dndWeaponBonus + ').', timer: 4, color: '#c0c0c0' });
+        }
+      } else if (gp >= 5) {
+        // Better weapon: +50 permanent M1 dmg
+        lp.dndWeaponBonus = (lp.dndWeaponBonus || 0) + 50;
+        lp.dndGP = 0;
+        lp.effects.push({ type: 'dnd-weapon', timer: 2.0 });
+        combatLog.push({ text: '⚔️ Better Weapon! M1 +50 damage (total +' + lp.dndWeaponBonus + ').', timer: 4, color: '#c0c0c0' });
+      } else if (gp >= 2) {
+        // Random spell (1 of 3)
+        lp.dndGP = 0;
+        const spellRoll = Math.random();
+        const cw = gameCanvas.width; const ch = gameCanvas.height;
+        const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+        const aimX = mouseX + camX; const aimY = mouseY + camY;
+        const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+        const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+        const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+        if (spellRoll < 0.33) {
+          // Zombie spawn: 2 zombies
+          for (let zi = 0; zi < 2; zi++) {
+            const zId = 'dnd-zombie-' + lp.id + '-' + Date.now() + '-' + zi;
+            const zFighter = getFighter('fighter');
+            const z = createPlayerState(
+              { id: zId, name: 'Zombie', color: '#2d5e1e', fighterId: 'fighter' },
+              { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, zFighter
+            );
+            const zRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+            const angle = Math.random() * Math.PI * 2;
+            z.x = lp.x + Math.cos(angle) * GAME_TILE * 2;
+            z.y = lp.y + Math.sin(angle) * GAME_TILE * 2;
+            if (!canMoveTo(z.x, z.y, zRadius)) { const s = getRandomSafePosition(); z.x = s.x; z.y = s.y; }
+            z.hp = 300; z.maxHp = 300;
+            z.isSummon = true; z.summonOwner = lp.id;
+            z.summonType = 'dnd-zombie';
+            z.summonSpeed = 2.0; z.summonDamage = 150;
+            z.summonAttackCD = 1.5; z.summonAttackTimer = 0;
+            z.isCPU = true;
+            gamePlayers.push(z);
+          }
+          combatLog.push({ text: '🧟 Zombie Spell! 2 zombies summoned.', timer: 3, color: '#2d5e1e' });
+          lp.effects.push({ type: 'dnd-spell', timer: 1.5 });
+        } else if (spellRoll < 0.66) {
+          // Large slow fireball (goes through walls, stops at sea)
+          const speed = (abil.spellFireballSpeed || 8) * GAME_TILE / 10;
+          projectiles.push({
+            x: lp.x, y: lp.y,
+            vx: aimNx * speed, vy: aimNy * speed,
+            ownerId: lp.id, damage: abil.spellFireballDmg || 300,
+            timer: 999, type: 'dnd-fireball', color: '#ff4500',
+            dndFireball: true, // flag: goes through walls, stops at sea
+          });
+          combatLog.push({ text: '🔥 Fireball launched!', timer: 3, color: '#ff4500' });
+          lp.effects.push({ type: 'dnd-spell', timer: 1.5 });
+        } else {
+          // Blur spell: fast projectile, hits = blur + 300 dmg
+          const speed = (abil.spellBlurSpeed || 50) * GAME_TILE / 10;
+          projectiles.push({
+            x: lp.x, y: lp.y,
+            vx: aimNx * speed, vy: aimNy * speed,
+            ownerId: lp.id, damage: abil.spellBlurDmg || 300,
+            timer: 999, type: 'dnd-blur-bolt', color: '#9b59b6',
+            dndBlurDuration: abil.spellBlurDuration || 8,
+          });
+          combatLog.push({ text: '🌀 Blur Spell cast!', timer: 3, color: '#9b59b6' });
+          lp.effects.push({ type: 'dnd-spell', timer: 1.5 });
+        }
+      } else {
+        // 1 GP: Healing potion (300 HP over 3s)
+        lp.dndGP = 0;
+        lp.dndHealPool = abil.potionHeal || 300;
+        lp.effects.push({ type: 'dnd-potion', timer: 1.5 });
+        combatLog.push({ text: '🧪 Healing Potion! +300 HP over 3s.', timer: 3, color: '#e74c3c' });
+      }
+    } else if (isDragon) {
+      // Dragon R: Dragon Beam — 3s charge, then fire
+      if (lp.dragonBeamCharging || lp.dragonBeamRecovery > 0) return;
+      lp.cdR = abil.cooldown;
+      lp.dragonBeamCharging = true;
+      lp.dragonBeamChargeTimer = abil.chargeTime || 3;
+      lp.dragonBreathActive = false; // cancel breath
+      // Lock aim direction at cast
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      lp.dragonBeamAimNx = aimDx / aimDist;
+      lp.dragonBeamAimNy = aimDy / aimDist;
+      lp.effects.push({ type: 'dragon-beam-charge', timer: (abil.chargeTime || 3) + 0.5, aimNx: lp.dragonBeamAimNx, aimNy: lp.dragonBeamAimNy });
+      combatLog.push({ text: '❄️ Dragon Beam charging... 3s!', timer: 3, color: '#00ccff' });
     } else {
-      // Fighter: Power Swing
       const range = abil.range * GAME_TILE;
       let baseDmgR = abil.damage;
       if (lp.supportBuff > 0) baseDmgR *= 1.5;
@@ -5301,12 +6358,38 @@ function useAbility(key) {
         p.effects.push({ type: 'server-reset', timer: 1.5 });
       }
       combatLog.push({ text: '🔄 SERVER RESET! Everyone returned to spawn! (' + lp.modServerResetUses + '/' + (abil.maxUses || 3) + ')', timer: 5, color: '#3498db' });
+    } else if (isDnd) {
+      // D&D T: Race Change — cycle Human → Elf → Dwarf → Human
+      lp.cdT = abil.cooldown || 40;
+      const raceOrder = ['human', 'elf', 'dwarf'].filter(r => r !== (lp.dndRace || 'human'));
+      lp.dndRace = raceOrder[Math.floor(Math.random() * raceOrder.length)];
+      const raceNames = { human: 'Human (1.2× speed, Sword)', elf: 'Elf (+50 dmg, Bow)', dwarf: 'Dwarf (0.8× dmg taken, Axe)' };
+      lp.effects.push({ type: 'dnd-race', timer: 1.5 });
+      combatLog.push({ text: '🎭 Race changed to ' + raceNames[lp.dndRace] + '!', timer: 4, color: '#daa520' });
+    } else if (isDragon) {
+      // Dragon T: Draconic Roar — +30% speed self, +20% allies, costs 200 HP
+      lp.cdT = abil.cooldown;
+      lp.dragonRoarActive = true;
+      lp.hp -= (abil.selfDamage || 200);
+      if (lp.hp <= 0) { lp.hp = 0; lp.alive = false; lp.effects.push({ type: 'death', timer: 2 }); return; }
+      lp.effects.push({ type: 'hit', timer: 0.3 });
+      // Buff allies
+      for (const p of gamePlayers) {
+        if (!p.alive || p.isSummon) continue;
+        if (p.id === lp.id) continue;
+        if (p.team && p.team === lp.team) {
+          p.dragonRoarActive = true;
+        }
+      }
+      lp.effects.push({ type: 'dragon-roar', timer: 2.0 });
+      combatLog.push({ text: '🐉 DRACONIC ROAR! +30% speed (self)! -200 HP!', timer: 4, color: '#5b8fa8' });
     } else {
-      // Fighter: Intimidation
       lp.cdT = abil.cooldown;
       const sightRange = CAMERA_RANGE * GAME_TILE * 2;
       for (const target of gamePlayers) {
         if (target.id === lp.id || !target.alive) continue;
+        // Skip teammates in team mode
+        if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
         const dist = Math.sqrt((target.x - lp.x) ** 2 + (target.y - lp.y) ** 2);
         if (dist <= sightRange) {
           target.intimidated = abil.duration;
@@ -5619,6 +6702,73 @@ function useAbility(key) {
       lp.modServerUpdateTimer = buffDur;
       lp.cdM1 = 0; lp.cdE = 0; lp.cdR = 0; lp.cdT = 0; lp.cdF = 0;
       combatLog.push({ text: '📦 SERVER UPDATE! +50% speed, damage, defense! CDs reset!', timer: 5, color: '#2ecc71' });
+    } else if (isDnd) {
+      // D&D Campaigner SPACE: D20 Roll — buff all teammates' M1 to 1000 dmg until next death
+      lp.specialUsed = true;
+      lp.dndD20Active = true;
+      lp.effects.push({ type: 'd20-roll', timer: 3.0 });
+      for (const p of gamePlayers) {
+        if (!p.alive || p.isSummon) continue;
+        if (p.id === lp.id || (p.team && p.team === lp.team)) {
+          p.dndD20Active = true;
+        }
+      }
+      combatLog.push({ text: '🎲 NATURAL 20! All allies deal 650 M1 dmg until next death!', timer: 5, color: '#ffd700' });
+    } else if (isDragon) {
+      // Dragon SPACE: Power of the Evil — summon Yellow Ochre or Lich
+      lp.specialUsed = true;
+      // Kill old summon if exists
+      if (lp.dragonSummonId) {
+        const oldS = gamePlayers.find(p => p.id === lp.dragonSummonId);
+        if (oldS && oldS.alive) { oldS.alive = false; oldS.hp = 0; oldS.effects.push({ type: 'death', timer: 2 }); }
+      }
+      const roll = Math.random();
+      if (roll < 0.5) {
+        // Yellow Ochre: 2x2 jelly, 1000HP, 50dps area, slow
+        const ochreId = 'dragon-ochre-' + lp.id + '-' + Date.now();
+        const ochre = createPlayerState(
+          { id: ochreId, name: 'Yellow Ochre', color: '#c8a832', fighterId: 'fighter' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, getFighter('fighter')
+        );
+        const angle = Math.random() * Math.PI * 2;
+        ochre.x = lp.x + Math.cos(angle) * GAME_TILE * 3;
+        ochre.y = lp.y + Math.sin(angle) * GAME_TILE * 3;
+        const oR = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(ochre.x, ochre.y, oR)) { const s = getRandomSafePosition(); ochre.x = s.x; ochre.y = s.y; }
+        ochre.hp = 1000; ochre.maxHp = 1000;
+        ochre.isSummon = true; ochre.summonOwner = lp.id;
+        ochre.summonType = 'dragon-ochre';
+        ochre.summonSpeed = 1.5; ochre.summonDamage = 50;
+        ochre.summonAttackCD = 0; ochre.summonAttackTimer = 0;
+        ochre.isCPU = true;
+        gamePlayers.push(ochre);
+        lp.dragonSummonId = ochreId;
+        lp.effects.push({ type: 'dragon-summon', timer: 2.0 });
+        combatLog.push({ text: '👹 Yellow Ochre summoned! (2×2 jelly, 1000HP)', timer: 4, color: '#c8a832' });
+      } else {
+        // Lich: 700HP, 100dmg lightning, 0.4s CD, fast autoheal
+        const lichId = 'dragon-lich-' + lp.id + '-' + Date.now();
+        const lich = createPlayerState(
+          { id: lichId, name: 'Lich', color: '#6a0dad', fighterId: 'fighter' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, getFighter('fighter')
+        );
+        const angle = Math.random() * Math.PI * 2;
+        lich.x = lp.x + Math.cos(angle) * GAME_TILE * 3;
+        lich.y = lp.y + Math.sin(angle) * GAME_TILE * 3;
+        const lR = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(lich.x, lich.y, lR)) { const s = getRandomSafePosition(); lich.x = s.x; lich.y = s.y; }
+        lich.hp = 700; lich.maxHp = 700;
+        lich.isSummon = true; lich.summonOwner = lp.id;
+        lich.summonType = 'dragon-lich';
+        lich.summonSpeed = 2.0; lich.summonDamage = 100;
+        lich.summonAttackCD = 0.4; lich.summonAttackTimer = 0;
+        lich.lichKillCount = 0;
+        lich.isCPU = true;
+        gamePlayers.push(lich);
+        lp.dragonSummonId = lichId;
+        lp.effects.push({ type: 'dragon-summon', timer: 2.0 });
+        combatLog.push({ text: '💀 Lich summoned! (700HP, lightning, autoheal)', timer: 4, color: '#6a0dad' });
+      }
     } else {
       // Fighter: Special jump
       lp.specialJumping = true;
@@ -6098,6 +7248,38 @@ function useAbility(key) {
       lp.modFirewallTimer = fAbil.duration || 5;
       lp.effects.push({ type: 'firewall', timer: (fAbil.duration || 5) + 0.5 });
       combatLog.push({ text: '🛡 Firewall active! Invincible + invisible for 5s!', timer: 3, color: '#e74c3c' });
+    } else if (isDnd) {
+      // D&D F: Sidekick — spawn a clone of yourself with half max HP
+      // Kill old sidekick if exists
+      if (lp.dndSidekickId) {
+        const oldSk = gamePlayers.find(p => p.id === lp.dndSidekickId);
+        if (oldSk && oldSk.alive) { oldSk.alive = false; oldSk.hp = 0; oldSk.effects.push({ type: 'death', timer: 2 }); }
+      }
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      const skId = 'dnd-sidekick-' + lp.id + '-' + Date.now();
+      const skFighter = lp.fighter;
+      const sk = createPlayerState(
+        { id: skId, name: lp.name + "'s Sidekick", color: lp.color || '#daa520', fighterId: 'dnd' },
+        { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, skFighter
+      );
+      const skRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+      const angle = Math.random() * Math.PI * 2;
+      sk.x = lp.x + Math.cos(angle) * GAME_TILE * 2;
+      sk.y = lp.y + Math.sin(angle) * GAME_TILE * 2;
+      if (!canMoveTo(sk.x, sk.y, skRadius)) { const safe = getRandomSafePosition(); sk.x = safe.x; sk.y = safe.y; }
+      sk.hp = Math.floor(lp.maxHp / 2); sk.maxHp = Math.floor(lp.maxHp / 2);
+      sk.isSummon = true; sk.summonOwner = lp.id;
+      sk.summonType = 'dnd-sidekick';
+      sk.dndRace = lp.dndRace || 'human';
+      sk.summonSpeed = 3.0; sk.summonDamage = 100 + (lp.dndWeaponBonus || 0);
+      sk.summonAttackCD = sk.dndRace === 'dwarf' ? 2 : 0.5;
+      sk.summonAttackTimer = 0;
+      sk.isCPU = true;
+      gamePlayers.push(sk);
+      lp.dndSidekickId = skId;
+      lp.effects.push({ type: 'dnd-sidekick-spawn', timer: 1.5 });
+      combatLog.push({ text: '🛡 Sidekick summoned!', timer: 3, color: '#daa520' });
     } else {
       // Fighter: Potion — heal 300 over 3s
       lp.move4Uses++;
@@ -6200,6 +7382,16 @@ function _exitBackrooms(p, reason) {
 
 function dealDamage(attacker, target, amount, viaSummon) {
   if (!target.alive) return;
+  // Team friendly fire prevention: same-team players/summons can't hurt each other
+  if (attacker && attacker !== target && gameMode === 'teams') {
+    const attackerTeam = attacker.isSummon
+      ? (gamePlayers.find(o => o.id === attacker.summonOwner) || {}).team
+      : attacker.team;
+    const targetTeam = target.isSummon
+      ? (gamePlayers.find(o => o.id === target.summonOwner) || {}).team
+      : target.team;
+    if (attackerTeam && targetTeam && attackerTeam === targetTeam) return;
+  }
   // Obelisk and backrooms chaser are invincible
   if (target.isSummon && (target.summonType === 'obelisk' || target.summonType === 'backrooms-chaser')) return;
   // Backrooms: players in backrooms can't be damaged by normal attacks (only the chaser)
@@ -6273,6 +7465,10 @@ function dealDamage(attacker, target, amount, viaSummon) {
   else if (target.blindBuff === 'big') amount = Math.round(amount * 1.5);
   // Napoleon Cavalry: 2x damage received while mounted
   if (target.napoleonCavalry) amount = Math.round(amount * 2);
+  // D&D Dwarf: 0.8x damage taken
+  if (target.dndRace === 'dwarf') amount = Math.round(amount * 0.8);
+  // D&D Elf attacker: +50 damage bonus
+  if (attacker && attacker.dndRace === 'elf') amount += 50;
   // Napoleon Defensive Tactics wall: invincible — absorbs no damage itself
   if (target.isSummon && target.summonType === 'napoleon-wall') return;
   // Napoleon Defensive Tactics: anyone inside a wall area takes half damage
@@ -6291,7 +7487,7 @@ function dealDamage(attacker, target, amount, viaSummon) {
     const originalAmount = amount;
     amount = Math.round(amount * 0.2);
     // Achievement: Gear Up absorption tracking (Cricket in SP)
-    if (target.id === localPlayerId && target.fighter && target.fighter.id === 'cricket' && gameMode === 'fight') {
+    if (target.id === localPlayerId && target.fighter && target.fighter.id === 'cricket' && (gameMode === 'fight' || gameMode === 'fight-hard')) {
       const absorbed = originalAmount - amount;
       _gearDmgAbsorbedRemainder += absorbed;
       if (_gearDmgAbsorbedRemainder >= 10 && typeof trackGearDmgAbsorbed === 'function') {
@@ -6354,7 +7550,7 @@ function dealDamage(attacker, target, amount, viaSummon) {
     target.alive = false;
     target.effects.push({ type: 'death', timer: 2 });
     // Achievement: summon kill in multiplayer
-    if (viaSummon && attacker && attacker.id === localPlayerId && !target.isSummon && gameMode !== 'training' && gameMode !== 'fight') {
+    if (viaSummon && attacker && attacker.id === localPlayerId && !target.isSummon && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard') {
       if (typeof trackSummonKillMP === 'function') trackSummonKillMP();
       // Filbus oddity kill in MP
       if (attacker.fighter && attacker.fighter.id === 'filbus' && typeof trackFilbusOddityKill === 'function') {
@@ -6364,11 +7560,11 @@ function dealDamage(attacker, target, amount, viaSummon) {
     // Achievement: 1X kill tracking
     if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'onexonexonex' && !target.isSummon && target.fighter) {
       // Kill Noli in MP
-      if (target.fighter.id === 'noli' && gameMode !== 'training' && gameMode !== 'fight') {
+      if (target.fighter.id === 'noli' && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard') {
         if (typeof trackOnexKilledNoliMP === 'function') trackOnexKilledNoliMP();
       }
       // Kill Cat in SP
-      if (target.fighter.id === 'explodingcat' && gameMode === 'fight') {
+      if (target.fighter.id === 'explodingcat' && (gameMode === 'fight' || gameMode === 'fight-hard')) {
         if (typeof trackOnexKilledCatSP === 'function') trackOnexKilledCatSP();
       }
     }
@@ -6400,6 +7596,13 @@ function dealDamage(attacker, target, amount, viaSummon) {
       _filbusBoiledKillsThisGame++;
       if (_filbusBoiledKillsThisGame >= 2 && typeof trackFilbusBoiledKill === 'function') {
         trackFilbusBoiledKill();
+      }
+    }
+    // Achievement: Dragon Beam kills in a single game
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'dragon' && attacker.dragonBeamFiring && !target.isSummon) {
+      _dragonBeamKillsThisGame++;
+      if (_dragonBeamKillsThisGame >= 2 && typeof trackDragonBeamAch === 'function') {
+        trackDragonBeamAch();
       }
     }
     // Init spectator camera if local player died
@@ -6479,6 +7682,38 @@ function dealDamage(attacker, target, amount, viaSummon) {
           _exitBackrooms(prey, 'escaped');
         }
       }
+      // D&D Orc death: GP only if killed by the owner; stolen if another campaigner kills it
+      if (target.summonType === 'dnd-orc' && owner) {
+        if (owner.dndOrcIds) {
+          const idx = owner.dndOrcIds.indexOf(target.id);
+          if (idx >= 0) owner.dndOrcIds.splice(idx, 1);
+        }
+        if (attacker && attacker.id === owner.id) {
+          // Owner killed their own orc — award GP
+          owner.dndGP = (owner.dndGP || 0) + 1;
+          if (owner.id === localPlayerId) {
+            combatLog.push({ text: '🪙 +1 GP! (Total: ' + owner.dndGP + ')', timer: 3, color: '#ffd700' });
+          }
+        } else if (attacker && !attacker.isSummon && attacker.fighter && attacker.fighter.id === 'dnd') {
+          // Another D&D Campaigner killed the orc — they steal the GP
+          attacker.dndGP = (attacker.dndGP || 0) + 1;
+          if (attacker.id === localPlayerId) {
+            combatLog.push({ text: '🪙 Quest stolen from ' + (owner.name || 'enemy') + '! +1 GP! (Total: ' + attacker.dndGP + ')', timer: 4, color: '#ffd700' });
+          }
+          if (owner.id === localPlayerId) {
+            combatLog.push({ text: '⚠️ Quest was stolen by ' + (attacker.name || 'enemy') + '!', timer: 4, color: '#ff4444' });
+          }
+        } else {
+          // Someone else (not a campaigner) killed the orc — no GP
+          if (owner.id === localPlayerId) {
+            combatLog.push({ text: "⚠️ You couldn't finish the quest!", timer: 4, color: '#ff4444' });
+          }
+        }
+      }
+      // D&D Zombie death: clear from gamePlayers (no GP reward)
+      if (target.summonType === 'dnd-zombie') {
+        // No special cleanup needed — just dies
+      }
     }
     // Owner death: clear summon reference (summon cleanup in updateSummons)
     if (target.summonId) {
@@ -6508,6 +7743,43 @@ function dealDamage(attacker, target, amount, viaSummon) {
       }
       target.napoleonInfantryIds = [];
     }
+    // D&D death: kill orcs/zombies/sidekick owned by the dead player
+    if (target.dndOrcIds && target.dndOrcIds.length > 0) {
+      for (const oid of target.dndOrcIds) {
+        const orc = gamePlayers.find(p => p.id === oid);
+        if (orc && orc.alive) { orc.alive = false; orc.hp = 0; orc.effects.push({ type: 'death', timer: 2 }); }
+      }
+      target.dndOrcIds = [];
+    }
+    if (target.dndSidekickId) {
+      const sk = gamePlayers.find(p => p.id === target.dndSidekickId);
+      if (sk && sk.alive) { sk.alive = false; sk.hp = 0; sk.effects.push({ type: 'death', timer: 2 }); }
+      target.dndSidekickId = null;
+    }
+    // Dragon death: kill summon
+    if (target.dragonSummonId) {
+      const ds = gamePlayers.find(p => p.id === target.dragonSummonId);
+      if (ds && ds.alive) { ds.alive = false; ds.hp = 0; ds.effects.push({ type: 'death', timer: 2 }); }
+      target.dragonSummonId = null;
+    }
+    // Dragon/Draconic Roar: ANY death clears roar buffs for ALL players
+    for (const dp of gamePlayers) {
+      if (dp.dragonRoarActive) {
+        dp.dragonRoarActive = false;
+        if (dp.id === localPlayerId) {
+          combatLog.push({ text: '🐉 Roar buff ended — someone died!', timer: 3, color: '#5b8fa8' });
+        }
+      }
+    }
+    // D&D D20: ANY death clears the D20 buff for ALL players
+    for (const dp of gamePlayers) {
+      if (dp.dndD20Active) {
+        dp.dndD20Active = false;
+        if (dp.id === localPlayerId) {
+          combatLog.push({ text: '🎲 D20 buff ended — someone died!', timer: 3, color: '#ff6600' });
+        }
+      }
+    }
     // Moderator Bug Fixing: clear disabled abilities on all players when someone dies
     for (const p of gamePlayers) {
       if (p.modDisabledAbilities && p.modDisabledAbilities.length > 0) {
@@ -6517,10 +7789,10 @@ function dealDamage(attacker, target, amount, viaSummon) {
         }
       }
     }
-    // Tell server this player died (only host in authoritative mode, or legacy mode)
+    // Tell server this player died (only host in authoritative mode, or singleplayer)
     if (typeof socket !== 'undefined' && socket.emit) {
       // In host-authoritative, only the host should emit deaths to avoid duplicate server tracking
-      if (gameMode !== undefined || isHostAuthority) {
+      if (isHostAuthority || (gameMode !== undefined && gameMode !== 'teams')) {
         socket.emit('player-died', { playerId: target.id });
       }
     }
@@ -6587,12 +7859,30 @@ function onZoneSync(newInset, newTimer) {
   zonePhaseStart = Date.now() - (ZONE_INTERVAL - newTimer) * 1000;
 }
 
-function onGameOver(winnerId, winnerName) {
+function onGameOver(winnerId, winnerName, winningTeam) {
   gameRunning = false;
   const cw = gameCanvas.width;
   const ch = gameCanvas.height;
   gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
   gameCtx.fillRect(0, 0, cw, ch);
+
+  // Team mode win
+  if (winningTeam) {
+    const myTeam = localPlayer ? localPlayer.team : null;
+    const isMyTeam = myTeam === winningTeam;
+    gameCtx.fillStyle = isMyTeam ? '#2ecc71' : '#e94560';
+    gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText(isMyTeam ? 'TEAM VICTORY!' : 'TEAM DEFEATED', cw / 2, ch / 2 - 20);
+    gameCtx.fillStyle = '#fff';
+    gameCtx.font = 'bold 16px "Press Start 2P", monospace';
+    gameCtx.fillText('Team ' + winningTeam + ' wins!', cw / 2, ch / 2 + 30);
+    if (isMyTeam && typeof trackMPWin === 'function') {
+      trackMPWin(localPlayer ? localPlayer.fighter.id : selectedFighterId);
+    }
+    return;
+  }
+
   if (winnerId) {
     const isMe = winnerId === localPlayerId;
     gameCtx.fillStyle = isMe ? '#2ecc71' : '#e94560';
@@ -6625,6 +7915,10 @@ function onGameOver(winnerId, winnerName) {
       // Moderator achievement: win one game as moderator
       if (localPlayer && localPlayer.fighter.id === 'moderator' && typeof trackModWin === 'function') {
         trackModWin();
+      }
+      // D&D achievement: track race win
+      if (localPlayer && localPlayer.fighter.id === 'dnd' && typeof trackDndRaceWin === 'function') {
+        trackDndRaceWin(localPlayer.dndRace || 'human');
       }
     }
   } else {
@@ -6791,16 +8085,18 @@ function renderGame() {
         gameCtx.fillRect(barX, barY, barW * hpFrac, barH);
       }
     } else {
-      // ── Dead tree: stump ──
+      // ── Dead tree: stump (centered in the 2x2 area) ──
+      const centerX = treeScreenX + tw / 2;
+      const centerY = treeScreenY + th / 2;
       const stumpW = tw * 0.3;
       const stumpH = th * 0.25;
-      const stumpX = treeScreenX + tw / 2 - stumpW / 2;
-      const stumpY = treeScreenY + th - stumpH - 2;
+      const stumpX = centerX - stumpW / 2;
+      const stumpY = centerY - stumpH / 2;
 
       // Stump shadow
       gameCtx.fillStyle = 'rgba(0,0,0,0.15)';
       gameCtx.beginPath();
-      gameCtx.ellipse(treeScreenX + tw / 2, treeScreenY + th - 2, tw * 0.25, th * 0.06, 0, 0, Math.PI * 2);
+      gameCtx.ellipse(centerX, stumpY + stumpH + 2, tw * 0.2, th * 0.05, 0, 0, Math.PI * 2);
       gameCtx.fill();
 
       // Stump body
@@ -6809,15 +8105,15 @@ function renderGame() {
       // Stump top (rings)
       gameCtx.fillStyle = '#7a5035';
       gameCtx.beginPath();
-      gameCtx.ellipse(treeScreenX + tw / 2, stumpY, stumpW / 2, stumpH * 0.25, 0, 0, Math.PI * 2);
+      gameCtx.ellipse(centerX, stumpY, stumpW / 2, stumpH * 0.25, 0, 0, Math.PI * 2);
       gameCtx.fill();
       gameCtx.strokeStyle = '#4a2a18';
       gameCtx.lineWidth = 0.8;
       gameCtx.beginPath();
-      gameCtx.ellipse(treeScreenX + tw / 2, stumpY, stumpW * 0.3, stumpH * 0.15, 0, 0, Math.PI * 2);
+      gameCtx.ellipse(centerX, stumpY, stumpW * 0.3, stumpH * 0.15, 0, 0, Math.PI * 2);
       gameCtx.stroke();
       gameCtx.beginPath();
-      gameCtx.ellipse(treeScreenX + tw / 2, stumpY, stumpW * 0.15, stumpH * 0.08, 0, 0, Math.PI * 2);
+      gameCtx.ellipse(centerX, stumpY, stumpW * 0.15, stumpH * 0.08, 0, 0, Math.PI * 2);
       gameCtx.stroke();
 
       // Regrow timer
@@ -6825,7 +8121,7 @@ function renderGame() {
         gameCtx.fillStyle = 'rgba(255,255,255,0.8)';
         gameCtx.font = 'bold 10px "Press Start 2P", monospace';
         gameCtx.textAlign = 'center';
-        gameCtx.fillText(Math.ceil(appleTree.regrowTimer) + 's', treeScreenX + tw / 2, stumpY - 8);
+        gameCtx.fillText(Math.ceil(appleTree.regrowTimer) + 's', centerX, stumpY - 8);
         gameCtx.textAlign = 'left';
       }
     }
@@ -7600,6 +8896,206 @@ function renderGame() {
           gameCtx.textAlign = 'center';
           gameCtx.fillText(tSec + 's', sx, wy - 13);
         }
+      } else if (p.summonType === 'dnd-orc') {
+        // ── D&D Orc: green-brown circle with tusks + axe ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#4a6b2a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.9, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : '#2d4a1a';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Tusks (two small white triangles at bottom)
+        gameCtx.fillStyle = '#eee';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.3, sy + radius * 0.3);
+        gameCtx.lineTo(sx - radius * 0.15, sy + radius * 0.9);
+        gameCtx.lineTo(sx - radius * 0.05, sy + radius * 0.3);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.3, sy + radius * 0.3);
+        gameCtx.lineTo(sx + radius * 0.15, sy + radius * 0.9);
+        gameCtx.lineTo(sx + radius * 0.05, sy + radius * 0.3);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Angry eyes (red dots)
+        gameCtx.fillStyle = '#ff3333';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.25, sy - radius * 0.15, radius * 0.15, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.25, sy - radius * 0.15, radius * 0.15, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Crude axe on top
+        gameCtx.strokeStyle = '#5c3a1e';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy - radius * 0.5);
+        gameCtx.lineTo(sx, sy - radius * 1.4);
+        gameCtx.stroke();
+        gameCtx.fillStyle = '#888';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.35, sy - radius * 1.4);
+        gameCtx.lineTo(sx + radius * 0.35, sy - radius * 1.4);
+        gameCtx.lineTo(sx + radius * 0.2, sy - radius * 1.05);
+        gameCtx.lineTo(sx - radius * 0.2, sy - radius * 1.05);
+        gameCtx.closePath();
+        gameCtx.fill();
+      } else if (p.summonType === 'dnd-zombie') {
+        // ── D&D Zombie: sickly green circle with stagger lines ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#3d5a1e';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.85, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : '#2a3d10';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Ragged arms (short lines out to sides)
+        gameCtx.strokeStyle = '#4a6b2a';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.7, sy);
+        gameCtx.lineTo(sx - radius * 1.3, sy + radius * 0.4);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.7, sy);
+        gameCtx.lineTo(sx + radius * 1.3, sy + radius * 0.4);
+        gameCtx.stroke();
+        // Dead eyes (X marks)
+        gameCtx.strokeStyle = '#111';
+        gameCtx.lineWidth = 1.5;
+        const eyeOff = radius * 0.25;
+        // Left eye X
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - eyeOff - 2, sy - radius * 0.15 - 2);
+        gameCtx.lineTo(sx - eyeOff + 2, sy - radius * 0.15 + 2);
+        gameCtx.moveTo(sx - eyeOff + 2, sy - radius * 0.15 - 2);
+        gameCtx.lineTo(sx - eyeOff - 2, sy - radius * 0.15 + 2);
+        gameCtx.stroke();
+        // Right eye X
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + eyeOff - 2, sy - radius * 0.15 - 2);
+        gameCtx.lineTo(sx + eyeOff + 2, sy - radius * 0.15 + 2);
+        gameCtx.moveTo(sx + eyeOff + 2, sy - radius * 0.15 - 2);
+        gameCtx.lineTo(sx + eyeOff - 2, sy - radius * 0.15 + 2);
+        gameCtx.stroke();
+      } else if (p.summonType === 'dnd-sidekick') {
+        // ── D&D Sidekick: looks like the owner's race dot but with a glow border ──
+        const skRace = p.dndRace || 'human';
+        const baseColor = isDying ? '#8b0000' : (skRace === 'elf' ? '#228b22' : skRace === 'dwarf' ? '#d2691e' : '#4169e1');
+        // Glow ring
+        gameCtx.strokeStyle = '#ffd700';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.1, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Base circle
+        gameCtx.fillStyle = baseColor;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : '#222';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Race-specific weapon (simplified)
+        if (skRace === 'elf') {
+          // Small bow
+          gameCtx.strokeStyle = '#654321';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.arc(sx + radius * 0.8, sy, radius * 0.5, -Math.PI * 0.4, Math.PI * 0.4);
+          gameCtx.stroke();
+        } else if (skRace === 'dwarf') {
+          // Small axe
+          gameCtx.strokeStyle = '#5c3a1e';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + radius * 0.4, sy - radius * 0.1);
+          gameCtx.lineTo(sx + radius * 1.1, sy - radius * 0.1);
+          gameCtx.stroke();
+          gameCtx.fillStyle = '#888';
+          gameCtx.beginPath();
+          gameCtx.arc(sx + radius * 1.1, sy - radius * 0.1, radius * 0.25, 0, Math.PI * 2);
+          gameCtx.fill();
+        } else {
+          // Small sword
+          gameCtx.strokeStyle = '#ccc';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + radius * 0.4, sy);
+          gameCtx.lineTo(sx + radius * 1.2, sy);
+          gameCtx.stroke();
+        }
+        // "SK" label
+        gameCtx.fillStyle = '#fff';
+        gameCtx.font = 'bold ' + Math.max(8, radius * 0.6) + 'px monospace';
+        gameCtx.textAlign = 'center';
+        gameCtx.textBaseline = 'middle';
+        gameCtx.fillText('SK', sx, sy);
+      } else if (p.summonType === 'dragon-ochre') {
+        // ── Yellow Ochre: 2x2 golden jelly blob ──
+        const jR = radius * 1.8; // bigger than normal (2x2)
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#c8a832';
+        gameCtx.beginPath();
+        // Blobby shape using overlapping circles
+        gameCtx.arc(sx - jR * 0.3, sy - jR * 0.2, jR * 0.7, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + jR * 0.3, sy - jR * 0.1, jR * 0.65, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy + jR * 0.3, jR * 0.6, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Glossy highlight
+        gameCtx.fillStyle = 'rgba(255, 255, 200, 0.3)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - jR * 0.15, sy - jR * 0.35, jR * 0.25, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Eyes (simple dark dots)
+        gameCtx.fillStyle = '#333';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - jR * 0.2, sy - jR * 0.1, jR * 0.08, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + jR * 0.15, sy - jR * 0.1, jR * 0.08, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'dragon-lich') {
+        // ── Lich: dark purple robed figure with green glow ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#3a0066';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.9, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Purple robe outline
+        gameCtx.strokeStyle = isDying ? '#500' : '#6a0dad';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        // Hood (darker top arc)
+        gameCtx.fillStyle = '#200040';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius * 0.2, radius * 0.6, Math.PI, 0);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Glowing green eyes
+        gameCtx.fillStyle = '#00ff44';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.2, sy - radius * 0.2, radius * 0.12, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.2, sy - radius * 0.2, radius * 0.12, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Staff
+        gameCtx.strokeStyle = '#8b6508';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.5, sy + radius * 0.5);
+        gameCtx.lineTo(sx + radius * 0.3, sy - radius * 1.2);
+        gameCtx.stroke();
+        // Staff orb
+        gameCtx.fillStyle = '#aa00ff';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.3, sy - radius * 1.2, radius * 0.15, 0, Math.PI * 2);
+        gameCtx.fill();
       }
     } else if (p.fighter && p.fighter.id === 'onexonexonex' && !p.isSummon) {
       // ── 1X1X1X1: Fully custom dot — dark base with neon green glitches + red eye ──
@@ -7803,6 +9299,311 @@ function renderGame() {
       gameCtx.quadraticCurveTo(txOff, tyOff, txOff + cr, tyOff);
       gameCtx.closePath();
       gameCtx.stroke();
+    } else if (p.fighter && p.fighter.id === 'dnd') {
+      // D&D Campaigner: race-dependent dot with weapon + shield
+      const race = p.dndRace || 'human';
+
+      if (race === 'elf') {
+        // ── Elf: green dot with pointy ears, sword + shield ──
+        const bodyCol = isDying ? '#8b0000' : '#2ecc71';
+        // Body circle
+        gameCtx.fillStyle = bodyCol;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : 'rgba(0,0,0,0.4)';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Elf ears (two pointed triangles)
+        gameCtx.fillStyle = isDying ? '#a00' : '#27ae60';
+        // Left ear
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.7, sy - radius * 0.5);
+        gameCtx.lineTo(sx - radius * 1.4, sy - radius * 1.2);
+        gameCtx.lineTo(sx - radius * 0.3, sy - radius * 0.8);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Right ear
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.7, sy - radius * 0.5);
+        gameCtx.lineTo(sx + radius * 1.4, sy - radius * 1.2);
+        gameCtx.lineTo(sx + radius * 0.3, sy - radius * 0.8);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Shield (left side)
+        const shX = sx - radius * 0.9;
+        const shY = sy + radius * 0.1;
+        const shW = radius * 0.7;
+        const shH = radius * 0.9;
+        gameCtx.fillStyle = isDying ? '#600' : '#1a7a3a';
+        gameCtx.beginPath();
+        gameCtx.moveTo(shX, shY - shH * 0.5);
+        gameCtx.lineTo(shX + shW * 0.5, shY - shH * 0.5);
+        gameCtx.lineTo(shX + shW * 0.5, shY + shH * 0.2);
+        gameCtx.lineTo(shX + shW * 0.25, shY + shH * 0.5);
+        gameCtx.lineTo(shX, shY + shH * 0.2);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#400' : '#145a2a';
+        gameCtx.lineWidth = 1;
+        gameCtx.stroke();
+        // Sword (right side, angled up-right)
+        const swX = sx + radius * 0.6;
+        const swY = sy - radius * 0.2;
+        gameCtx.strokeStyle = isDying ? '#888' : '#c0c0c0';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX, swY + radius * 0.5);
+        gameCtx.lineTo(swX + radius * 0.3, swY - radius * 0.9);
+        gameCtx.stroke();
+        // Sword tip
+        gameCtx.fillStyle = '#e0e0e0';
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX + radius * 0.3, swY - radius * 0.9);
+        gameCtx.lineTo(swX + radius * 0.35, swY - radius * 1.1);
+        gameCtx.lineTo(swX + radius * 0.2, swY - radius * 0.85);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Crossguard
+        gameCtx.strokeStyle = isDying ? '#666' : '#d4af37';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX - radius * 0.15, swY + radius * 0.1);
+        gameCtx.lineTo(swX + radius * 0.45, swY + radius * 0.1);
+        gameCtx.stroke();
+      } else if (race === 'dwarf') {
+        // ── Dwarf: orange dot with axe + shield ──
+        const bodyCol = isDying ? '#8b0000' : '#e67e22';
+        // Body circle (slightly smaller to look stocky)
+        gameCtx.fillStyle = bodyCol;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : 'rgba(0,0,0,0.4)';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Beard (brown arc below)
+        gameCtx.fillStyle = isDying ? '#600' : '#8b5e3c';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy + radius * 0.3, radius * 0.7, 0, Math.PI);
+        gameCtx.fill();
+        // Shield (left side — round/wide dwarven shield)
+        const shX = sx - radius * 0.9;
+        const shY = sy;
+        const shR = radius * 0.55;
+        gameCtx.fillStyle = isDying ? '#600' : '#b5651d';
+        gameCtx.beginPath();
+        gameCtx.arc(shX, shY, shR, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#400' : '#8b4513';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Shield boss (center dot)
+        gameCtx.fillStyle = isDying ? '#888' : '#d4af37';
+        gameCtx.beginPath();
+        gameCtx.arc(shX, shY, shR * 0.3, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Axe (right side)
+        const axX = sx + radius * 0.7;
+        const axY = sy;
+        // Axe handle
+        gameCtx.strokeStyle = isDying ? '#555' : '#8b4513';
+        gameCtx.lineWidth = 2.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(axX, axY + radius * 0.7);
+        gameCtx.lineTo(axX, axY - radius * 0.9);
+        gameCtx.stroke();
+        // Axe head (two curved blades)
+        gameCtx.fillStyle = isDying ? '#888' : '#aaa';
+        gameCtx.beginPath();
+        gameCtx.moveTo(axX, axY - radius * 0.9);
+        gameCtx.quadraticCurveTo(axX + radius * 0.7, axY - radius * 0.7, axX + radius * 0.5, axY - radius * 0.3);
+        gameCtx.lineTo(axX, axY - radius * 0.4);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#666' : '#777';
+        gameCtx.lineWidth = 1;
+        gameCtx.stroke();
+        // Second blade (left side of axe)
+        gameCtx.fillStyle = isDying ? '#888' : '#aaa';
+        gameCtx.beginPath();
+        gameCtx.moveTo(axX, axY - radius * 0.9);
+        gameCtx.quadraticCurveTo(axX - radius * 0.7, axY - radius * 0.7, axX - radius * 0.5, axY - radius * 0.3);
+        gameCtx.lineTo(axX, axY - radius * 0.4);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#666' : '#777';
+        gameCtx.lineWidth = 1;
+        gameCtx.stroke();
+      } else {
+        // ── Human: blue dot with sword + shield ──
+        const bodyCol = isDying ? '#8b0000' : '#3498db';
+        // Body circle
+        gameCtx.fillStyle = bodyCol;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : 'rgba(0,0,0,0.4)';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Shield (left side — kite shield shape)
+        const shX = sx - radius * 0.9;
+        const shY = sy + radius * 0.1;
+        const shW = radius * 0.7;
+        const shH = radius * 1.0;
+        gameCtx.fillStyle = isDying ? '#600' : '#2c3e80';
+        gameCtx.beginPath();
+        gameCtx.moveTo(shX, shY - shH * 0.5);
+        gameCtx.lineTo(shX + shW * 0.5, shY - shH * 0.5);
+        gameCtx.lineTo(shX + shW * 0.5, shY + shH * 0.15);
+        gameCtx.lineTo(shX + shW * 0.25, shY + shH * 0.5);
+        gameCtx.lineTo(shX, shY + shH * 0.15);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#400' : '#1a2555';
+        gameCtx.lineWidth = 1;
+        gameCtx.stroke();
+        // Shield cross emblem
+        gameCtx.strokeStyle = isDying ? '#888' : '#d4af37';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(shX + shW * 0.25, shY - shH * 0.3);
+        gameCtx.lineTo(shX + shW * 0.25, shY + shH * 0.3);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.moveTo(shX + shW * 0.05, shY - shH * 0.1);
+        gameCtx.lineTo(shX + shW * 0.45, shY - shH * 0.1);
+        gameCtx.stroke();
+        // Sword (right side, angled up-right)
+        const swX = sx + radius * 0.6;
+        const swY = sy - radius * 0.2;
+        gameCtx.strokeStyle = isDying ? '#888' : '#c0c0c0';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX, swY + radius * 0.5);
+        gameCtx.lineTo(swX + radius * 0.3, swY - radius * 0.9);
+        gameCtx.stroke();
+        // Sword tip
+        gameCtx.fillStyle = '#e0e0e0';
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX + radius * 0.3, swY - radius * 0.9);
+        gameCtx.lineTo(swX + radius * 0.35, swY - radius * 1.1);
+        gameCtx.lineTo(swX + radius * 0.2, swY - radius * 0.85);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Crossguard
+        gameCtx.strokeStyle = isDying ? '#666' : '#d4af37';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX - radius * 0.15, swY + radius * 0.1);
+        gameCtx.lineTo(swX + radius * 0.45, swY + radius * 0.1);
+        gameCtx.stroke();
+      }
+      // GP indicator (gold text above)
+      if (p.dndGP > 0) {
+        gameCtx.fillStyle = '#ffd700';
+        gameCtx.font = 'bold ' + Math.max(5, radius * 0.45) + 'px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.textBaseline = 'bottom';
+        gameCtx.fillText(p.dndGP + 'GP', sx, sy - radius - 2);
+      }
+      // D20 glow when active
+      if (p.dndD20Active) {
+        gameCtx.strokeStyle = '#ffd700';
+        gameCtx.lineWidth = 2;
+        gameCtx.setLineDash([3, 3]);
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+      }
+    } else if (p.fighter && p.fighter.id === 'dragon' && !p.isSummon) {
+      // ── Dragon of Icespire: icy blue dragon dot ──
+      // Base: dark icy blue circle
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#1a3a5c';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Icy crystalline edge
+      gameCtx.strokeStyle = isDying ? '#500' : '#5bb8e8';
+      gameCtx.lineWidth = 2.5;
+      gameCtx.stroke();
+      // Dragon wing shapes (left and right)
+      if (!isDying) {
+        gameCtx.fillStyle = 'rgba(91, 184, 232, 0.4)';
+        // Left wing
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.7, sy - radius * 0.2);
+        gameCtx.lineTo(sx - radius * 1.6, sy - radius * 0.8);
+        gameCtx.lineTo(sx - radius * 1.3, sy + radius * 0.1);
+        gameCtx.lineTo(sx - radius * 0.7, sy + radius * 0.3);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Right wing
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.7, sy - radius * 0.2);
+        gameCtx.lineTo(sx + radius * 1.6, sy - radius * 0.8);
+        gameCtx.lineTo(sx + radius * 1.3, sy + radius * 0.1);
+        gameCtx.lineTo(sx + radius * 0.7, sy + radius * 0.3);
+        gameCtx.closePath();
+        gameCtx.fill();
+      }
+      // Icy eyes
+      gameCtx.fillStyle = '#00ddff';
+      gameCtx.beginPath();
+      gameCtx.arc(sx - radius * 0.25, sy - radius * 0.15, radius * 0.15, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.arc(sx + radius * 0.25, sy - radius * 0.15, radius * 0.15, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Tiny horns
+      gameCtx.strokeStyle = '#7fafc4';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.35, sy - radius * 0.7);
+      gameCtx.lineTo(sx - radius * 0.5, sy - radius * 1.2);
+      gameCtx.stroke();
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius * 0.35, sy - radius * 0.7);
+      gameCtx.lineTo(sx + radius * 0.5, sy - radius * 1.2);
+      gameCtx.stroke();
+      // Flying indicator
+      if (p.dragonFlying) {
+        gameCtx.strokeStyle = 'rgba(200, 240, 255, 0.6)';
+        gameCtx.lineWidth = 2;
+        gameCtx.setLineDash([4, 4]);
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.4, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+      }
+      // Roar glow
+      if (p.dragonRoarActive) {
+        gameCtx.strokeStyle = '#5b8fa8';
+        gameCtx.lineWidth = 3;
+        gameCtx.globalAlpha = 0.5 + Math.sin(Date.now() / 200) * 0.3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.3, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.globalAlpha = 1;
+      }
+      // Beam charging indicator
+      if (p.dragonBeamCharging) {
+        const chargeProgress = 1 - (p.dragonBeamChargeTimer / 3);
+        gameCtx.strokeStyle = '#00ccff';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * chargeProgress);
+        gameCtx.stroke();
+        // Show beam direction
+        const bLen = GAME_TILE * 3 * chargeProgress;
+        gameCtx.strokeStyle = 'rgba(0, 204, 255, 0.3)';
+        gameCtx.lineWidth = (p.fighter.abilities[2].beamWidth || 2) * GAME_TILE * chargeProgress;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy);
+        gameCtx.lineTo(sx + p.dragonBeamAimNx * bLen, sy + p.dragonBeamAimNy * bLen);
+        gameCtx.stroke();
+      }
     } else {
       // Normal player dot
       gameCtx.fillStyle = isDying ? '#8b0000' : (p.boiledOneActive ? '#8b0000' : p.color);
@@ -8238,7 +10039,8 @@ function renderGame() {
     gameCtx.fillStyle = isDying ? '#8b0000' : '#fff';
     gameCtx.font = 'bold 11px sans-serif';
     gameCtx.textAlign = 'center';
-    gameCtx.fillText(p.name, sx, sy - radius - 14);
+    const nameLabel = (gameMode === 'teams' && p.team) ? '[T' + p.team + '] ' + p.name : p.name;
+    gameCtx.fillText(nameLabel, sx, sy - radius - 14);
 
     // HP bar above dot
     if (p.alive) {
@@ -8248,9 +10050,37 @@ function renderGame() {
       const barY = sy - radius - 10;
       gameCtx.fillStyle = '#333';
       gameCtx.fillRect(barX, barY, barW, barH);
-      const hpFrac = Math.max(0, p.hp / p.maxHp);
+      const hpFrac = Math.max(0, Math.min(1, (p.hp || 0) / (p.maxHp || 1)));
       gameCtx.fillStyle = hpFrac >= 0.7 ? '#2ecc71' : hpFrac >= 0.4 ? '#f5a623' : '#e94560';
       gameCtx.fillRect(barX, barY, barW * hpFrac, barH);
+    }
+
+    // Dragon breath fuel bar (only visible to the player using breath)
+    if (p.id === localPlayerId && p.dragonBreathActive && p.fighter && p.fighter.id === 'dragon') {
+      const maxFuel = p.fighter.abilities[0].maxFuel || 5;
+      const fuelFrac = Math.max(0, (p.dragonBreathFuel || 0) / maxFuel);
+      const fBarW = radius * 2.8;
+      const fBarH = 3;
+      const fBarX = sx - fBarW / 2;
+      const fBarY = sy - radius - 5;
+      gameCtx.fillStyle = '#222';
+      gameCtx.fillRect(fBarX, fBarY, fBarW, fBarH);
+      gameCtx.fillStyle = fuelFrac > 0.3 ? '#00aaff' : '#ff4444';
+      gameCtx.fillRect(fBarX, fBarY, fBarW * fuelFrac, fBarH);
+    }
+
+    // Team heal/buff range indicator (visible to local player in team mode when healing)
+    if (p.id === localPlayerId && gameMode === 'teams' && p.team && p.isHealing && p.alive && !p.isSummon && p.fighter && p.fighter.id !== 'filbus') {
+      const rangeR = TEAM_HEAL_RANGE * GAME_TILE;
+      gameCtx.save();
+      gameCtx.strokeStyle = 'rgba(46, 204, 113, 0.35)';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.setLineDash([6, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, rangeR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      gameCtx.restore();
     }
 
     // Sword swing effect
@@ -8263,6 +10093,139 @@ function renderGame() {
       const aRad = Math.atan2(swordFx.aimNy, swordFx.aimNx);
       gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
       gameCtx.stroke();
+    }
+
+    // D&D Axe swing effect (orange arc, wider)
+    const dndAxeFx = p.effects.find((fx) => fx.type === 'dnd-axe');
+    if (dndAxeFx) {
+      const swLen = GAME_TILE * 1.4;
+      gameCtx.strokeStyle = '#e67e22';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(dndAxeFx.aimNy, dndAxeFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.7, aRad + 0.7);
+      gameCtx.stroke();
+      // Inner lighter arc
+      gameCtx.strokeStyle = 'rgba(230, 126, 34, 0.4)';
+      gameCtx.lineWidth = 8;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen * 0.8, aRad - 0.5, aRad + 0.5);
+      gameCtx.stroke();
+    }
+
+    // D&D Bow shot effect (green flash line in aim direction)
+    const dndBowFx = p.effects.find((fx) => fx.type === 'dnd-bow');
+    if (dndBowFx) {
+      gameCtx.strokeStyle = '#2ecc71';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + dndBowFx.aimNx * GAME_TILE * 1.5, sy + dndBowFx.aimNy * GAME_TILE * 1.5);
+      gameCtx.stroke();
+      // Bow string pull effect (small arc behind player)
+      gameCtx.strokeStyle = 'rgba(46, 204, 113, 0.5)';
+      gameCtx.lineWidth = 1.5;
+      const bRad = Math.atan2(dndBowFx.aimNy, dndBowFx.aimNx);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 1.2, bRad + Math.PI - 0.4, bRad + Math.PI + 0.4);
+      gameCtx.stroke();
+    }
+
+    // Dragon Breath effect (icy wind cone)
+    if (p.dragonBreathActive) {
+      const range = (p.fighter && p.fighter.abilities[0].range || 4) * GAME_TILE;
+      const nx = p.dragonBreathAimNx || 0;
+      const ny = p.dragonBreathAimNy || 0;
+      const angle = Math.atan2(ny, nx);
+      // Draw multiple semi-transparent icy blue + white wisps
+      for (let i = 0; i < 10; i++) {
+        const spread = (Math.random() - 0.5) * 0.6;
+        const dist = range * (0.3 + Math.random() * 0.7);
+        const ex = sx + Math.cos(angle + spread) * dist;
+        const ey = sy + Math.sin(angle + spread) * dist;
+        const alpha = 0.2 + Math.random() * 0.3;
+        // Alternate between icy blue and white wisps
+        if (i % 2 === 0) {
+          gameCtx.strokeStyle = 'rgba(80, 180, 255, ' + alpha + ')';
+        } else {
+          gameCtx.strokeStyle = 'rgba(220, 240, 255, ' + alpha + ')';
+        }
+        gameCtx.lineWidth = 3 + Math.random() * 6;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + Math.cos(angle + spread * 0.3) * radius, sy + Math.sin(angle + spread * 0.3) * radius);
+        gameCtx.lineTo(ex, ey);
+        gameCtx.stroke();
+      }
+      // Core bright blue-white beam
+      gameCtx.strokeStyle = 'rgba(100, 200, 255, 0.35)';
+      gameCtx.lineWidth = 10;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + Math.cos(angle) * range * 0.6, sy + Math.sin(angle) * range * 0.6);
+      gameCtx.stroke();
+      // Inner white glow
+      gameCtx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + Math.cos(angle) * range * 0.5, sy + Math.sin(angle) * range * 0.5);
+      gameCtx.stroke();
+    }
+
+    // Dragon Beam fire effect (wide icy beam)
+    const beamFx = p.effects.find((fx) => fx.type === 'dragon-beam-fire');
+    if (beamFx) {
+      const beamWidth = (p.fighter && p.fighter.abilities[2] ? p.fighter.abilities[2].beamWidth || 2 : 2) * GAME_TILE;
+      const beamLen = Math.max(gameCanvas.width, gameCanvas.height) * 2;
+      const nx = beamFx.aimNx || 0; const ny = beamFx.aimNy || 0;
+      gameCtx.save();
+      gameCtx.globalAlpha = 0.6 * Math.min(1, beamFx.timer / 0.3);
+      gameCtx.fillStyle = '#00ccff';
+      // Draw beam rectangle along aim direction
+      const perpX = -ny; const perpY = nx;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + perpX * beamWidth / 2, sy + perpY * beamWidth / 2);
+      gameCtx.lineTo(sx + perpX * beamWidth / 2 + nx * beamLen, sy + perpY * beamWidth / 2 + ny * beamLen);
+      gameCtx.lineTo(sx - perpX * beamWidth / 2 + nx * beamLen, sy - perpY * beamWidth / 2 + ny * beamLen);
+      gameCtx.lineTo(sx - perpX * beamWidth / 2, sy - perpY * beamWidth / 2);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Bright center
+      gameCtx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + perpX * beamWidth / 4, sy + perpY * beamWidth / 4);
+      gameCtx.lineTo(sx + perpX * beamWidth / 4 + nx * beamLen, sy + perpY * beamWidth / 4 + ny * beamLen);
+      gameCtx.lineTo(sx - perpX * beamWidth / 4 + nx * beamLen, sy - perpY * beamWidth / 4 + ny * beamLen);
+      gameCtx.lineTo(sx - perpX * beamWidth / 4, sy - perpY * beamWidth / 4);
+      gameCtx.closePath();
+      gameCtx.fill();
+      gameCtx.restore();
+    }
+
+    // Lich lightning effect
+    const lichFx = p.effects.find((fx) => fx.type === 'lich-lightning');
+    if (lichFx && lichFx.targetX !== undefined) {
+      const tx = lichFx.targetX - camX; const ty = lichFx.targetY - camY;
+      gameCtx.strokeStyle = '#aa00ff';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      // Zigzag lightning
+      const ldx = tx - sx; const ldy = ty - sy;
+      const steps = 6;
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const jx = (Math.random() - 0.5) * 15;
+        const jy = (Math.random() - 0.5) * 15;
+        if (i === steps) gameCtx.lineTo(tx, ty);
+        else gameCtx.lineTo(sx + ldx * t + jx, sy + ldy * t + jy);
+      }
+      gameCtx.stroke();
+      // Bright glow at target
+      gameCtx.fillStyle = 'rgba(170, 0, 255, 0.4)';
+      gameCtx.beginPath();
+      gameCtx.arc(tx, ty, GAME_TILE * 0.4, 0, Math.PI * 2);
+      gameCtx.fill();
     }
 
     // Power Swing red circle effect
@@ -8493,6 +10456,22 @@ function renderGame() {
       gameCtx.textAlign = 'center';
       gameCtx.fillText('+300', sx, sy - radius - 8);
       gameCtx.textAlign = 'left';
+    }
+
+    // Team heal glow (green pulse)
+    if (p.effects.some((fx) => fx.type === 'team-heal')) {
+      gameCtx.fillStyle = 'rgba(46, 204, 113, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Team buff glow (gold pulse)
+    if (p.effects.some((fx) => fx.type === 'team-buff')) {
+      gameCtx.fillStyle = 'rgba(245, 166, 35, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+      gameCtx.fill();
     }
 
     // Blind ring (Poker)
@@ -8987,6 +10966,83 @@ function renderGame() {
       gameCtx.beginPath();
       gameCtx.arc(px, py, 5, 0, Math.PI * 2);
       gameCtx.fill();
+    } else if (proj.type === 'dnd-arrow') {
+      // ── D&D Elf Arrow: brown shaft with white tip ──
+      gameCtx.save();
+      const angle = Math.atan2(proj.vy, proj.vx);
+      gameCtx.translate(px, py);
+      gameCtx.rotate(angle);
+      // Shaft
+      gameCtx.strokeStyle = '#8b4513';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(-10, 0);
+      gameCtx.lineTo(6, 0);
+      gameCtx.stroke();
+      // Arrowhead
+      gameCtx.fillStyle = '#ddd';
+      gameCtx.beginPath();
+      gameCtx.moveTo(10, 0);
+      gameCtx.lineTo(5, -3);
+      gameCtx.lineTo(5, 3);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Fletching
+      gameCtx.fillStyle = '#2ecc71';
+      gameCtx.beginPath();
+      gameCtx.moveTo(-10, 0);
+      gameCtx.lineTo(-8, -3);
+      gameCtx.lineTo(-6, 0);
+      gameCtx.closePath();
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.moveTo(-10, 0);
+      gameCtx.lineTo(-8, 3);
+      gameCtx.lineTo(-6, 0);
+      gameCtx.closePath();
+      gameCtx.fill();
+      gameCtx.restore();
+    } else if (proj.type === 'dnd-fireball') {
+      // ── D&D Fireball: large orange-red ball with flame trail ──
+      // Flame trail
+      for (let i = 1; i <= 4; i++) {
+        const tx = px - proj.vx * i * 0.15;
+        const ty = py - proj.vy * i * 0.15;
+        gameCtx.fillStyle = 'rgba(255, ' + (100 + i * 30) + ', 0, ' + (0.4 - i * 0.08) + ')';
+        gameCtx.beginPath();
+        gameCtx.arc(tx, ty, 7 - i, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Main ball
+      gameCtx.fillStyle = '#ff4500';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 7, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Inner bright core
+      gameCtx.fillStyle = '#ffcc00';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 3, 0, Math.PI * 2);
+      gameCtx.fill();
+    } else if (proj.type === 'dnd-blur-bolt') {
+      // ── D&D Blur Bolt: purple spinning bolt ──
+      gameCtx.save();
+      const angle = Math.atan2(proj.vy, proj.vx) + (Date.now() / 150);
+      gameCtx.translate(px, py);
+      gameCtx.rotate(angle);
+      gameCtx.fillStyle = '#9b59b6';
+      gameCtx.beginPath();
+      gameCtx.moveTo(8, 0);
+      gameCtx.lineTo(0, -5);
+      gameCtx.lineTo(-8, 0);
+      gameCtx.lineTo(0, 5);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Glow
+      gameCtx.fillStyle = 'rgba(155, 89, 182, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(0, 0, 8, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.restore();
     }
   }
 
@@ -9066,6 +11122,25 @@ function renderGame() {
       gameCtx.arc(ex, ey, r + 8, 0, Math.PI * 2);
       gameCtx.fill();
     }
+  }
+
+  // D&D Blur overlay: heavy blur + purple tint (applied by blur bolt spell)
+  if (localPlayer && localPlayer.dndBlurTimer > 0) {
+    gameCtx.save();
+    gameCtx.filter = 'blur(12px)';
+    gameCtx.drawImage(gameCanvas, 0, 0);
+    gameCtx.filter = 'none';
+    gameCtx.restore();
+    gameCtx.save();
+    gameCtx.filter = 'blur(6px)';
+    gameCtx.globalAlpha = 0.5;
+    gameCtx.drawImage(gameCanvas, 0, 0);
+    gameCtx.filter = 'none';
+    gameCtx.globalAlpha = 1.0;
+    gameCtx.restore();
+    // Purple colour wash
+    gameCtx.fillStyle = 'rgba(80, 0, 120, 0.2)';
+    gameCtx.fillRect(0, 0, cw, ch);
   }
 
   // Draw zone overlay
@@ -9354,7 +11429,7 @@ function showPopup(text) {
 }
 
 function checkWinCondition() {
-  if (gameMode === 'fight') {
+  if (gameMode === 'fight' || gameMode === 'fight-hard') {
     const alive = gamePlayers.filter(p => p.alive && !p.isSummon);
     // When local player dies, show placement immediately
     if (!localPlayer.alive && gameRunning) {
@@ -9418,6 +11493,14 @@ function checkWinCondition() {
         // Moderator achievement: win one game as moderator
         if (localPlayer && localPlayer.fighter.id === 'moderator' && typeof trackModWin === 'function') {
           trackModWin();
+        }
+        // D&D achievement: track race win
+        if (localPlayer && localPlayer.fighter.id === 'dnd' && typeof trackDndRaceWin === 'function') {
+          trackDndRaceWin(localPlayer.dndRace || 'human');
+        }
+        // Dragon achievement: track dragon win
+        if (localPlayer && localPlayer.fighter.id === 'dragon' && typeof trackDragonBeamAch === 'function') {
+          // Beam achievement tracked separately in dealDamage; no per-win tracking needed here
         }
       } else {
         gameCtx.fillStyle = '#e94560';
@@ -9552,11 +11635,28 @@ function buildGameStateSnapshot() {
     intimidatedBy: p.intimidatedBy || null,
     poisonTimers: p.poisonTimers || [],
     unstableEyeTimer: p.unstableEyeTimer || 0,
+    zombieIds: p.zombieIds || [],
     boiledOneActive: p.boiledOneActive || false,
     boiledOneTimer: p.boiledOneTimer || 0,
     specialUnlocked: p.specialUnlocked,
     specialUsed: p.specialUsed,
     totalDamageTaken: p.totalDamageTaken,
+    // Auto-heal state
+    noDamageTimer: p.noDamageTimer || 0,
+    healTickTimer: p.healTickTimer || 0,
+    isHealing: p.isHealing || false,
+    // Fighter special aim state
+    specialAiming: p.specialAiming || false,
+    specialAimX: p.specialAimX || 0,
+    specialAimY: p.specialAimY || 0,
+    specialAimTimer: p.specialAimTimer || 0,
+    // Poker state
+    blindBuff: p.blindBuff || null,
+    blindTimer: p.blindTimer || 0,
+    chipChangeDmg: p.chipChangeDmg != null ? p.chipChangeDmg : -1,
+    chipChangeTimer: p.chipChangeTimer || 0,
+    // Team
+    team: p.team || null,
     // Filbus
     chairCharges: p.chairCharges || 0,
     isCraftingChair: p.isCraftingChair || false,
@@ -9581,6 +11681,7 @@ function buildGameStateSnapshot() {
     iglooTimer: p.iglooTimer || 0,
     // Noli
     noliVoidRushActive: p.noliVoidRushActive || false,
+    noliVoidRushTimer: p.noliVoidRushTimer || 0,
     noliVoidRushVx: p.noliVoidRushVx || 0,
     noliVoidRushVy: p.noliVoidRushVy || 0,
     noliVoidRushChain: p.noliVoidRushChain || 0,
@@ -9634,6 +11735,34 @@ function buildGameStateSnapshot() {
     napoleonCannonId: p.napoleonCannonId || null,
     napoleonWallId: p.napoleonWallId || null,
     napoleonInfantryIds: p.napoleonInfantryIds || [],
+    // D&D Campaigner state
+    dndGP: p.dndGP || 0,
+    dndRace: p.dndRace || 'human',
+    dndWeaponBonus: p.dndWeaponBonus || 0,
+    dndCharm: p.dndCharm || false,
+    dndD20Active: p.dndD20Active || false,
+    dndBlurTimer: p.dndBlurTimer || 0,
+    dndHealPool: p.dndHealPool || 0,
+    dndHealTimer: p.dndHealTimer || 0,
+    dndOrcIds: p.dndOrcIds || [],
+    dndSidekickId: p.dndSidekickId || null,
+    // Dragon of Icespire state
+    dragonBreathFuel: p.dragonBreathFuel != null ? p.dragonBreathFuel : 5,
+    dragonBreathActive: p.dragonBreathActive || false,
+    dragonBreathAimNx: p.dragonBreathAimNx || 0,
+    dragonBreathAimNy: p.dragonBreathAimNy || 0,
+    dragonBreathWindup: p.dragonBreathWindup || 0,
+    dragonBreathRegenDelay: p.dragonBreathRegenDelay || 0,
+    dragonFlying: p.dragonFlying || false,
+    dragonFlyTimer: p.dragonFlyTimer || 0,
+    dragonBeamCharging: p.dragonBeamCharging || false,
+    dragonBeamChargeTimer: p.dragonBeamChargeTimer || 0,
+    dragonBeamFiring: p.dragonBeamFiring || false,
+    dragonBeamRecovery: p.dragonBeamRecovery || 0,
+    dragonBeamAimNx: p.dragonBeamAimNx || 0,
+    dragonBeamAimNy: p.dragonBeamAimNy || 0,
+    dragonRoarActive: p.dragonRoarActive || false,
+    dragonSummonId: p.dragonSummonId || null,
     // Movement state for non-host position correction
     specialJumping: p.specialJumping || false,
     // visual effects (include aimNx/aimNy for directional rendering, stolenType for cat-steal-fire)
@@ -9730,11 +11859,28 @@ function onRemoteGameState(snapshot) {
     p.intimidatedBy = sp.intimidatedBy || null;
     p.poisonTimers = sp.poisonTimers || [];
     p.unstableEyeTimer = sp.unstableEyeTimer || 0;
+    p.zombieIds = sp.zombieIds || [];
     p.boiledOneActive = sp.boiledOneActive || false;
     p.boiledOneTimer = sp.boiledOneTimer || 0;
     p.specialUnlocked = sp.specialUnlocked;
     p.specialUsed = sp.specialUsed;
     p.totalDamageTaken = sp.totalDamageTaken;
+    // Auto-heal state
+    p.noDamageTimer = sp.noDamageTimer || 0;
+    p.healTickTimer = sp.healTickTimer || 0;
+    p.isHealing = sp.isHealing || false;
+    // Fighter special aim state
+    p.specialAiming = sp.specialAiming || false;
+    p.specialAimX = sp.specialAimX || 0;
+    p.specialAimY = sp.specialAimY || 0;
+    p.specialAimTimer = sp.specialAimTimer || 0;
+    // Poker state
+    p.blindBuff = sp.blindBuff || null;
+    p.blindTimer = sp.blindTimer || 0;
+    p.chipChangeDmg = sp.chipChangeDmg != null ? sp.chipChangeDmg : -1;
+    p.chipChangeTimer = sp.chipChangeTimer || 0;
+    // Team
+    p.team = sp.team || null;
     p.chairCharges = sp.chairCharges || 0;
     p.isCraftingChair = sp.isCraftingChair || false;
     p.isEatingChair = sp.isEatingChair || false;
@@ -9757,6 +11903,7 @@ function onRemoteGameState(snapshot) {
     p.iglooTimer = sp.iglooTimer || 0;
     // Noli
     p.noliVoidRushActive = sp.noliVoidRushActive || false;
+    p.noliVoidRushTimer = sp.noliVoidRushTimer || 0;
     p.noliVoidRushVx = sp.noliVoidRushVx || 0;
     p.noliVoidRushVy = sp.noliVoidRushVy || 0;
     p.noliVoidRushChain = sp.noliVoidRushChain || 0;
@@ -9809,6 +11956,34 @@ function onRemoteGameState(snapshot) {
     p.napoleonCannonId = sp.napoleonCannonId || null;
     p.napoleonWallId = sp.napoleonWallId || null;
     p.napoleonInfantryIds = sp.napoleonInfantryIds || [];
+    // D&D Campaigner
+    p.dndGP = sp.dndGP || 0;
+    p.dndRace = sp.dndRace || 'human';
+    p.dndWeaponBonus = sp.dndWeaponBonus || 0;
+    p.dndCharm = sp.dndCharm || false;
+    p.dndD20Active = sp.dndD20Active || false;
+    p.dndBlurTimer = sp.dndBlurTimer || 0;
+    p.dndHealPool = sp.dndHealPool || 0;
+    p.dndHealTimer = sp.dndHealTimer || 0;
+    p.dndOrcIds = sp.dndOrcIds || [];
+    p.dndSidekickId = sp.dndSidekickId || null;
+    // Dragon of Icespire
+    p.dragonBreathFuel = sp.dragonBreathFuel != null ? sp.dragonBreathFuel : 5;
+    p.dragonBreathActive = sp.dragonBreathActive || false;
+    p.dragonBreathAimNx = sp.dragonBreathAimNx || 0;
+    p.dragonBreathAimNy = sp.dragonBreathAimNy || 0;
+    p.dragonBreathWindup = sp.dragonBreathWindup || 0;
+    p.dragonBreathRegenDelay = sp.dragonBreathRegenDelay || 0;
+    p.dragonFlying = sp.dragonFlying || false;
+    p.dragonFlyTimer = sp.dragonFlyTimer || 0;
+    p.dragonBeamCharging = sp.dragonBeamCharging || false;
+    p.dragonBeamChargeTimer = sp.dragonBeamChargeTimer || 0;
+    p.dragonBeamFiring = sp.dragonBeamFiring || false;
+    p.dragonBeamRecovery = sp.dragonBeamRecovery || 0;
+    p.dragonBeamAimNx = sp.dragonBeamAimNx || 0;
+    p.dragonBeamAimNy = sp.dragonBeamAimNy || 0;
+    p.dragonRoarActive = sp.dragonRoarActive || false;
+    p.dragonSummonId = sp.dragonSummonId || null;
     p.specialJumping = sp.specialJumping || false;
     if (sp.effects) p.effects = sp.effects;
   }

@@ -27,7 +27,7 @@ app.use(express.static(path.join(__dirname, 'public'), {
 // lobbies Map:  code -> { host, mapIndex, players: Map<socketId, {name, color}> }
 const lobbies = new Map();
 
-const PLAYER_COLORS = ['#e94560', '#3498db', '#2ecc71', '#f5a623', '#9b59b6'];
+const PLAYER_COLORS = ['#e94560', '#3498db', '#2ecc71', '#f5a623', '#9b59b6', '#e67e22'];
 
 function generateCode() {
   // 6-char uppercase alphanumeric code
@@ -43,11 +43,13 @@ io.on('connection', (socket) => {
   console.log(`Player connected: ${socket.id}`);
 
   // HOST a new game
-  socket.on('host-game', ({ playerName, mapIndex, fighterId }) => {
+  socket.on('host-game', ({ playerName, mapIndex, fighterId, lobbyMode }) => {
     const code = generateCode();
+    const mode = (lobbyMode === 'teams2' || lobbyMode === 'teams3') ? lobbyMode : 'ffa';
     const lobby = {
       host: socket.id,
       mapIndex: mapIndex ?? 0,
+      mode,
       players: new Map(),
     };
     const color = PLAYER_COLORS[0];
@@ -59,10 +61,11 @@ io.on('connection', (socket) => {
     socket.emit('game-hosted', {
       code,
       mapIndex: lobby.mapIndex,
+      lobbyMode: mode,
       players: lobbyPlayerList(lobby),
       availableColors: getAvailableColors(lobby),
     });
-    console.log(`Lobby ${code} created by ${playerName}`);
+    console.log(`Lobby ${code} created by ${playerName} (mode: ${mode})`);
   });
 
   // JOIN an existing game
@@ -74,8 +77,9 @@ io.on('connection', (socket) => {
       socket.emit('join-error', { message: 'Lobby not found. Check the code and try again.' });
       return;
     }
-    if (lobby.players.size >= 5) {
-      socket.emit('join-error', { message: 'Lobby is full (max 5 players).' });
+    const maxPlayers = (lobby.mode === 'teams2' || lobby.mode === 'teams3') ? 6 : 4;
+    if (lobby.players.size >= maxPlayers) {
+      socket.emit('join-error', { message: `Lobby is full (max ${maxPlayers} players).` });
       return;
     }
 
@@ -89,6 +93,7 @@ io.on('connection', (socket) => {
     socket.emit('game-joined', {
       code: upperCode,
       mapIndex: lobby.mapIndex,
+      lobbyMode: lobby.mode,
       players: lobbyPlayerList(lobby),
       availableColors: getAvailableColors(lobby),
     });
@@ -142,14 +147,46 @@ io.on('connection', (socket) => {
     io.to(socket.lobbyCode).emit('map-changed', { mapIndex });
   });
 
+  // Change lobby mode (host only)
+  socket.on('change-mode', ({ lobbyMode }) => {
+    const lobby = lobbies.get(socket.lobbyCode);
+    if (!lobby || lobby.host !== socket.id) return;
+    const mode = (lobbyMode === 'teams2' || lobbyMode === 'teams3') ? lobbyMode : 'ffa';
+    lobby.mode = mode;
+    io.to(socket.lobbyCode).emit('mode-changed', { lobbyMode: mode });
+  });
+
   // Start game (host only)
   socket.on('start-game', () => {
     const lobby = lobbies.get(socket.lobbyCode);
     if (!lobby || lobby.host !== socket.id) return;
+
+    // 3 Teams requires exactly 6 players
+    if (lobby.mode === 'teams3' && lobby.players.size < 6) {
+      socket.emit('start-error', { message: 'Not enough people — 3 Teams requires 6 players.' });
+      return;
+    }
+
     lobby.deadPlayers = new Set();
+    const playerList = lobbyPlayerList(lobby);
+    // Assign teams for team modes
+    if (lobby.mode === 'teams2') {
+      lobby.teamMap = new Map();
+      playerList.forEach((p, i) => {
+        p.team = (i % 2) + 1;
+        lobby.teamMap.set(p.id, p.team);
+      });
+    } else if (lobby.mode === 'teams3') {
+      lobby.teamMap = new Map();
+      playerList.forEach((p, i) => {
+        p.team = (i % 3) + 1;
+        lobby.teamMap.set(p.id, p.team);
+      });
+    }
     io.to(socket.lobbyCode).emit('game-starting', {
       mapIndex: lobby.mapIndex,
-      players: lobbyPlayerList(lobby),
+      players: playerList,
+      lobbyMode: lobby.mode,
     });
   });
 
@@ -258,18 +295,40 @@ io.on('connection', (socket) => {
     if (!lobby.deadPlayers) lobby.deadPlayers = new Set();
     lobby.deadPlayers.add(playerId);
     const totalPlayers = lobby.players.size;
-    const deadCount = lobby.deadPlayers.size;
     const alive = [];
     for (const [id] of lobby.players) {
       if (!lobby.deadPlayers.has(id)) alive.push(id);
     }
-    if (alive.length <= 1 && totalPlayers > 1) {
-      const winnerId = alive.length === 1 ? alive[0] : null;
-      const winnerData = winnerId ? lobby.players.get(winnerId) : null;
-      io.to(code).emit('game-over', {
-        winnerId,
-        winnerName: winnerData ? winnerData.name : null,
-      });
+
+    if (lobby.mode === 'teams2' || lobby.mode === 'teams3') {
+      // Team win: check if all alive players are on the same team
+      // Retrieve team assignments from the last start-game emission
+      if (!lobby.teamMap) return; // should have been set at start
+      const aliveTeams = new Set();
+      for (const id of alive) {
+        const t = lobby.teamMap.get(id);
+        if (t) aliveTeams.add(t);
+      }
+      if (aliveTeams.size <= 1 && alive.length > 0) {
+        const winningTeam = aliveTeams.values().next().value;
+        io.to(code).emit('game-over', {
+          winnerId: null,
+          winnerName: null,
+          winningTeam,
+        });
+      } else if (alive.length === 0) {
+        io.to(code).emit('game-over', { winnerId: null, winnerName: null, winningTeam: null });
+      }
+    } else {
+      // FFA: last player standing
+      if (alive.length <= 1 && totalPlayers > 1) {
+        const winnerId = alive.length === 1 ? alive[0] : null;
+        const winnerData = winnerId ? lobby.players.get(winnerId) : null;
+        io.to(code).emit('game-over', {
+          winnerId,
+          winnerName: winnerData ? winnerData.name : null,
+        });
+      }
     }
   });
 

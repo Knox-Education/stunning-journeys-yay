@@ -29,8 +29,9 @@ let currentLobbyCode = null;
 let isHost = false;
 let flowTarget = ''; // 'host' | 'join' | 'single'
 let myColor = '#e94560';
+let lobbyMode = 'ffa'; // 'ffa' | 'teams2' | 'teams3'
 
-const PLAYER_COLORS = ['#e94560', '#3498db', '#2ecc71', '#f5a623', '#9b59b6'];
+const PLAYER_COLORS = ['#e94560', '#3498db', '#2ecc71', '#f5a623', '#9b59b6', '#e67e22'];
 
 // Shuffled fighter order (Fighter & Poker stay at front)
 const _shuffledFighterIds = (() => {
@@ -57,8 +58,12 @@ function showScreen(id) {
 $('#btn-singleplayer').addEventListener('click', () => {
   showScreen('screen-sp-mode');
 });
-$('#btn-sp-fight').addEventListener('click', () => {
+$('#btn-sp-fight-easy').addEventListener('click', () => {
   flowTarget = 'fight';
+  showScreen('screen-name');
+});
+$('#btn-sp-fight-hard').addEventListener('click', () => {
+  flowTarget = 'fight-hard';
   showScreen('screen-name');
 });
 $('#btn-sp-training').addEventListener('click', () => {
@@ -131,7 +136,7 @@ function buildMapGrid() {
 }
 
 $('#btn-host-create').addEventListener('click', () => {
-  socket.emit('host-game', { playerName, mapIndex: selectedMap, fighterId: selectedFighterId });
+  socket.emit('host-game', { playerName, mapIndex: selectedMap, fighterId: selectedFighterId, lobbyMode });
 });
 $('#btn-host-map-back').addEventListener('click', () => showScreen('screen-name'));
 
@@ -151,10 +156,11 @@ function submitJoin() {
 }
 
 // ── Screen: Lobby ────────────────────────────────────────────
-function openLobby(code, mapIndex, players, hosting, availableColors) {
+function openLobby(code, mapIndex, players, hosting, availableColors, mode) {
   isHost = hosting;
   currentLobbyCode = code;
   selectedMap = mapIndex;
+  lobbyMode = mode || 'ffa';
 
   // Find my color from the player list
   const me = players.find((p) => p.id === socket.id);
@@ -168,15 +174,27 @@ function openLobby(code, mapIndex, players, hosting, availableColors) {
   if (isHost) {
     $('#host-map-controls').classList.remove('hidden');
     $('#btn-start-game').classList.remove('hidden');
+    $('#lobby-mode-toggle').classList.remove('hidden');
   } else {
     $('#host-map-controls').classList.add('hidden');
     $('#btn-start-game').classList.add('hidden');
+    $('#lobby-mode-toggle').classList.add('hidden');
   }
+  _updateModeLabel();
 
   refreshPlayerList(players);
   buildColorPicker(availableColors || []);
   populateLobbyFighters();
   showScreen('screen-lobby');
+}
+
+function _updateModeLabel() {
+  const el = $('#lobby-mode-label');
+  if (el) {
+    if (lobbyMode === 'teams3') el.textContent = '3 Teams (max 6)';
+    else if (lobbyMode === 'teams2') el.textContent = '2 Teams (max 6)';
+    else el.textContent = 'FFA (max 4)';
+  }
 }
 
 $('#btn-copy-code').addEventListener('click', () => {
@@ -196,7 +214,25 @@ function cycleMap(dir) {
 }
 
 $('#btn-start-game').addEventListener('click', () => {
+  const warn = $('#lobby-mode-warning');
+  if (warn) { warn.style.display = 'none'; warn.textContent = ''; }
   socket.emit('start-game');
+});
+
+socket.on('start-error', ({ message }) => {
+  const warn = $('#lobby-mode-warning');
+  if (warn) {
+    warn.textContent = message;
+    warn.style.display = 'inline';
+  }
+});
+
+$('#btn-toggle-mode').addEventListener('click', () => {
+  if (lobbyMode === 'ffa') lobbyMode = 'teams2';
+  else if (lobbyMode === 'teams2') lobbyMode = 'teams3';
+  else lobbyMode = 'ffa';
+  _updateModeLabel();
+  socket.emit('change-mode', { lobbyMode });
 });
 
 $('#btn-leave-lobby').addEventListener('click', () => {
@@ -254,12 +290,12 @@ function buildColorPicker(availableColors) {
 }
 
 // ── Socket events ────────────────────────────────────────────
-socket.on('game-hosted', ({ code, mapIndex, players, availableColors }) => {
-  openLobby(code, mapIndex, players, true, availableColors);
+socket.on('game-hosted', ({ code, mapIndex, players, availableColors, lobbyMode: lm }) => {
+  openLobby(code, mapIndex, players, true, availableColors, lm);
 });
 
-socket.on('game-joined', ({ code, mapIndex, players, availableColors }) => {
-  openLobby(code, mapIndex, players, false, availableColors);
+socket.on('game-joined', ({ code, mapIndex, players, availableColors, lobbyMode: lm }) => {
+  openLobby(code, mapIndex, players, false, availableColors, lm);
 });
 
 socket.on('join-error', ({ message }) => {
@@ -289,8 +325,15 @@ socket.on('map-changed', ({ mapIndex }) => {
   $('#lobby-map-name').textContent = MAPS[mapIndex].name;
 });
 
-socket.on('game-starting', ({ mapIndex, players }) => {
-  enterGame(mapIndex, players);
+socket.on('mode-changed', ({ lobbyMode: lm }) => {
+  lobbyMode = lm || 'ffa';
+  _updateModeLabel();
+});
+
+socket.on('game-starting', ({ mapIndex, players, lobbyMode: lm }) => {
+  if (lm) lobbyMode = lm;
+  const mode = (lobbyMode === 'teams2' || lobbyMode === 'teams3') ? 'teams' : undefined;
+  enterGame(mapIndex, players, mode);
 });
 
 // Multiplayer movement sync (legacy — skipped under host-authoritative)
@@ -334,9 +377,9 @@ socket.on('player-death', ({ playerId }) => {
 });
 
 // Game over from server
-socket.on('game-over', ({ winnerId, winnerName }) => {
+socket.on('game-over', ({ winnerId, winnerName, winningTeam }) => {
   if (typeof onGameOver === 'function') {
-    onGameOver(winnerId, winnerName);
+    onGameOver(winnerId, winnerName, winningTeam);
   }
 });
 
@@ -689,6 +732,106 @@ function drawFighterIcon(canvas, fighterId, customSize) {
     ctx.quadraticCurveTo(tx, ty, tx + cr, ty);
     ctx.closePath();
     ctx.stroke();
+  } else if (fighterId === 'dragon') {
+    // Dragon of Icespire: icy dragon head silhouette
+    ctx.fillStyle = '#0a1628'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Dragon head shape
+    ctx.fillStyle = '#5b8fa8';
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.5, cy + r * 0.4);
+    ctx.lineTo(cx - r * 0.6, cy - r * 0.2);
+    ctx.lineTo(cx - r * 0.3, cy - r * 0.6);
+    ctx.lineTo(cx + r * 0.1, cy - r * 0.7);
+    ctx.lineTo(cx + r * 0.5, cy - r * 0.4);
+    ctx.lineTo(cx + r * 0.7, cy - r * 0.1);
+    ctx.lineTo(cx + r * 0.5, cy + r * 0.2);
+    ctx.lineTo(cx + r * 0.3, cy + r * 0.5);
+    ctx.lineTo(cx, cy + r * 0.4);
+    ctx.closePath();
+    ctx.fill();
+    // Icy eye
+    ctx.fillStyle = '#00ddff';
+    ctx.beginPath();
+    ctx.arc(cx + r * 0.1, cy - r * 0.2, r * 0.15, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#003';
+    ctx.beginPath();
+    ctx.arc(cx + r * 0.1, cy - r * 0.2, r * 0.07, 0, Math.PI * 2);
+    ctx.fill();
+    // Icy breath wisps from snout
+    ctx.strokeStyle = 'rgba(200, 240, 255, 0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx + r * 0.7, cy - r * 0.1);
+    ctx.quadraticCurveTo(cx + r * 1.0, cy + r * 0.1, cx + r * 0.8, cy + r * 0.3);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx + r * 0.7, cy - r * 0.1);
+    ctx.quadraticCurveTo(cx + r * 1.1, cy - r * 0.3, cx + r * 0.9, cy - r * 0.5);
+    ctx.stroke();
+    // Horns
+    ctx.strokeStyle = '#7fafc4';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.3, cy - r * 0.6);
+    ctx.lineTo(cx - r * 0.5, cy - r * 0.9);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx + r * 0.1, cy - r * 0.7);
+    ctx.lineTo(cx + r * 0.0, cy - r * 1.0);
+    ctx.stroke();
+  } else if (fighterId === 'dnd') {
+    // D&D Campaigner: Sword and Shield icon
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Shield (kite shield, left-center)
+    const shX = cx - r * 0.2, shY = cy + r * 0.05;
+    const shW = r * 0.8, shH = r * 1.1;
+    ctx.fillStyle = '#2c3e80';
+    ctx.beginPath();
+    ctx.moveTo(shX - shW * 0.5, shY - shH * 0.45);
+    ctx.lineTo(shX + shW * 0.5, shY - shH * 0.45);
+    ctx.lineTo(shX + shW * 0.5, shY + shH * 0.1);
+    ctx.lineTo(shX, shY + shH * 0.5);
+    ctx.lineTo(shX - shW * 0.5, shY + shH * 0.1);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#1a2555'; ctx.lineWidth = 1.5; ctx.stroke();
+    // Shield cross emblem
+    ctx.strokeStyle = '#d4af37'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(shX, shY - shH * 0.3); ctx.lineTo(shX, shY + shH * 0.3);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(shX - shW * 0.3, shY - shH * 0.05); ctx.lineTo(shX + shW * 0.3, shY - shH * 0.05);
+    ctx.stroke();
+    // Sword (angled behind shield, upper-right)
+    const swAngle = -Math.PI / 4;
+    const swLen = r * 1.6;
+    const swOx = cx + r * 0.1, swOy = cy + r * 0.2;
+    const swTx = swOx + Math.cos(swAngle) * swLen;
+    const swTy = swOy + Math.sin(swAngle) * swLen;
+    // Blade
+    ctx.strokeStyle = '#c0c0c0'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(swOx, swOy); ctx.lineTo(swTx, swTy); ctx.stroke();
+    // Blade highlight
+    ctx.strokeStyle = '#eee'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(swOx + 1, swOy + 1); ctx.lineTo(swTx + 1, swTy + 1); ctx.stroke();
+    // Tip
+    ctx.fillStyle = '#e0e0e0';
+    ctx.beginPath();
+    ctx.moveTo(swTx, swTy);
+    ctx.lineTo(swTx + Math.cos(swAngle) * r * 0.15 + Math.cos(swAngle + 0.4) * 3, swTy + Math.sin(swAngle) * r * 0.15 + Math.sin(swAngle + 0.4) * 3);
+    ctx.lineTo(swTx + Math.cos(swAngle - 0.3) * 2, swTy + Math.sin(swAngle - 0.3) * 2);
+    ctx.closePath(); ctx.fill();
+    // Crossguard
+    const gx = swOx + Math.cos(swAngle) * swLen * 0.3;
+    const gy = swOy + Math.sin(swAngle) * swLen * 0.3;
+    const gAngle = swAngle + Math.PI / 2;
+    ctx.strokeStyle = '#d4af37'; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(gx + Math.cos(gAngle) * 6, gy + Math.sin(gAngle) * 6);
+    ctx.lineTo(gx - Math.cos(gAngle) * 6, gy - Math.sin(gAngle) * 6);
+    ctx.stroke();
   } else {
     // Fighter: sword icon
     ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
@@ -717,7 +860,7 @@ function populateFighterScreen() {
   _shuffledFighterIds.forEach((fid) => {
     const f = getFighter(fid);
     const locked = !isFighterUnlocked(fid);
-    const mpOnly = f.multiplayerOnly && (flowTarget === 'fight' || flowTarget === 'training');
+    const mpOnly = f.multiplayerOnly && (flowTarget === 'fight' || flowTarget === 'fight-hard' || flowTarget === 'training');
     const btn = document.createElement('button');
     btn.className = 'fighter-select-btn' + (fid === selectedFighterId ? ' active' : '') + ((locked || mpOnly) ? ' locked' : '');
 
@@ -798,10 +941,10 @@ $('#btn-select-fighter').addEventListener('click', () => {
     const randomMap = Math.floor(Math.random() * MAPS.length);
     const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
     enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }], 'training');
-  } else if (flowTarget === 'fight') {
+  } else if (flowTarget === 'fight' || flowTarget === 'fight-hard') {
     const randomMap = Math.floor(Math.random() * MAPS.length);
     const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
-    enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }], 'fight');
+    enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }], flowTarget === 'fight-hard' ? 'fight-hard' : 'fight');
   }
 });
 
@@ -902,6 +1045,16 @@ const _PROGRESS_KEYS = [
   'deerWaterKill', 'noliVoidRushAch', 'catKittenAch',
   // Napoleon unlock
   'napoleonM1Kills', 'napoleonSummonWins',
+  // Moderator
+  'modWins',
+  // D&D unlock
+  'dndWinsPoker', 'dndWinsFighter', 'dndWinsCricket',
+  // D&D F-move
+  'dndElfWins', 'dndDwarfWins', 'dndHumanWins',
+  // Dragon unlock
+  'dragonWinsNapoleon', 'dragonWinsDnD',
+  // Dragon F-move
+  'dragonBeamAch',
 ];
 
 function _defaultProgress() {
@@ -924,24 +1077,41 @@ function _achBitsToState(bits) {
   return set;
 }
 
-// Pack state into bytes: [achBitsLow, achBitsHigh, ...progressKeys]
+// Pack state into bytes: [achBitsLow, achBitsMid, achBitsHigh, ...progressKeys]
 function _packState(completed, progress) {
   const bytes = [];
   const bits = _achStateToBits(completed);
   bytes.push(bits & 0xFF);
   bytes.push((bits >> 8) & 0xFF);
+  bytes.push((bits >> 16) & 0xFF);
   _PROGRESS_KEYS.forEach(k => bytes.push(Math.min(255, Math.max(0, progress[k] || 0))));
   return bytes;
 }
 
 function _unpackState(bytes) {
-  // New format: 2 ach bytes + full progress keys
-  const newLen = 2 + _PROGRESS_KEYS.length;
-  if (bytes.length >= newLen) {
+  // Newest format: 3 ach bytes + full progress keys
+  const newestLen = 3 + _PROGRESS_KEYS.length;
+  if (bytes.length >= newestLen) {
+    const bits = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16);
+    const completed = _achBitsToState(bits);
+    const progress = _defaultProgress();
+    _PROGRESS_KEYS.forEach((k, i) => { progress[k] = bytes[3 + i]; });
+    return { completed, progress };
+  }
+  // Previous format: 2 ach bytes + 17 old progress keys
+  const prevKeys = [
+    'mpWins', 'spWins', 'winsAs1x', 'boiledOnePlays', 'summonKillMP', 'deerRestrictedWin',
+    'fighterSpecialAch', 'pokerNoSpecialAch', 'filbusBoiledKillAch',
+    'onexKilledNoliMP', 'onexKilledCatSP', 'gearDmgAbsorbed',
+    'deerWaterKill', 'noliVoidRushAch', 'catKittenAch',
+    'napoleonM1Kills', 'napoleonSummonWins',
+  ];
+  const prevLen = 2 + prevKeys.length;
+  if (bytes.length >= prevLen) {
     const bits = bytes[0] | (bytes[1] << 8);
     const completed = _achBitsToState(bits);
     const progress = _defaultProgress();
-    _PROGRESS_KEYS.forEach((k, i) => { progress[k] = bytes[2 + i]; });
+    prevKeys.forEach((k, i) => { progress[k] = bytes[2 + i]; });
     return { completed, progress };
   }
   // Old format: 1 ach byte + 6 old progress keys
@@ -1151,6 +1321,28 @@ function checkAndUnlockAchievements() {
     newlyCompleted.push('moderatorAch');
     changed = true;
   }
+  // dndAchUnlock: 5 wins as Poker + 5 wins as Fighter + 5 wins as Cricket
+  if (!completedAchievements.has('dndAchUnlock') && isAchievementAvailable('dndAchUnlock') && achProgress.dndWinsPoker >= 5 && achProgress.dndWinsFighter >= 5 && achProgress.dndWinsCricket >= 5) {
+    completedAchievements.add('dndAchUnlock');
+    changed = true;
+  }
+  // dndAch: D&D F-move — win as Elf 2, Dwarf 3, Human 4
+  if (!completedAchievements.has('dndAch') && isAchievementAvailable('dndAch') && achProgress.dndElfWins >= 2 && achProgress.dndDwarfWins >= 3 && achProgress.dndHumanWins >= 4) {
+    completedAchievements.add('dndAch');
+    newlyCompleted.push('dndAch');
+    changed = true;
+  }
+  // dragonAchUnlock: 3 wins as Napoleon + 3 wins as D&D Campaigner
+  if (!completedAchievements.has('dragonAchUnlock') && isAchievementAvailable('dragonAchUnlock') && achProgress.dragonWinsNapoleon >= 3 && achProgress.dragonWinsDnD >= 3) {
+    completedAchievements.add('dragonAchUnlock');
+    changed = true;
+  }
+  // dragonAch: Dragon F-move — kill 2 opponents with Dragon Beam in a single game
+  if (!completedAchievements.has('dragonAch') && isAchievementAvailable('dragonAch') && achProgress.dragonBeamAch >= 1) {
+    completedAchievements.add('dragonAch');
+    newlyCompleted.push('dragonAch');
+    changed = true;
+  }
 
   if (changed) {
     saveAchievements();
@@ -1169,6 +1361,9 @@ function checkAndUnlockAchievements() {
 function trackSPWin(fighterId) {
   achProgress.spWins++;
   if (fighterId === 'onexonexonex' && isAchievementAvailable('noliAch')) achProgress.winsAs1x++;
+  if (fighterId === 'poker' || fighterId === 'fighter' || fighterId === 'cricket') trackDndFighterWin(fighterId);
+  if (fighterId === 'napoleon' && isAchievementAvailable('dragonAchUnlock')) achProgress.dragonWinsNapoleon++;
+  if (fighterId === 'dnd' && isAchievementAvailable('dragonAchUnlock')) achProgress.dragonWinsDnD++;
   checkAndUnlockAchievements();
   saveAchievements();
 }
@@ -1176,6 +1371,9 @@ function trackSPWin(fighterId) {
 function trackMPWin(fighterId) {
   achProgress.mpWins++;
   if (fighterId === 'onexonexonex' && isAchievementAvailable('noliAch')) achProgress.winsAs1x++;
+  if (fighterId === 'poker' || fighterId === 'fighter' || fighterId === 'cricket') trackDndFighterWin(fighterId);
+  if (fighterId === 'napoleon' && isAchievementAvailable('dragonAchUnlock')) achProgress.dragonWinsNapoleon++;
+  if (fighterId === 'dnd' && isAchievementAvailable('dragonAchUnlock')) achProgress.dragonWinsDnD++;
   checkAndUnlockAchievements();
   saveAchievements();
 }
@@ -1286,6 +1484,32 @@ function trackNapoleonSummonWin() {
 // Moderator achievement tracking
 function trackModWin() {
   achProgress.modWins = (achProgress.modWins || 0) + 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+// D&D unlock tracking — per-fighter wins
+function trackDndFighterWin(fighterId) {
+  if (fighterId === 'poker') achProgress.dndWinsPoker = Math.min(255, (achProgress.dndWinsPoker || 0) + 1);
+  else if (fighterId === 'fighter') achProgress.dndWinsFighter = Math.min(255, (achProgress.dndWinsFighter || 0) + 1);
+  else if (fighterId === 'cricket') achProgress.dndWinsCricket = Math.min(255, (achProgress.dndWinsCricket || 0) + 1);
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+// D&D F-move tracking — per-race wins
+function trackDndRaceWin(race) {
+  if (!isAchievementAvailable('dndAch')) return;
+  if (race === 'elf') achProgress.dndElfWins = Math.min(255, (achProgress.dndElfWins || 0) + 1);
+  else if (race === 'dwarf') achProgress.dndDwarfWins = Math.min(255, (achProgress.dndDwarfWins || 0) + 1);
+  else if (race === 'human') achProgress.dndHumanWins = Math.min(255, (achProgress.dndHumanWins || 0) + 1);
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackDragonBeamAch() {
+  if (!isAchievementAvailable('dragonAch')) return;
+  achProgress.dragonBeamAch = 1;
   checkAndUnlockAchievements();
   saveAchievements();
 }
