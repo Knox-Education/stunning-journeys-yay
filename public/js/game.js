@@ -3742,7 +3742,7 @@ function cpuAttack(cpu, params) {
             target.y = safe.y;
           }
         }
-        cpu.effects.push({ type: 'ban-hammer', timer: 0.4 });
+        cpu.effects.push({ type: 'ban-hammer', timer: 0.5, aimNx: aimNx, aimNy: aimNy });
       }
     } else if (isDnd) {
       // D&D M1: race-dependent attack
@@ -5113,7 +5113,7 @@ function useAbility(key) {
         }
       }
       _lastDealDamageWasM1 = false;
-      lp.effects.push({ type: 'ban-hammer', timer: 0.3 });
+      lp.effects.push({ type: 'ban-hammer', timer: 0.5, aimNx: aimNx, aimNy: aimNy });
     } else if (isDnd) {
       // D&D M1: Sword (Human) / Bow (Elf) / Axe (Dwarf)
       const race = lp.dndRace || 'human';
@@ -10214,12 +10214,31 @@ function renderGame() {
       gameCtx.stroke();
     }
 
-    // Moderator: Ban Hammer swing effect (red arc)
-    if (p.effects.some((fx) => fx.type === 'ban-hammer')) {
-      gameCtx.strokeStyle = '#ff4444';
+    // Moderator: Ban Hammer swing effect (red arc, directional)
+    const banFx = p.effects.find((fx) => fx.type === 'ban-hammer');
+    if (banFx) {
+      const swLen = GAME_TILE * 1.5;
+      const aRad = Math.atan2(banFx.aimNy || 0, banFx.aimNx || 1);
+      // Hammer handle
+      gameCtx.strokeStyle = '#8b4513';
       gameCtx.lineWidth = 4;
       gameCtx.beginPath();
-      gameCtx.arc(sx, sy, GAME_TILE * 1.3, -0.8, 0.8);
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + Math.cos(aRad) * swLen * 0.7, sy + Math.sin(aRad) * swLen * 0.7);
+      gameCtx.stroke();
+      // Hammer head
+      gameCtx.fillStyle = '#ff4444';
+      const hx = sx + Math.cos(aRad) * swLen * 0.75;
+      const hy = sy + Math.sin(aRad) * swLen * 0.75;
+      gameCtx.fillRect(hx - 8, hy - 5, 16, 10);
+      gameCtx.strokeStyle = '#cc0000';
+      gameCtx.lineWidth = 2;
+      gameCtx.strokeRect(hx - 8, hy - 5, 16, 10);
+      // Red sweep arc
+      gameCtx.strokeStyle = 'rgba(255, 68, 68, 0.6)';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
       gameCtx.stroke();
     }
     // Moderator: Ban Teleport flash on target
@@ -10233,16 +10252,21 @@ function renderGame() {
       gameCtx.textAlign = 'center';
       gameCtx.fillText('BANNED!', sx, sy - radius - 12);
     }
-    // Moderator: Scare TP flash
+    // Moderator: Scare TP flash (purple burst on victim)
     if (p.effects.some((fx) => fx.type === 'scare-tp')) {
-      gameCtx.fillStyle = 'rgba(155, 89, 182, 0.3)';
+      gameCtx.fillStyle = 'rgba(155, 89, 182, 0.35)';
       gameCtx.beginPath();
-      gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+      gameCtx.arc(sx, sy, radius + 18, 0, Math.PI * 2);
       gameCtx.fill();
+      gameCtx.strokeStyle = '#9b59b6';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 18, 0, Math.PI * 2);
+      gameCtx.stroke();
       gameCtx.fillStyle = '#9b59b6';
-      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.font = 'bold 11px sans-serif';
       gameCtx.textAlign = 'center';
-      gameCtx.fillText('😱', sx, sy - radius - 12);
+      gameCtx.fillText('😱 SCARED!', sx, sy - radius - 16);
     }
     // Moderator: Bug Fix effect
     if (p.effects.some((fx) => fx.type === 'bug-fix')) {
