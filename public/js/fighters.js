@@ -97,7 +97,7 @@ const FIGHTERS = {
     healDelay: 10,
     healTick: 4,
     speed: 2.8,
-    description: 'A ranged gambler who bets on chips, cards, and blinds to control the fight.',
+    description: 'A ranged gambler who bets to control the fight.',
     abilities: [
       {
         key: 'M1',

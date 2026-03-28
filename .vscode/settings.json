@@ -1,0 +1,11 @@
+{
+  "remote.portsAttributes": {
+    "3000": {
+      "label": "Game Server",
+      "onAutoForward": "openBrowser",
+      "visibility": "public"
+    }
+  },
+  "remote.autoForwardPorts": true,
+  "remote.autoForwardPortsSource": "process"
+}

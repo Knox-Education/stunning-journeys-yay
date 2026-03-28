@@ -437,6 +437,10 @@ function enterGame(mapIndex, players, mode) {
   }));
   showScreen('screen-game');
   const myId = socket.id || 'local';
+  // Record params so Play Again can restart
+  _lastGameMapIndex = mapIndex;
+  _lastGameMode = mode;
+  _lastGameLobbyMode = lobbyMode;
   startGame(mapIndex, players, myId, mode);
 }
 
@@ -1698,3 +1702,139 @@ function renderAchievementsScreen() {
     grid.appendChild(chip);
   });
 }
+
+// ═══════════════════════════════════════════════════════════════
+// EXIT GAME + PLAY AGAIN (no reload needed)
+// ═══════════════════════════════════════════════════════════════
+
+// Track the last game's parameters so SP "Play Again" can restart easily
+let _lastGameMapIndex = 0;
+let _lastGameMode = undefined;  // 'fight' | 'fight-hard' | 'training' | undefined (MP) | 'teams'
+let _lastGameLobbyMode = 'ffa';
+let _playAgainTimerId = null;
+let _playAgainCode = null; // set when a play-again offer is active
+
+// ── Exit to menu (mid-game or post-game) ─────────────────────
+function exitToMenu() {
+  // Cancel any pending play-again timer
+  if (_playAgainTimerId) { clearInterval(_playAgainTimerId); _playAgainTimerId = null; }
+  _playAgainCode = null;
+
+  // Clean up game engine state
+  if (typeof cleanupGame === 'function') cleanupGame();
+
+  // Leave MP lobby if in one
+  if (currentLobbyCode) {
+    socket.emit('leave-lobby');
+    currentLobbyCode = null;
+  }
+
+  // Reset play-again button state
+  const btn = $('#btn-play-again');
+  if (btn) { btn.disabled = false; btn.textContent = 'Play Again'; }
+  const timerEl = $('#play-again-timer');
+  if (timerEl) timerEl.textContent = '';
+
+  showScreen('screen-start');
+}
+
+$('#btn-exit-game').addEventListener('click', () => {
+  exitToMenu();
+});
+
+$('#btn-exit-after-game').addEventListener('click', () => {
+  exitToMenu();
+});
+
+// ── Play Again ───────────────────────────────────────────────
+$('#btn-play-again').addEventListener('click', () => {
+  const btn = $('#btn-play-again');
+  const timerEl = $('#play-again-timer');
+
+  const isSP = (_lastGameMode === 'fight' || _lastGameMode === 'fight-hard' || _lastGameMode === 'training');
+
+  if (isSP) {
+    // Singleplayer: just restart immediately with same settings
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+    if (typeof cleanupGame === 'function') cleanupGame();
+    const myId = 'local';
+    const fighter = selectedFighterId || 'fighter';
+    const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
+    const randomMap = Math.floor(Math.random() * MAPS.length);
+    const players = [{ id: myId, name: playerName || 'Player', color, isHost: true, fighterId: fighter }];
+    enterGame(randomMap, players, _lastGameMode);
+    btn.disabled = false;
+    btn.textContent = 'Play Again';
+  } else {
+    // Multiplayer: server handles routing (creates or auto-joins the shared lobby)
+    btn.disabled = true;
+    btn.textContent = 'Joining...';
+    if (_playAgainTimerId) { clearInterval(_playAgainTimerId); _playAgainTimerId = null; }
+    timerEl.textContent = 'Finding lobby...';
+    socket.emit('request-play-again');
+  }
+});
+
+// Someone else (or server on our behalf) initiated play-again; show countdown
+socket.on('play-again-offered', ({ code, countdown }) => {
+  const timerEl = $('#play-again-timer');
+  const btn = $('#btn-play-again');
+  let remaining = countdown;
+
+  _playAgainCode = code;
+
+  // Show overlay if not already visible
+  const overlay = document.querySelector('#play-again-overlay');
+  if (overlay) overlay.classList.remove('hidden');
+
+  btn.disabled = false;
+  btn.textContent = 'Play Again';
+  timerEl.textContent = remaining + 's to join...';
+
+  if (_playAgainTimerId) clearInterval(_playAgainTimerId);
+  _playAgainTimerId = setInterval(() => {
+    remaining--;
+    if (remaining <= 0) {
+      clearInterval(_playAgainTimerId);
+      _playAgainTimerId = null;
+      _playAgainCode = null;
+      timerEl.textContent = 'Time\'s up!';
+      btn.disabled = true;
+      btn.textContent = 'Too Late';
+    } else {
+      timerEl.textContent = remaining + 's to join...';
+    }
+  }, 1000);
+});
+
+// Play-again window expired (server couldn't find a valid lobby)
+socket.on('play-again-expired', () => {
+  const btn = $('#btn-play-again');
+  const timerEl = $('#play-again-timer');
+  _playAgainCode = null;
+  btn.disabled = false;
+  btn.textContent = 'Play Again';
+  timerEl.textContent = 'Window expired — try again';
+});
+
+// Server confirms we've been placed into the new lobby
+socket.on('play-again-joined', ({ code, mapIndex, players, availableColors, lobbyMode: lm }) => {
+  if (_playAgainTimerId) { clearInterval(_playAgainTimerId); _playAgainTimerId = null; }
+  _playAgainCode = null;
+  // Clean up old game
+  if (typeof cleanupGame === 'function') cleanupGame();
+  // Open the lobby screen
+  openLobby(code, mapIndex, players, false, availableColors, lm);
+  // The first player gets host status via the lobby itself
+  const me = players.find(p => p.isHost && p.id === socket.id);
+  if (me) isHost = true;
+});
+
+// Host of the new play-again lobby
+socket.on('play-again-hosted', ({ code, mapIndex, players, availableColors, lobbyMode: lm }) => {
+  if (_playAgainTimerId) { clearInterval(_playAgainTimerId); _playAgainTimerId = null; }
+  _playAgainCode = null;
+  if (typeof cleanupGame === 'function') cleanupGame();
+  openLobby(code, mapIndex, players, true, availableColors, lm);
+});

@@ -176,6 +176,14 @@
   <!-- ───── GAME CANVAS (shown after start) ───── -->
   <div id="screen-game" class="screen">
     <canvas id="game-canvas"></canvas>
+    <!-- Exit button (top-right) -->
+    <button id="btn-exit-game" class="exit-game-btn" title="Exit to menu">✕</button>
+    <!-- Play Again overlay (shown at end of game) -->
+    <div id="play-again-overlay" class="play-again-overlay hidden">
+      <button id="btn-play-again" class="menu-btn primary play-again-btn">Play Again</button>
+      <div id="play-again-timer" class="play-again-timer"></div>
+      <button id="btn-exit-after-game" class="menu-btn secondary exit-after-btn">Exit to Menu</button>
+    </div>
     <!-- HUD Overlay -->
     <div class="game-hud" id="game-hud">
       <div class="hud-hp-bar"><div class="hud-hp-fill" id="hud-hp-fill"></div><span class="hud-hp-text" id="hud-hp-text">1000/1000</span></div>

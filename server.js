@@ -57,6 +57,7 @@ io.on('connection', (socket) => {
     lobbies.set(code, lobby);
     socket.join(code);
     socket.lobbyCode = code;
+    socket.playerName = playerName;
 
     socket.emit('game-hosted', {
       code,
@@ -88,6 +89,7 @@ io.on('connection', (socket) => {
     lobby.players.set(socket.id, { name: playerName, color, fighterId: fighterId || 'fighter' });
     socket.join(upperCode);
     socket.lobbyCode = upperCode;
+    socket.playerName = playerName;
 
     // Tell the joiner
     socket.emit('game-joined', {
@@ -370,6 +372,160 @@ io.on('connection', (socket) => {
         duration,
       });
     }
+  });
+
+  // ── PLAY AGAIN: create a new lobby from the old one ────────
+  // First person to click creates the lobby; everyone else joins the same one.
+  // Priority: original host becomes host of new lobby IF they click in time.
+  socket.on('request-play-again', () => {
+    const oldCode = socket.lobbyCode;
+    if (!oldCode) return;
+    const oldLobby = lobbies.get(oldCode);
+    if (!oldLobby) return;
+
+    // If a play-again lobby already exists for this game, auto-join it
+    if (oldLobby._playAgainCode) {
+      const remaining = Math.max(0, Math.ceil((oldLobby._playAgainDeadline - Date.now()) / 1000));
+      if (remaining > 0) {
+        // Auto-join the existing play-again lobby
+        _joinPlayAgainLobby(socket, oldLobby._playAgainCode, oldCode, oldLobby);
+      } else {
+        socket.emit('play-again-expired');
+      }
+      return;
+    }
+
+    // Create a new lobby with same settings
+    const newCode = generateCode();
+    const wasHost = oldLobby.host === socket.id;
+    const newLobby = {
+      host: socket.id,
+      mapIndex: oldLobby.mapIndex,
+      mode: oldLobby.mode || 'ffa',
+      players: new Map(),
+      _fromPlayAgain: true,
+      _originalHost: oldLobby.host,  // track original host for priority
+    };
+    // Add the requester as first player
+    const pName = socket.playerName || 'Player';
+    const pColor = PLAYER_COLORS[0];
+    const pFighter = (oldLobby.players.get(socket.id) || {}).fighterId || 'fighter';
+    newLobby.players.set(socket.id, { name: pName, color: pColor, fighterId: pFighter });
+    lobbies.set(newCode, newLobby);
+
+    // Mark old lobby so others can find the play-again code
+    oldLobby._playAgainCode = newCode;
+    oldLobby._playAgainDeadline = Date.now() + 5000;
+
+    // Move requester to new lobby room
+    socket.leave(oldCode);
+    socket.join(newCode);
+    socket.lobbyCode = newCode;
+    oldLobby.players.delete(socket.id);
+
+    // Tell the requester they're hosting the new lobby
+    socket.emit('play-again-hosted', {
+      code: newCode,
+      mapIndex: newLobby.mapIndex,
+      players: lobbyPlayerList(newLobby),
+      availableColors: getAvailableColors(newLobby),
+      lobbyMode: newLobby.mode,
+    });
+
+    // Tell all remaining players in old lobby about the play-again opportunity
+    io.to(oldCode).emit('play-again-offered', { code: newCode, countdown: 5 });
+
+    // After 5 seconds, clean up old lobby reference and finalize host
+    setTimeout(() => {
+      delete oldLobby._playAgainCode;
+      delete oldLobby._playAgainDeadline;
+      // Clean up old lobby if empty
+      if (oldLobby.players.size === 0) {
+        lobbies.delete(oldCode);
+      }
+    }, 5500);
+
+    console.log(`Play-again: ${pName} created new lobby ${newCode} from ${oldCode}`);
+  });
+
+  // Helper: join an existing play-again lobby
+  function _joinPlayAgainLobby(sock, newCode, oldCode, oldLobby) {
+    const newLobby = lobbies.get(newCode);
+    if (!newLobby) {
+      sock.emit('play-again-expired');
+      return;
+    }
+    // Already in the new lobby?
+    if (sock.lobbyCode === newCode) return;
+
+    const maxPlayers = (newLobby.mode === 'teams2' || newLobby.mode === 'teams3') ? 6 : 4;
+    if (newLobby.players.size >= maxPlayers) {
+      sock.emit('join-error', { message: 'New lobby is full.' });
+      return;
+    }
+
+    // Leave old lobby
+    if (oldLobby) {
+      oldLobby.players.delete(sock.id);
+      sock.leave(oldCode);
+      if (oldLobby.players.size === 0 && !oldLobby._playAgainCode) {
+        lobbies.delete(oldCode);
+      } else if (oldLobby.host === sock.id) {
+        const nextHost = oldLobby.players.keys().next().value;
+        if (nextHost) oldLobby.host = nextHost;
+      }
+    }
+
+    // Add to new lobby
+    const pName = sock.playerName || 'Player';
+    const available = getAvailableColors(newLobby);
+    const pColor = available[0] || '#ffffff';
+    const pFighter = (oldLobby && oldLobby.players.get(sock.id) || {}).fighterId || 'fighter';
+    newLobby.players.set(sock.id, { name: pName, color: pColor, fighterId: pFighter });
+    sock.join(newCode);
+    sock.lobbyCode = newCode;
+
+    // If this player was the original host, promote them to host of the new lobby
+    if (newLobby._originalHost === sock.id) {
+      newLobby.host = sock.id;
+      // Tell this player they're the host
+      sock.emit('play-again-hosted', {
+        code: newCode,
+        mapIndex: newLobby.mapIndex,
+        players: lobbyPlayerList(newLobby),
+        availableColors: getAvailableColors(newLobby),
+        lobbyMode: newLobby.mode,
+      });
+    } else {
+      // Tell this player they've joined
+      sock.emit('play-again-joined', {
+        code: newCode,
+        mapIndex: newLobby.mapIndex,
+        players: lobbyPlayerList(newLobby),
+        availableColors: getAvailableColors(newLobby),
+        lobbyMode: newLobby.mode,
+      });
+    }
+
+    // Tell everyone else in new lobby about the new player
+    sock.to(newCode).emit('player-joined', {
+      players: lobbyPlayerList(newLobby),
+      availableColors: getAvailableColors(newLobby),
+    });
+
+    console.log(`${pName} joined play-again lobby ${newCode}`);
+  }
+
+  socket.on('join-play-again', ({ code, fighterId }) => {
+    if (!code) return;
+    const oldCode = socket.lobbyCode;
+    const oldLobby = oldCode ? lobbies.get(oldCode) : null;
+    // Store fighterId before joining
+    if (fighterId && oldLobby) {
+      const pData = oldLobby.players.get(socket.id);
+      if (pData) pData.fighterId = fighterId;
+    }
+    _joinPlayAgainLobby(socket, code, oldCode, oldLobby);
   });
 
   // Leave / disconnect

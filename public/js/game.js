@@ -60,6 +60,9 @@ let appleTree = null; // {col, row, hp, maxHp, alive, regrowTimer, appleTimer, a
 // Game mode: 'training' | 'fight' | undefined (multiplayer)
 let gameMode = undefined;
 
+// Animation frame ID for cancellation
+let _gameLoopFrameId = null;
+
 // Achievement: track which ability keys the local player used this game
 let usedAbilityKeys = new Set();
 
@@ -302,20 +305,97 @@ function startGame(mapIndex, players, myId, mode) {
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
 
-  // Input listeners
+  // Input listeners (named so they can be removed in cleanupGame)
   window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', (e) => { keys[e.key] = false; });
-  gameCanvas.addEventListener('mousedown', (e) => { if (e.button === 0) mouseDown = true; });
-  gameCanvas.addEventListener('mouseup', (e) => { if (e.button === 0) mouseDown = false; });
-  gameCanvas.addEventListener('mousemove', (e) => { mouseX = e.clientX; mouseY = e.clientY; });
+  window.addEventListener('keyup', _onKeyUp);
+  gameCanvas.addEventListener('mousedown', _onMouseDown);
+  gameCanvas.addEventListener('mouseup', _onMouseUp);
+  gameCanvas.addEventListener('mousemove', _onMouseMove);
 
   // Build HUD
   buildHUD();
 
+  // Hide play-again overlay from any previous game
+  const _paOverlay = document.querySelector('#play-again-overlay');
+  if (_paOverlay) _paOverlay.classList.add('hidden');
+  _gameEnded = false;
+
   gameRunning = true;
   lastTime = performance.now();
   lastWallClock = Date.now();
-  requestAnimationFrame(gameLoop);
+  deathOverlayTimer = 0;
+  diedInOtherWorld = false;
+  if (_gameLoopFrameId) cancelAnimationFrame(_gameLoopFrameId);
+  _gameLoopFrameId = requestAnimationFrame(gameLoop);
+}
+
+// Named input handlers (so cleanupGame can remove them)
+function _onKeyUp(e) { keys[e.key] = false; }
+function _onMouseDown(e) { if (e.button === 0) mouseDown = true; }
+function _onMouseUp(e) { if (e.button === 0) mouseDown = false; }
+function _onMouseMove(e) { mouseX = e.clientX; mouseY = e.clientY; }
+
+// Game-ended state (set by onGameOver / checkWinCondition)
+let _gameEnded = false;
+
+// ── CLEANUP: tear down in-game state so we can start fresh ──
+function cleanupGame() {
+  gameRunning = false;
+  _gameEnded = false;
+
+  // Cancel pending animation frame
+  if (_gameLoopFrameId) {
+    cancelAnimationFrame(_gameLoopFrameId);
+    _gameLoopFrameId = null;
+  }
+
+  // Remove input listeners
+  window.removeEventListener('keydown', onKeyDown);
+  window.removeEventListener('keyup', _onKeyUp);
+  window.removeEventListener('resize', resizeCanvas);
+  if (gameCanvas) {
+    gameCanvas.removeEventListener('mousedown', _onMouseDown);
+    gameCanvas.removeEventListener('mouseup', _onMouseUp);
+    gameCanvas.removeEventListener('mousemove', _onMouseMove);
+  }
+
+  // Reset input state
+  for (const k in keys) delete keys[k];
+  mouseDown = false;
+
+  // Reset game state
+  gamePlayers = [];
+  projectiles = [];
+  combatLog = [];
+  localPlayer = null;
+  localPlayerId = null;
+  gameMode = undefined;
+  isHostAuthority = false;
+  remoteInputs = {};
+  zoneInset = 0;
+  zoneTimer = ZONE_INTERVAL;
+  spectateIndex = -1;
+  freeCamX = 0;
+  freeCamY = 0;
+  deathOverlayTimer = 0;
+  diedInOtherWorld = false;
+  appleTree = null;
+  window._spikeEntities = [];
+
+  // Hide play-again overlay
+  const paOverlay = document.querySelector('#play-again-overlay');
+  if (paOverlay) paOverlay.classList.add('hidden');
+
+  // Clear gameLoop scheduled frames
+  if (gameLoop._lastBroadcast) gameLoop._lastBroadcast = 0;
+  if (gameLoop._lastInputSend) gameLoop._lastInputSend = 0;
+  if (gameLoop._lastPosSend) gameLoop._lastPosSend = 0;
+}
+
+// Show play-again overlay (called after game ends)
+function _showPlayAgainOverlay() {
+  const overlay = document.querySelector('#play-again-overlay');
+  if (overlay) overlay.classList.remove('hidden');
 }
 
 function createPlayerState(p, spawn, fighter) {
@@ -345,6 +425,8 @@ function createPlayerState(p, spawn, fighter) {
     totalDamageTaken: 0,
     specialUnlocked: false,
     specialUsed: false,
+    specialGraceTimer: 0,  // 3s grace period after unlocking before decay starts
+    specialDecayTimer: 0,  // 5s decay period — bar drains to 0
     // Buffs / debuffs
     supportBuff: 0,        // seconds remaining of 50% dmg boost
     buffSlowed: 0,         // seconds remaining of Buff slow debuff
@@ -611,7 +693,7 @@ function gameLoop(now) {
     }
   }
 
-  requestAnimationFrame(gameLoop);
+  _gameLoopFrameId = requestAnimationFrame(gameLoop);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -755,6 +837,27 @@ function updateGame(dt) {
                 ally.effects.push({ type: 'team-heal', timer: 0.3 });
               }
             }
+          }
+        }
+      }
+    }
+
+    // Special bar decay timer: 3s grace → 5s drain → reset if unused
+    if (p.alive && p.specialUnlocked && !p.specialUsed) {
+      if (p.specialGraceTimer > 0) {
+        // Grace period: bar stays full
+        p.specialGraceTimer -= wallDt;
+      } else if (p.specialDecayTimer < 5) {
+        // Decay period: bar drains over 5 seconds
+        p.specialDecayTimer += wallDt;
+        if (p.specialDecayTimer >= 5) {
+          // Time's up: reset special
+          p.specialUnlocked = false;
+          p.totalDamageTaken = 0;
+          p.specialGraceTimer = 0;
+          p.specialDecayTimer = 0;
+          if (p.id === localPlayerId) {
+            showPopup('💨 Special expired!');
           }
         }
       }
@@ -3133,10 +3236,11 @@ function cpuAttack(cpu, params) {
 
   // Special
   if (cpu.specialUnlocked && !cpu.specialUsed) {
+    // CPUs get more urgent about using special during decay
+    const decayUrgent = cpu.specialGraceTimer <= 0 && cpu.specialDecayTimer > 2;
     if (isPoker) {
-      const closeRange = 3 * GAME_TILE;
       const mediumRange = 10 * GAME_TILE;
-      if (dist < mediumRange) {
+      if (dist < mediumRange || decayUrgent) {
         cpuUseSpecialPoker(cpu, params);
         return;
       }
@@ -3148,12 +3252,12 @@ function cpuAttack(cpu, params) {
       cpuUseSpecial1x(cpu);
       return;
     } else if (isCricket) {
-      if (dist < 10 * GAME_TILE) {
+      if (dist < 10 * GAME_TILE || decayUrgent) {
         cpuUseSpecialCricket(cpu, target);
         return;
       }
     } else if (isDeer) {
-      if (dist < 10 * GAME_TILE) {
+      if (dist < 10 * GAME_TILE || decayUrgent) {
         cpuUseSpecialDeer(cpu, target);
         return;
       }
@@ -3163,7 +3267,7 @@ function cpuAttack(cpu, params) {
       return;
     } else if (isCat) {
       // Exploding Kitten: spawn kittens when enemy nearby
-      if (dist < 10 * GAME_TILE) {
+      if (dist < 10 * GAME_TILE || decayUrgent) {
         cpuUseSpecialCat(cpu);
         return;
       }
@@ -7612,20 +7716,24 @@ function dealDamage(attacker, target, amount, viaSummon) {
 
   // Track damage taken for special unlock (target's counter)
   target.totalDamageTaken += amount;
-  if (!target.specialUnlocked && target.totalDamageTaken >= target.maxHp * 2) {
+  if (!target.specialUnlocked && !target.specialUsed && target.totalDamageTaken >= target.maxHp * 2) {
     target.specialUnlocked = true;
+    target.specialGraceTimer = 3;  // 3s grace before decay starts
+    target.specialDecayTimer = 0;
     if (target.id === localPlayerId) {
-      showPopup('⚡ SPECIAL UNLOCKED! [SPACE]');
+      showPopup('⚡ SPECIAL UNLOCKED! [SPACE] (8s to use!)');
     }
   }
 
   // Track damage dealt for attacker's special unlock too
   if (attacker && attacker.alive) {
     attacker.totalDamageTaken += amount;
-    if (!attacker.specialUnlocked && attacker.totalDamageTaken >= attacker.maxHp * 2) {
+    if (!attacker.specialUnlocked && !attacker.specialUsed && attacker.totalDamageTaken >= attacker.maxHp * 2) {
       attacker.specialUnlocked = true;
+      attacker.specialGraceTimer = 3;
+      attacker.specialDecayTimer = 0;
       if (attacker.id === localPlayerId) {
-        showPopup('⚡ SPECIAL UNLOCKED! [SPACE]');
+        showPopup('⚡ SPECIAL UNLOCKED! [SPACE] (8s to use!)');
       }
     }
   }
@@ -7951,6 +8059,7 @@ function onZoneSync(newInset, newTimer) {
 
 function onGameOver(winnerId, winnerName, winningTeam) {
   gameRunning = false;
+  _gameEnded = true;
   const cw = gameCanvas.width;
   const ch = gameCanvas.height;
   gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
@@ -7970,6 +8079,7 @@ function onGameOver(winnerId, winnerName, winningTeam) {
     if (isMyTeam && typeof trackMPWin === 'function') {
       trackMPWin(localPlayer ? localPlayer.fighter.id : selectedFighterId);
     }
+    _showPlayAgainOverlay();
     return;
   }
 
@@ -8017,6 +8127,7 @@ function onGameOver(winnerId, winnerName, winningTeam) {
     gameCtx.textAlign = 'center';
     gameCtx.fillText('DRAW', cw / 2, ch / 2);
   }
+  _showPlayAgainOverlay();
 }
 
 function onRemoteDeath(playerId) {
@@ -11621,8 +11732,30 @@ function updateHUD() {
 
   // Special meter
   const specThresh = lp.maxHp * 2;
-  const specFrac = Math.min(1, lp.totalDamageTaken / specThresh);
-  document.querySelector('#hud-special-fill').style.width = (specFrac * 100) + '%';
+  let specFrac;
+  if (lp.specialUsed) {
+    specFrac = 0; // used — empty
+  } else if (lp.specialUnlocked) {
+    if (lp.specialGraceTimer > 0) {
+      specFrac = 1; // grace period — full
+    } else {
+      specFrac = Math.max(0, 1 - lp.specialDecayTimer / 5); // draining
+    }
+  } else {
+    specFrac = Math.min(1, lp.totalDamageTaken / specThresh); // charging
+  }
+  const specFill = document.querySelector('#hud-special-fill');
+  specFill.style.width = (specFrac * 100) + '%';
+  // Color: gold while charging, green during grace, red during decay
+  if (lp.specialUnlocked && !lp.specialUsed) {
+    if (lp.specialGraceTimer > 0) {
+      specFill.style.background = '#2ecc71'; // green: ready
+    } else {
+      specFill.style.background = '#e94560'; // red: draining
+    }
+  } else {
+    specFill.style.background = ''; // default gold/orange gradient
+  }
 
   // Ability cooldowns
   const cds = [
@@ -11684,6 +11817,7 @@ function checkWinCondition() {
     if (!localPlayer.alive && gameRunning) {
       const place = alive.length + 1; // they were eliminated, so their place = alive count + 1
       gameRunning = false;
+      _gameEnded = true;
       const cw = gameCanvas.width;
       const ch = gameCanvas.height;
       gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
@@ -11693,14 +11827,13 @@ function checkWinCondition() {
       gameCtx.fillStyle = '#e94560';
       const suffix = place === 2 ? 'nd' : place === 3 ? 'rd' : 'th';
       gameCtx.fillText(place + suffix + ' PLACE', cw / 2, ch / 2);
-      gameCtx.font = 'bold 14px "Press Start 2P", monospace';
-      gameCtx.fillStyle = '#ccc';
-      gameCtx.fillText('Refresh to play again', cw / 2, ch / 2 + 50);
+      _showPlayAgainOverlay();
       return;
     }
     // Victory if last alive
     if (alive.length <= 1) {
       gameRunning = false;
+      _gameEnded = true;
       const cw = gameCanvas.width;
       const ch = gameCanvas.height;
       gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
@@ -11756,9 +11889,7 @@ function checkWinCondition() {
         const winnerName = alive.length === 1 ? alive[0].name : 'Nobody';
         gameCtx.fillText(winnerName + ' WINS', cw / 2, ch / 2);
       }
-      gameCtx.font = 'bold 14px "Press Start 2P", monospace';
-      gameCtx.fillStyle = '#ccc';
-      gameCtx.fillText('Refresh to play again', cw / 2, ch / 2 + 80);
+      _showPlayAgainOverlay();
     }
     return;
   }
@@ -11890,6 +12021,8 @@ function buildGameStateSnapshot() {
     specialUnlocked: p.specialUnlocked,
     specialUsed: p.specialUsed,
     totalDamageTaken: p.totalDamageTaken,
+    specialGraceTimer: p.specialGraceTimer || 0,
+    specialDecayTimer: p.specialDecayTimer || 0,
     // Auto-heal state
     noDamageTimer: p.noDamageTimer || 0,
     healTickTimer: p.healTickTimer || 0,
@@ -12114,6 +12247,8 @@ function onRemoteGameState(snapshot) {
     p.specialUnlocked = sp.specialUnlocked;
     p.specialUsed = sp.specialUsed;
     p.totalDamageTaken = sp.totalDamageTaken;
+    p.specialGraceTimer = sp.specialGraceTimer || 0;
+    p.specialDecayTimer = sp.specialDecayTimer || 0;
     // Auto-heal state
     p.noDamageTimer = sp.noDamageTimer || 0;
     p.healTickTimer = sp.healTickTimer || 0;
