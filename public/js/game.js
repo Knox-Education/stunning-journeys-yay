@@ -79,13 +79,24 @@ let _lastDealDamageWasM1 = false;
 const CPU_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Ghost', 'Havoc'];
 const CPU_COLORS = ['#e67e22', '#1abc9c', '#9b59b6', '#e74c3c', '#3498db', '#f1c40f'];
 
+// Power Special threshold: 3× max HP if fighter has achievement unlocked, 2× otherwise
+function getSpecialThreshold(p) {
+  const hasPower = typeof isMove4Unlocked === 'function' && isMove4Unlocked(p.fighter.id);
+  return p.maxHp * (hasPower ? 3 : 2);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // START GAME
 // ═══════════════════════════════════════════════════════════════
 function startGame(mapIndex, players, myId, mode) {
   gameCanvas = document.querySelector('#game-canvas');
   gameCtx = gameCanvas.getContext('2d');
-  gameMap = MAPS[mapIndex];
+  // Deep-copy the map so apple tree tile overrides don't permanently mutate MAPS
+  const srcMap = MAPS[mapIndex];
+  gameMap = {
+    ...srcMap,
+    tiles: srcMap.tiles.map(row => row.slice()),
+  };
   localPlayerId = myId;
   gameMode = mode;
   usedAbilityKeys = new Set();
@@ -110,16 +121,16 @@ function startGame(mapIndex, players, myId, mode) {
     }
   }
 
-  // Pick spawn points at opposite corners/edges of the map
+  // Pick spawn points spread around corners and edges — need 7 unique for up to 6 CPUs + 1 player
   const spawnCandidates = [
-    { r: 1, c: 1 },
-    { r: 1, c: gameMap.cols - 2 },
-    { r: gameMap.rows - 2, c: 1 },
-    { r: gameMap.rows - 2, c: gameMap.cols - 2 },
-    { r: Math.floor(gameMap.rows / 2), c: 1 },
-    { r: 1, c: Math.floor(gameMap.cols / 2) },
-    { r: gameMap.rows - 2, c: Math.floor(gameMap.cols / 2) },
-    { r: Math.floor(gameMap.rows / 2), c: gameMap.cols - 2 },
+    { r: 1, c: 1 },                                                          // top-left
+    { r: 1, c: gameMap.cols - 2 },                                            // top-right
+    { r: gameMap.rows - 2, c: 1 },                                            // bottom-left
+    { r: gameMap.rows - 2, c: gameMap.cols - 2 },                              // bottom-right
+    { r: 1, c: Math.floor(gameMap.cols / 2) },                                 // top-center
+    { r: gameMap.rows - 2, c: Math.floor(gameMap.cols / 2) },                   // bottom-center
+    { r: Math.floor(gameMap.rows / 2), c: 1 },                                 // mid-left
+    { r: Math.floor(gameMap.rows / 2), c: gameMap.cols - 2 },                   // mid-right
   ];
   // Filter to walkable and pick unique positions
   const validSpawns = spawnCandidates.filter((s) => {
@@ -127,16 +138,31 @@ function startGame(mapIndex, players, myId, mode) {
     const t = gameMap.tiles[s.r][s.c];
     return t === TILE.GROUND || t === TILE.GRASS;
   });
-  // Fallback: if not enough valid spawns, add shuffled walkable tiles
-  if (validSpawns.length < players.length) {
+  // Ensure at least 7 spawns (1 player + up to 6 CPUs) — add shuffled walkable tiles as fallback
+  const requiredSpawns = 7;
+  if (validSpawns.length < requiredSpawns) {
     shuffleArray(walkable);
     for (const w of walkable) {
       if (!validSpawns.some((s) => s.r === w.r && s.c === w.c)) {
+        // Ensure minimum distance from existing spawns (at least 4 tiles)
+        const tooClose = validSpawns.some(s => Math.abs(s.r - w.r) + Math.abs(s.c - w.c) < 4);
+        if (tooClose) continue;
         validSpawns.push(w);
-        if (validSpawns.length >= players.length) break;
+        if (validSpawns.length >= requiredSpawns) break;
+      }
+    }
+    // If still not enough, add without distance constraint
+    if (validSpawns.length < requiredSpawns) {
+      for (const w of walkable) {
+        if (!validSpawns.some((s) => s.r === w.r && s.c === w.c)) {
+          validSpawns.push(w);
+          if (validSpawns.length >= requiredSpawns) break;
+        }
       }
     }
   }
+  // Shuffle spawns so each game has varied placement
+  shuffleArray(validSpawns);
 
   // Reset zone
   zoneInset = 0;
@@ -162,6 +188,11 @@ function startGame(mapIndex, players, myId, mode) {
     if (gp.fighter && gp.fighter.abilities && gp.fighter.abilities.length > 5) {
       const fAbil = gp.fighter.abilities[5];
       if (fAbil.cooldown > 0) gp.cdF = fAbil.cooldown;
+    }
+    // Unstable: assign random speed for the whole game
+    if (gp.fighter && gp.fighter.id === 'unstable') {
+      gp.unstableRandomSpeed = 1.5 + Math.random() * 3.5; // 1.5 to 5.0
+      gp.unstableOriginalFighter = gp.fighter;
     }
   }
 
@@ -198,7 +229,7 @@ function startGame(mapIndex, players, myId, mode) {
     gamePlayers.push(dummy);
     dummyRespawnTimer = 0;
     // Spawn a practice bot that fights back (easy difficulty)
-    const botFighters = getAllFighterIds().filter(f => f !== localPlayer.fighter.id && f !== 'moderator');
+    const botFighters = getAllFighterIds().filter(f => f !== localPlayer.fighter.id && f !== 'moderator' && f !== 'unstable');
     const botFighterId = botFighters[Math.floor(Math.random() * botFighters.length)];
     const botFighter = getFighter(botFighterId);
     const botSpawn = validSpawns[1] || { r: centerR + 3, c: centerC + 3 };
@@ -216,16 +247,17 @@ function startGame(mapIndex, players, myId, mode) {
     gamePlayers.push(bot);
   } else if (gameMode === 'fight' || gameMode === 'fight-hard') {
     // Fight: CPU opponents
-    const allFighters = getAllFighterIds().filter(f => f !== 'moderator');
+    const allFighters = getAllFighterIds().filter(f => f !== 'moderator' && f !== 'dogtooth' && f !== 'explodingcat' && f !== 'unstable');
     const difficulties = gameMode === 'fight-hard'
-      ? ['expert', 'expert', 'expert', 'expert']
+      ? ['expert', 'expert', 'expert', 'expert', 'expert', 'expert']
       : ['easy', 'medium', 'hard', 'hard'];
     const shuffledNames = CPU_NAMES.slice().sort(() => Math.random() - 0.5);
     const shuffledColors = CPU_COLORS.slice().sort(() => Math.random() - 0.5);
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < difficulties.length; i++) {
       const cpuFighterId = allFighters[Math.floor(Math.random() * allFighters.length)];
       const cpuFighter = getFighter(cpuFighterId);
-      const cpuSpawn = validSpawns[(i + 1) % validSpawns.length];
+      // Use spawn index i+1 (index 0 is the local player) — all unique due to 7+ valid spawns
+      const cpuSpawn = validSpawns[(i + 1) < validSpawns.length ? (i + 1) : i % validSpawns.length];
       const cpu = createPlayerState(
         { id: 'cpu-' + i, name: shuffledNames[i], color: shuffledColors[i % shuffledColors.length], fighterId: cpuFighterId },
         cpuSpawn,
@@ -382,9 +414,13 @@ function cleanupGame() {
   appleTree = null;
   window._spikeEntities = [];
 
-  // Hide play-again overlay
+  // Hide play-again overlay and reset button state
   const paOverlay = document.querySelector('#play-again-overlay');
   if (paOverlay) paOverlay.classList.add('hidden');
+  const paBtn = document.querySelector('#btn-play-again');
+  if (paBtn) { paBtn.disabled = false; paBtn.textContent = 'Play Again'; }
+  const paTimer = document.querySelector('#play-again-timer');
+  if (paTimer) paTimer.textContent = '';
 
   // Clear gameLoop scheduled frames
   if (gameLoop._lastBroadcast) gameLoop._lastBroadcast = 0;
@@ -396,6 +432,11 @@ function cleanupGame() {
 function _showPlayAgainOverlay() {
   const overlay = document.querySelector('#play-again-overlay');
   if (overlay) overlay.classList.remove('hidden');
+  // Reset play-again button state so it's clickable for every game
+  const btn = document.querySelector('#btn-play-again');
+  if (btn) { btn.disabled = false; btn.textContent = 'Play Again'; }
+  const timerEl = document.querySelector('#play-again-timer');
+  if (timerEl) timerEl.textContent = '';
 }
 
 function createPlayerState(p, spawn, fighter) {
@@ -560,6 +601,54 @@ function createPlayerState(p, spawn, fighter) {
     dragonBeamAimNy: 0,
     dragonRoarActive: false,     // roar speed buff active
     dragonSummonId: null,        // id of active summon (ochre or lich)
+    // Dog Tooth-specific state
+    dogtoothBleedTimers: [],     // [{targetId, dps, remaining}] on victims
+    dogtoothOurielId: null,      // id of Ouriel summon
+    dogtoothSmileTimer: 0,       // seconds remaining of Smile Tapes
+    dogtoothSmileDmg: 0,         // boosted M1 damage during Smile
+    dogtoothPuppetGod: false,    // Kill The Puppet God chosen (revive on death)
+    dogtoothPuppetUsed: false,   // already revived once
+    dogtoothReviveDmgMult: 1,    // 1.5× after revive
+    dogtoothMoonUsed: false,     // The Moon Woke Up used
+    dogtoothSpecialChoice: null, // 'puppet' or 'moon' or null
+    dogtoothChoiceTimer: 0,      // auto-confirm timer for special
+    dogtoothMoonX: 0,            // moon impact X
+    dogtoothMoonY: 0,            // moon impact Y
+    dogtoothMoonTimer: 0,        // moon delay timer
+    dogtoothMoonRadius: 0,       // moon impact radius
+    dogtoothMoonDmg: 0,          // moon damage
+    dogtoothInComplex: false,    // in The Complex (F ability arena)
+    dogtoothComplexRoomId: null, // id of the Room in The Complex
+    dogtoothFUsed: false,        // F already used this game
+    // Illusion-specific state
+    illusionInvisTimer: 0,       // seconds remaining of invisibility
+    illusionCopyId: null,        // id of illusion copy summon (E ability)
+    illusionDodgeTargetId: null, // id of the player whose attacks to dodge
+    illusionDodgeTimer: 0,       // seconds remaining of dodge from Teleattack
+    illusionTimeFreezeTimer: 0,  // seconds remaining of time freeze (T ability)
+    illusionSpecialInvis: false, // special-granted invisibility (SPACE)
+    illusionSpecialCopyIds: [],  // ids of 3 illusion copies from special
+    illusionSeeGrassTimer: 0,   // seconds remaining of grass-see-through (F)
+    illusionPositionHistory: [], // position history for rewind [{x,y,t}]
+    // Unstable-specific state
+    unstableOriginalFighter: null, // saved original fighter object
+    unstableRandomSpeed: 0,       // random speed assigned at game start
+    unstableInfantryIds: [],      // ids of unstable infantry summons
+    unstableSummonId: null,       // id of unstable random summon
+    // Power Special state
+    pokerDebtTarget: null,        // id of poker who put this player in debt
+    pokerDebtHits: 0,             // hits remaining to clear debt (5)
+    cricketTrophyId: null,        // id of cricket trophy entity
+    cricketTrophyShield: false,   // untouchable while trophy alive
+    filbusDinoIds: [],            // ids of Prehistoric Emergence dinosaurs
+    onexSlasherId: null,          // id of Slasher summon
+    bleedTimers: [],              // [{dps, remaining}] generic bleeding
+    noliGuest666Id: null,         // id of Guest666 summon
+    catImplodingKittenId: null,   // id of Imploding Kitten summon
+    napoleonPowerCannonIds: [],   // ids of Full Power cannons
+    napoleonCavalryIds: [],       // ids of Full Power cavalry
+    dragonSummonId2: null,        // 2nd dragon summon (Double Trouble)
+    dndD20DeathsRemaining: 0,    // Super Lucky deaths remaining
   };
 }
 
@@ -719,7 +808,8 @@ function updateGame(dt) {
     // Local movement prediction so our own character feels responsive
     if (localPlayer.alive && !localPlayer.specialAiming && localPlayer.stunned <= 0
         && !localPlayer.isCraftingChair && !localPlayer.isEatingChair
-        && !localPlayer.noliVoidRushActive && !localPlayer.noliVoidStarAiming) {
+        && !localPlayer.noliVoidRushActive && !localPlayer.noliVoidStarAiming
+        && !(localPlayer.dogtoothSmileTimer > 0) && !localPlayer.dogtoothInComplex) {
       updateMovement(dt);
     }
     // Tick effect timers locally so visual effects render smoothly (host still sends authoritative effects)
@@ -865,8 +955,8 @@ function updateGame(dt) {
 
     // Zone damage: hurt players outside the safe zone
     if (p.alive && zoneInset > 0 && !p.isSummon) {
-      // Skip backrooms players — they're in another dimension
-      if (p.inBackrooms) continue;
+      // Skip backrooms/Complex players — they're in another dimension
+      if (p.inBackrooms || p.dogtoothInComplex) continue;
       const pCol = Math.floor(p.x / GAME_TILE);
       const pRow = Math.floor(p.y / GAME_TILE);
       if (pCol < zoneInset || pCol >= gameMap.cols - zoneInset ||
@@ -934,7 +1024,7 @@ function updateGame(dt) {
       if (p.id === localPlayerId) {
         for (const target of gamePlayers) {
           if (target.id === p.id || !target.alive || target.isSummon) continue;
-          if (target.inBackrooms) continue; // backrooms players immune
+          if (target.inBackrooms || target.dogtoothInComplex) continue; // backrooms/complex players immune
           const dx = target.x - p.x; const dy = target.y - p.y;
           const viewRange = CAMERA_RANGE * GAME_TILE * 2;
           if (Math.sqrt(dx * dx + dy * dy) <= viewRange) {
@@ -962,6 +1052,34 @@ function updateGame(dt) {
         p.healTickTimer = 0;
         pt.remaining -= wallDt;
         if (pt.remaining <= 0) p.poisonTimers.splice(pi, 1);
+      }
+      if (p.hp <= 0 && p.alive) {
+        // Dog Tooth Puppet God: revive on death
+        if (p.dogtoothPuppetGod && !p.dogtoothPuppetUsed && !p.isSummon) {
+          p.dogtoothPuppetUsed = true;
+          p.hp = Math.floor(p.maxHp * 0.5);
+          p.dogtoothReviveDmgMult = 1.5;
+          if (p.id === localPlayerId) combatLog.push({ text: '💀 Kill The Puppet God! Revived with half HP! (1.5× dmg taken)', timer: 5, color: '#ff4444' });
+        } else {
+          p.hp = 0;
+          p.alive = false;
+          p.effects.push({ type: 'death', timer: 2 });
+          if (p.id === localPlayerId) { freeCamX = p.x; freeCamY = p.y; spectateIndex = -1; deathOverlayTimer = 0; }
+        }
+      }
+    }
+
+    // Tick bleeding timers (Power Special bleeding)
+    if (p.bleedTimers && p.bleedTimers.length > 0 && p.alive) {
+      for (let bi = p.bleedTimers.length - 1; bi >= 0; bi--) {
+        const bt = p.bleedTimers[bi];
+        const bleedDmg = bt.dps * wallDt;
+        p.hp -= bleedDmg;
+        p.noDamageTimer = 0;
+        p.isHealing = false;
+        p.healTickTimer = 0;
+        bt.remaining -= wallDt;
+        if (bt.remaining <= 0) p.bleedTimers.splice(bi, 1);
       }
       if (p.hp <= 0 && p.alive) {
         p.hp = 0;
@@ -1212,6 +1330,180 @@ function updateGame(dt) {
       }
     }
 
+    // ── Dog Tooth timers ──
+    if (p.fighter && p.fighter.id === 'dogtooth' && p.alive) {
+      // Smile Tapes: auto-chase nearest enemy + timer countdown
+      if (p.dogtoothSmileTimer > 0) {
+        p.dogtoothSmileTimer -= wallDt;
+        if (p.dogtoothSmileTimer <= 0) {
+          p.dogtoothSmileTimer = 0;
+          p.dogtoothSmileDmg = 0;
+          if (p.id === localPlayerId) combatLog.push({ text: '😈 Smile Tapes wore off.', timer: 3, color: '#888' });
+        } else {
+          // Auto-chase nearest enemy
+          let nearDist = Infinity, nearTarget = null;
+          for (const t of gamePlayers) {
+            if (t.id === p.id || !t.alive || (t.isSummon && t.summonOwner === p.id)) continue;
+            if (gameMode === 'teams' && p.team && t.team === p.team) continue;
+            const d = Math.sqrt((t.x - p.x) ** 2 + (t.y - p.y) ** 2);
+            if (d < nearDist) { nearDist = d; nearTarget = t; }
+          }
+          if (nearTarget) {
+            const dx = nearTarget.x - p.x; const dy = nearTarget.y - p.y;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            const speed = (p.fighter.speed || 1.6) * GAME_TILE * 1.1; // 10% faster during smile
+            const moveX = (dx / dist) * speed * wallDt;
+            const moveY = (dy / dist) * speed * wallDt;
+            const newX = p.x + moveX; const newY = p.y + moveY;
+            const pr = GAME_TILE * PLAYER_RADIUS_RATIO;
+            if (canMoveTo(newX, newY, pr)) { p.x = newX; p.y = newY; }
+            else if (canMoveTo(newX, p.y, pr)) { p.x = newX; }
+            else if (canMoveTo(p.x, newY, pr)) { p.y = newY; }
+            // Auto-fire M1 when close
+            if (nearDist < 1.5 * GAME_TILE && p.cdM1 <= 0) {
+              const abil0 = p.fighter.abilities[0];
+              p.cdM1 = abil0.cooldown || 1.5;
+              let dmg = 500; // smile damage
+              if (p.supportBuff > 0) dmg *= 1.5;
+              dealDamage(p, nearTarget, dmg);
+              if (!nearTarget.poisonTimers) nearTarget.poisonTimers = [];
+              nearTarget.poisonTimers.push({ sourceId: p.id, dps: 10, remaining: 5 });
+              p.effects.push({ type: 'stab', timer: 0.2, aimNx: dx / dist, aimNy: dy / dist });
+            }
+          }
+        }
+      }
+      // Moon impact timer
+      if (p.dogtoothMoonTimer > 0) {
+        p.dogtoothMoonTimer -= wallDt;
+        if (p.dogtoothMoonTimer <= 0) {
+          // MOON IMPACT
+          const moonX = p.dogtoothMoonX || p.x;
+          const moonY = p.dogtoothMoonY || p.y;
+          const moonR = p.dogtoothMoonRadius || (8 * GAME_TILE);
+          const moonDmg = p.dogtoothMoonDmg || 1200;
+          for (const target of gamePlayers) {
+            if (target.id === p.id || !target.alive) continue;
+            if (target.isSummon && target.summonOwner === p.id) continue;
+            if (gameMode === 'teams' && p.team && target.team === p.team) continue;
+            const d = Math.sqrt((target.x - moonX) ** 2 + (target.y - moonY) ** 2);
+            if (d < moonR) {
+              dealDamage(p, target, moonDmg);
+              target.effects.push({ type: 'hit', timer: 0.5 });
+            }
+          }
+          p.effects.push({ type: 'moon-impact', timer: 1.5 });
+          if (p.id === localPlayerId) combatLog.push({ text: '🌙 THE MOON CRASHES DOWN!', timer: 4, color: '#ffeeaa' });
+          p.dogtoothMoonTimer = 0;
+        }
+      }
+      // Complex Room DPS aura
+      if (p.dogtoothInComplex && p.dogtoothComplexRoomId) {
+        const room = gamePlayers.find(r => r.id === p.dogtoothComplexRoomId);
+        if (room && room.alive) {
+          // Room deals 30 DPS constantly while in the Complex
+          const auraDmg = 30 * wallDt;
+          p.hp -= auraDmg;
+          p.noDamageTimer = 0;
+          p.isHealing = false;
+            if (p.hp <= 0) {
+              // Dog Tooth Puppet God: revive on death
+              if (p.dogtoothPuppetGod && !p.dogtoothPuppetUsed && !p.isSummon) {
+                p.dogtoothPuppetUsed = true;
+                p.hp = Math.floor(p.maxHp * 0.5);
+                p.dogtoothReviveDmgMult = 1.5;
+                if (p.id === localPlayerId) combatLog.push({ text: '💀 Kill The Puppet God! Revived with half HP! (1.5× dmg taken)', timer: 5, color: '#ff4444' });
+              } else {
+                p.hp = 0; p.alive = false;
+                p.effects.push({ type: 'death', timer: 2 });
+                if (p.id === localPlayerId) { freeCamX = p.x; freeCamY = p.y; spectateIndex = -1; deathOverlayTimer = 0; }
+              }
+            }
+        } else {
+          // Room killed → exit Complex, return to normal world at spawn
+          p.dogtoothInComplex = false;
+          if (p.spawnX != null && p.spawnY != null) {
+            p.x = p.spawnX; p.y = p.spawnY;
+          } else {
+            const safe = getRandomSafePosition(); p.x = safe.x; p.y = safe.y;
+          }
+          if (p.id === localPlayerId) combatLog.push({ text: '⚔️ Room defeated! THE FINAL BATTLE WON! Teleported back.', timer: 5, color: '#ffd700' });
+          p.effects.push({ type: 'complex-exit', timer: 2.0 });
+        }
+      }
+    }
+    // ── Illusion timers ──
+    // Tick Illusion invisibility (E ability)
+    if (p.illusionInvisTimer > 0) {
+      p.illusionInvisTimer = Math.max(0, p.illusionInvisTimer - wallDt);
+      if (p.illusionInvisTimer <= 0 && p.id === localPlayerId) {
+        combatLog.push({ text: '👻 Invisibility wore off.', timer: 3, color: '#888' });
+      }
+    }
+    // Tick Illusion dodge timer (M1 teleattack)
+    if (p.illusionDodgeTimer > 0) {
+      p.illusionDodgeTimer = Math.max(0, p.illusionDodgeTimer - wallDt);
+      if (p.illusionDodgeTimer <= 0) p.illusionDodgeTargetId = null;
+    }
+    // Tick Illusion time freeze timer
+    if (p.illusionTimeFreezeTimer > 0) p.illusionTimeFreezeTimer = Math.max(0, p.illusionTimeFreezeTimer - wallDt);
+    // Tick Illusion see-grass timer (F ability)
+    if (p.illusionSeeGrassTimer > 0) p.illusionSeeGrassTimer = Math.max(0, p.illusionSeeGrassTimer - wallDt);
+    // Illusion special: check if all copies are dead → end special invis
+    if (p.illusionSpecialInvis && p.illusionSpecialCopyIds && p.illusionSpecialCopyIds.length > 0) {
+      const anyCopyAlive = p.illusionSpecialCopyIds.some(cid => {
+        const c = gamePlayers.find(cp => cp.id === cid);
+        return c && c.alive;
+      });
+      if (!anyCopyAlive) {
+        p.illusionSpecialInvis = false;
+        p.illusionSpecialCopyIds = [];
+        if (p.id === localPlayerId) combatLog.push({ text: '👻 All illusions destroyed! You are visible!', timer: 3, color: '#ff4444' });
+      }
+    }
+    // Record position history for rewind (Illusion R)
+    if (p.alive && !p.isSummon) {
+      if (!p.illusionPositionHistory) p.illusionPositionHistory = [];
+      p.illusionPositionHistory.push({ x: p.x, y: p.y, t: Date.now() });
+      // Keep only last 5 seconds of history
+      const cutoff = Date.now() - 5000;
+      while (p.illusionPositionHistory.length > 0 && p.illusionPositionHistory[0].t < cutoff) {
+        p.illusionPositionHistory.shift();
+      }
+    }
+    // Ouriel summon: heal owner, track hits
+    if (p.isSummon && p.summonType === 'ouriel' && p.alive) {
+      const owner = gamePlayers.find(o => o.id === p.summonOwner);
+      if (owner && owner.alive) {
+        owner.hp = Math.min(owner.maxHp, owner.hp + (p.ourielHealPerSec || 40) * wallDt);
+      }
+    }
+    // Ouriel→Room: deal 20 DPS to its own owner (punishment for Ouriel being destroyed)
+    if (p.isSummon && p.summonType === 'ouriel-room' && p.alive) {
+      const dps = 20;
+      const owner = gamePlayers.find(o => o.id === p.summonOwner);
+      if (owner && owner.alive) {
+        const d = Math.sqrt((owner.x - p.x) ** 2 + (owner.y - p.y) ** 2);
+        if (d < 5 * GAME_TILE) {
+          const dmg = dps * wallDt;
+          owner.hp -= dmg;
+          owner.noDamageTimer = 0;
+          owner.isHealing = false;
+          if (owner.hp <= 0 && owner.alive) {
+            if (owner.dogtoothPuppetGod && !owner.dogtoothPuppetUsed && !owner.isSummon) {
+              owner.dogtoothPuppetUsed = true;
+              owner.hp = Math.floor(owner.maxHp * 0.5);
+              owner.dogtoothReviveDmgMult = 1.5;
+              if (owner.id === localPlayerId) combatLog.push({ text: '💀 Kill The Puppet God! Revived with half HP! (1.5× dmg taken)', timer: 5, color: '#ff4444' });
+            } else {
+              owner.hp = 0; owner.alive = false;
+              owner.effects.push({ type: 'death', timer: 2 });
+            }
+          }
+        }
+      }
+    }
+
     // Tick Noli Void Rush dash
     if (p.noliVoidRushActive && p.alive) {
       p.noliVoidRushTimer -= wallDt;
@@ -1298,8 +1590,8 @@ function updateGame(dt) {
           if (p.intimidated > 0) dmg *= 0.5;
           const _vrTargetWasAlive = t.alive;
           dealDamage(p, t, Math.round(dmg));
-          // Achievement: Noli Void Rush kills in MP
-          if (_vrTargetWasAlive && !t.alive && p.id === localPlayerId && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard') {
+          // Achievement: Noli Void Rush kills in MP (not team mode)
+          if (_vrTargetWasAlive && !t.alive && p.id === localPlayerId && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard' && gameMode !== 'teams') {
             _noliVoidRushKillsThisGame++;
             if (_noliVoidRushKillsThisGame >= 2 && typeof trackNoliVoidRushAch === 'function') {
               trackNoliVoidRushAch();
@@ -1492,7 +1784,8 @@ function updateGame(dt) {
       }
 
       // NOTE: p.x/p.y for remote players is updated by onRemotePosition (no applyRemoteMovement needed)
-      if (inp.mouseDown && p.cdM1 <= 0) applyRemoteAbility(p, 'M1', inp);
+      // Skip manual M1 during Smile Tapes (auto-chase handles M1 attacks)
+      if (inp.mouseDown && p.cdM1 <= 0 && !(p.dogtoothSmileTimer > 0)) applyRemoteAbility(p, 'M1', inp);
       // Dragon breath: stop when remote player releases mouse
       if (p.dragonBreathActive && !inp.mouseDown) {
         p.dragonBreathActive = false;
@@ -1554,9 +1847,8 @@ function updateGame(dt) {
   // ── Backrooms tick ──
   for (const p of gamePlayers) {
     if (!p.alive || !p.inBackrooms) continue;
-    p.backroomsTimer -= dt;
-    // 10 DPS while trapped in backrooms
-    const brDmg = Math.round(10 * wallDt);
+    // 20 DPS while trapped in backrooms
+    const brDmg = Math.round(20 * wallDt);
     if (brDmg > 0) dealDamage(null, p, brDmg);
     // Check if reached door
     const doorDx = p.x - p.backroomsDoorX;
@@ -1565,9 +1857,10 @@ function updateGame(dt) {
       _exitBackrooms(p, 'escaped');
       continue;
     }
-    // Auto-escape after 30s
-    if (p.backroomsTimer <= 0) {
-      _exitBackrooms(p, 'timeout');
+    // Auto-exit only when 2 non-summon players left and one is in backrooms
+    const aliveNonSummon = gamePlayers.filter(q => q.alive && !q.isSummon);
+    if (aliveNonSummon.length <= 2 && aliveNonSummon.some(q => q.inBackrooms)) {
+      _exitBackrooms(p, 'final-two');
       continue;
     }
   }
@@ -1616,7 +1909,8 @@ function updateGame(dt) {
   }
 
   // M1 – auto-fire while mouse held (only if alive)
-  if (localPlayer.alive && mouseDown && localPlayer.cdM1 <= 0) {
+  // Skip during Smile Tapes — auto-chase handles M1 attacks
+  if (localPlayer.alive && mouseDown && localPlayer.cdM1 <= 0 && !(localPlayer.dogtoothSmileTimer > 0)) {
     const _m1NonHost = (gameMode === undefined || gameMode === 'teams') && !isHostAuthority;
     if (!_m1NonHost) useAbility('M1');
     // Non-host M1 is relayed via mouseDown in player-input, host runs it
@@ -1628,7 +1922,8 @@ function updateGame(dt) {
   }
 
   // CPU AI update (use wallDt for consistent timer behaviour with player)
-  if (gameMode === 'fight' || gameMode === 'fight-hard') {
+  // Also run in multiplayer host mode so illusion clones, noli clones, etc. get AI
+  if (gameMode === 'fight' || gameMode === 'fight-hard' || isHostAuthority) {
     updateCPUs(wallDt);
   }
 
@@ -1752,7 +2047,8 @@ function updateMovement(dt) {
   }
 
   let speed = localPlayer.fighter.speed;
-  // Unstable Eye: 30% speed boost
+  // Unstable: use random speed
+  if (localPlayer.unstableOriginalFighter && localPlayer.unstableRandomSpeed) speed = localPlayer.unstableRandomSpeed;  // Unstable Eye: 30% speed boost
   if (localPlayer.unstableEyeTimer > 0) speed *= 1.3;
   // Napoleon Cavalry: 2.5x speed boost
   if (localPlayer.napoleonCavalry) speed *= 2.5;
@@ -1763,8 +2059,8 @@ function updateMovement(dt) {
     const src = gamePlayers.find(p => p.id === localPlayer.modFearSourceId);
     if (src && src.alive) {
       const fdx = localPlayer.x - src.x; const fdy = localPlayer.y - src.y;
-      const mdx = (keysDown.d || keysDown.ArrowRight ? 1 : 0) - (keysDown.a || keysDown.ArrowLeft ? 1 : 0);
-      const mdy = (keysDown.s || keysDown.ArrowDown ? 1 : 0) - (keysDown.w || keysDown.ArrowUp ? 1 : 0);
+      const mdx = (keys['d'] || keys['D'] || keys['ArrowRight'] ? 1 : 0) - (keys['a'] || keys['A'] || keys['ArrowLeft'] ? 1 : 0);
+      const mdy = (keys['s'] || keys['S'] || keys['ArrowDown'] ? 1 : 0) - (keys['w'] || keys['W'] || keys['ArrowUp'] ? 1 : 0);
       if (fdx * mdx + fdy * mdy > 0) speed *= 2.0; // running away
     }
   }
@@ -1777,6 +2073,8 @@ function updateMovement(dt) {
   if (localPlayer.dragonFlying) speed *= 2.5; // same as Napoleon cavalry
   if (localPlayer.dragonBreathActive) speed *= 0.5;
   if (localPlayer.dragonBeamCharging || localPlayer.dragonBeamRecovery > 0) speed = 0;
+  // Dog Tooth: Smile Tapes overrides movement (handled in update loop), Smile speed boost
+  if (localPlayer.dogtoothSmileTimer > 0) speed = 0; // movement is auto-chase
   // Buff slow debuff
   if (localPlayer.buffSlowed > 0) speed *= 0.6;
   // Cricket Wicket line: 50% speed boost when on the line between both wickets
@@ -2043,6 +2341,8 @@ function updateProjectiles(dt) {
         if (target.isSummon && target.summonOwner === p.ownerId && target.summonType !== 'dnd-orc') continue;
         // Skip backrooms players (they're in another dimension)
         if (target.inBackrooms) continue;
+        // Skip Complex players (isolated in Final Battle)
+        if (target.dogtoothInComplex) continue;
         // Skip teammates in team mode (projectiles shouldn't hit allies)
         if (gameMode === 'teams' && owner) {
           const ownerTeam = owner.isSummon ? (gamePlayers.find(o => o.id === owner.summonOwner) || {}).team : owner.team;
@@ -2062,7 +2362,7 @@ function updateProjectiles(dt) {
           if (p.dndFireball) {
             const aoeR = p.aoeRadius || (1.5 * GAME_TILE);
             for (const t2 of gamePlayers) {
-              if (t2.id === p.ownerId || !t2.alive || t2.inBackrooms) continue;
+              if (t2.id === p.ownerId || !t2.alive || t2.inBackrooms || t2.dogtoothInComplex) continue;
               if (t2.isSummon && t2.summonOwner === p.ownerId && t2.summonType !== 'dnd-orc') continue;
               if (gameMode === 'teams' && owner) {
                 const oT = owner.isSummon ? (gamePlayers.find(o => o.id === owner.summonOwner) || {}).team : owner.team;
@@ -2154,6 +2454,7 @@ function updateSummons(dt) {
   for (const s of gamePlayers) {
     if (!s.isSummon || !s.alive) continue;
     if (s.summonType === 'noli-clone') continue; // Noli clones use full CPU AI
+    if (s.summonType === 'illusion-copy' || s.summonType === 'illusion-special-copy') continue; // Illusion copies use full CPU AI
     if (s.stunned > 0) continue;
 
     const owner = gamePlayers.find(p => p.id === s.summonOwner);
@@ -2282,8 +2583,8 @@ function updateSummons(dt) {
         if (dist < radius * 2) {
           const _kitTargetWasAlive = bestTarget.alive;
           dealDamage(owner || s, bestTarget, s.summonDamage, true);
-          // Achievement: Cat kitten kills
-          if (_kitTargetWasAlive && !bestTarget.alive && owner && owner.id === localPlayerId && !bestTarget.isSummon) {
+          // Achievement: Cat kitten kills (not team mode)
+          if (_kitTargetWasAlive && !bestTarget.alive && owner && owner.id === localPlayerId && !bestTarget.isSummon && gameMode !== 'teams') {
             _catKittenKillsThisGame++;
             if (_catKittenKillsThisGame >= 2 && typeof trackCatKittenAch === 'function') {
               trackCatKittenAch();
@@ -2306,13 +2607,7 @@ function updateSummons(dt) {
       if (bestTarget && s.summonAttackTimer <= 0) {
         const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        // Gamble-style random damage: 100-1000
-        const roll = Math.random();
-        let dmg;
-        if (roll < 0.5) dmg = 100 + Math.floor(Math.random() * 200);       // 100-300
-        else if (roll < 0.8) dmg = 300 + Math.floor(Math.random() * 200);   // 300-500
-        else if (roll < 0.95) dmg = 500 + Math.floor(Math.random() * 300);  // 500-800
-        else dmg = 800 + Math.floor(Math.random() * 200);                   // 800-1000
+        const dmg = 100;
         const speed = s.summonProjectileSpeed || 30;
         const nx = dx / dist; const ny = dy / dist;
         projectiles.push({
@@ -2440,9 +2735,11 @@ function updateSummons(dt) {
         const newY = s.y + ny * moveSpeed;
         if (canMoveTo(newX, s.y, radius)) s.x = newX;
         if (canMoveTo(s.x, newY, radius)) s.y = newY;
-        // Touch = instant kill
+        // Touch = instant kill (bypass all damage reduction)
         if (dist < radius * 2 && s.summonAttackTimer <= 0) {
-          dealDamage(owner || s, prey, s.summonDamage, true);
+          prey.hp = 0;
+          prey.alive = false;
+          prey.effects.push({ type: 'death', timer: 2 });
           s.summonAttackTimer = s.summonAttackCD || 0.5;
         }
       } else if (!prey || !prey.alive || !prey.inBackrooms) {
@@ -2471,7 +2768,7 @@ function updateSummons(dt) {
         }
       }
     } else if (s.summonType === 'room') {
-      // Room (Boisvert): chase its specific target + constant 40 DPS regardless of distance
+      // Room (Boisvert): chase its specific target + constant 40 DPS + melee on contact
       if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
       const prey = s.summonTargetId ? gamePlayers.find(t => t.id === s.summonTargetId) : null;
       if (prey && prey.alive) {
@@ -2489,6 +2786,11 @@ function updateSummons(dt) {
         const dmgThisTick = Math.round(roomDPS * dt);
         if (dmgThisTick > 0) {
           dealDamage(owner || s, prey, dmgThisTick, true);
+        }
+        // Melee attack on contact
+        if (dist < GAME_TILE * 1.2 && s.summonAttackTimer <= 0) {
+          dealDamage(owner || s, prey, 150, true);
+          s.summonAttackTimer = 1.5;
         }
       } else if (!prey || !prey.alive) {
         // Target died — Room despawns
@@ -2722,10 +3024,251 @@ function updateSummons(dt) {
           }
         }
       }
+    } else if (s.summonType === 'ouriel') {
+      // Ouriel: follow owner (stay close)
+      if (owner && owner.alive) {
+        const dx = owner.x - s.x; const dy = owner.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        if (dist > 2 * GAME_TILE) {
+          const moveSpeed = (s.summonSpeed || 2.0) * GAME_TILE * dt;
+          const nx = dx / dist; const ny = dy / dist;
+          const newX = s.x + nx * moveSpeed;
+          const newY = s.y + ny * moveSpeed;
+          if (canMoveTo(newX, s.y, radius)) s.x = newX;
+          if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        }
+      }
+    } else if (s.summonType === 'ouriel-room') {
+      // Ouriel→Room: chase its owner (hostile), DPS handled in update loop
+      const owner = gamePlayers.find(o => o.id === s.summonOwner && o.alive);
+      if (owner) {
+        const dx = owner.x - s.x; const dy = owner.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 1.5) * GAME_TILE * dt;
+        if (dist > 1.0 * GAME_TILE) {
+          const nx = dx / dist; const ny = dy / dist;
+          const newX = s.x + nx * moveSpeed;
+          const newY = s.y + ny * moveSpeed;
+          if (canMoveTo(newX, s.y, radius)) s.x = newX;
+          if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        }
+      }
+    } else if (s.summonType === 'complex-room') {
+      // Complex Room: chase its target (Dog Tooth), 40 DPS aura only
+      const huntTarget = gamePlayers.find(p => p.id === s.summonTargetId && p.alive);
+      if (huntTarget) {
+        const dx = huntTarget.x - s.x; const dy = huntTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 1.8) * GAME_TILE * dt;
+        if (dist > 0.8 * GAME_TILE) {
+          const nx = dx / dist; const ny = dy / dist;
+          const newX = s.x + nx * moveSpeed;
+          const newY = s.y + ny * moveSpeed;
+          if (canMoveTo(newX, s.y, radius)) s.x = newX;
+          if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        }
+      }
+    } else if (s.summonType === 'unstable-infantry') {
+      // Unstable Infantry: chase nearest enemy, melee hit teleports target to their spawn
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 2.0) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        // Melee attack: deal damage and teleport target to their spawn
+        if (dist < GAME_TILE * 1.5 && s.summonAttackTimer <= 0) {
+          dealDamage(owner || s, bestTarget, s.summonDamage, true);
+          // Teleport target to their spawn position
+          if (bestTarget.spawnRow != null && bestTarget.spawnCol != null) {
+            bestTarget.x = (bestTarget.spawnCol + 0.5) * GAME_TILE;
+            bestTarget.y = (bestTarget.spawnRow + 0.5) * GAME_TILE;
+          } else if (bestTarget.spawn) {
+            bestTarget.x = (bestTarget.spawn.c + 0.5) * GAME_TILE;
+            bestTarget.y = (bestTarget.spawn.r + 0.5) * GAME_TILE;
+          }
+          bestTarget.effects.push({ type: 'unstable-teleport', timer: 1.0 });
+          s.summonAttackTimer = s.summonAttackCD || 2.5;
+          s.effects.push({ type: 'unstable-infantry-hit', timer: 0.3 });
+          combatLog.push({ text: '⚡ Infantry teleported ' + bestTarget.name + ' to spawn!', timer: 3, color: '#ff00ff' });
+        }
+      }
+    } else if (s.summonType === 'filbus-dino') {
+      // Filbus Dinosaur: slow chase, 150 damage + 5s bleed, 3s CD
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 1.0) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        // Melee attack
+        if (dist < GAME_TILE * 1.5 && s.summonAttackTimer <= 0) {
+          dealDamage(owner || s, bestTarget, s.summonDamage || 150, true);
+          // Apply bleed
+          if (bestTarget.alive) {
+            if (!bestTarget.bleedTimers) bestTarget.bleedTimers = [];
+            bestTarget.bleedTimers.push({ dps: (s.summonBleedDps || 50), remaining: (s.summonBleedDur || 5) });
+            bestTarget.effects.push({ type: 'power-bleed', timer: (s.summonBleedDur || 5) });
+          }
+          s.summonAttackTimer = s.summonAttackCD || 3.0;
+          s.effects.push({ type: 'dino-bite', timer: 0.4 });
+        }
+      }
+    } else if (s.summonType === 'slasher') {
+      // 1X Slasher: fast chase, 150 damage, 0.5s CD
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 4.0) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        // Attack
+        if (dist < GAME_TILE * 1.5 && s.summonAttackTimer <= 0) {
+          dealDamage(owner || s, bestTarget, s.summonDamage || 150, true);
+          s.summonAttackTimer = s.summonAttackCD || 0.5;
+          s.effects.push({ type: 'slasher-slash', timer: 0.3 });
+        }
+      }
+    } else if (s.summonType === 'cricket-trophy') {
+      // Cricket Trophy: stationary, doesn't attack or move. Just exists until destroyed.
+      // No movement or attacks needed.
+    } else if (s.summonType === 'guest666') {
+      // Guest666: fast melee beast with jump ability. Lacerates (3s stun + 400dmg + bleed)
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      if (s.summonJumpTimer > 0) s.summonJumpTimer -= dt;
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 3.5) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        // Jump to target if far away and jump ready (can skip obstacles)
+        if (dist > GAME_TILE * 4 && s.summonJumpTimer <= 0) {
+          const jumpDist = Math.min(dist - GAME_TILE, GAME_TILE * 6);
+          s.x = s.x + nx * jumpDist;
+          s.y = s.y + ny * jumpDist;
+          s.summonJumpTimer = s.summonJumpCD || 8.0;
+          s.effects.push({ type: 'guest666-jump', timer: 0.6 });
+        } else {
+          const newX = s.x + nx * moveSpeed;
+          const newY = s.y + ny * moveSpeed;
+          if (canMoveTo(newX, s.y, radius)) s.x = newX;
+          if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        }
+        // Melee attack: lacerate — 3s stun + 400dmg + bleed
+        if (dist < GAME_TILE * 2 && s.summonAttackTimer <= 0) {
+          dealDamage(owner || s, bestTarget, s.summonDamage || 400, true);
+          if (bestTarget.alive) {
+            bestTarget.stunned = s.summonStunDur || 3;
+            bestTarget.effects.push({ type: 'stun', timer: s.summonStunDur || 3 });
+            if (!bestTarget.bleedTimers) bestTarget.bleedTimers = [];
+            bestTarget.bleedTimers.push({ dps: (s.summonBleedDps || 100), remaining: (s.summonBleedDur || 3) });
+            bestTarget.effects.push({ type: 'power-bleed', timer: (s.summonBleedDur || 3) });
+          }
+          s.summonAttackTimer = s.summonAttackCD || 5.0;
+          s.effects.push({ type: 'guest666-lacerate', timer: 0.5 });
+        }
+      }
+    } else if (s.summonType === 'imploding-kitten') {
+      // Imploding Kitten: stationary black hole with suction
+      if (s.blackHoleActive && s.blackHoleTimer > 0) {
+        s.blackHoleTimer -= dt;
+        const outerR = s.blackHoleRadius || (7 * GAME_TILE);
+        const innerR = s.blackHoleInnerRadius || (4 * GAME_TILE);
+        // Suck all non-immune players toward center
+        for (const target of gamePlayers) {
+          if (!target.alive || target.isSummon) continue;
+          if (target.id === s.summonOwner) continue; // cat is immune
+          if (gameMode === 'teams' && owner && owner.team && target.team === owner.team) continue;
+          const tdx = s.x - target.x; const tdy = s.y - target.y;
+          const tdist = Math.sqrt(tdx * tdx + tdy * tdy) || 1;
+          if (tdist > outerR) continue;
+          const tnx = tdx / tdist; const tny = tdy / tdist;
+          let pullStrength;
+          if (tdist <= innerR) {
+            pullStrength = 3.5 * GAME_TILE * dt;
+          } else {
+            const ratio = 1 - ((tdist - innerR) / (outerR - innerR));
+            pullStrength = (1.0 + ratio * 2.0) * GAME_TILE * dt;
+          }
+          const newX = target.x + tnx * pullStrength;
+          const newY = target.y + tny * pullStrength;
+          if (canMoveTo(newX, target.y, GAME_TILE * PLAYER_RADIUS_RATIO)) target.x = newX;
+          if (canMoveTo(target.x, newY, GAME_TILE * PLAYER_RADIUS_RATIO)) target.y = newY;
+        }
+        // Detonation at 0
+        if (s.blackHoleTimer <= 0) {
+          for (const target of gamePlayers) {
+            if (!target.alive) continue;
+            if (target.id === s.summonOwner) continue;
+            if (target.isSummon && (target.summonType === 'exploding-kitten' || target.summonType === 'imploding-kitten') && target.summonOwner === s.summonOwner) continue;
+            if (gameMode === 'teams' && owner && owner.team && !target.isSummon && target.team === owner.team) continue;
+            const tdx = target.x - s.x; const tdy = target.y - s.y;
+            const tdist = Math.sqrt(tdx * tdx + tdy * tdy);
+            if (tdist <= outerR) {
+              dealDamage(owner || s, target, s.summonDamage || 900, true);
+              target.effects.push({ type: 'blackhole-detonate', timer: 1.5 });
+            }
+          }
+          s.blackHoleActive = false;
+          s.alive = false; s.hp = 0;
+          s.effects.push({ type: 'death', timer: 2 });
+          combatLog.push({ text: '🌀 Black hole detonated! 900 damage!', timer: 4, color: '#4a0080' });
+          if (owner) owner.catImplodingKittenId = null;
+        }
+      }
+    } else if (s.summonType === 'napoleon-power-cannon') {
+      // Same AI as regular cannon
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      if (bestTarget && s.summonAttackTimer <= 0) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const speed = (s.summonProjectileSpeed || 30) * GAME_TILE / 10;
+        const nx = dx / dist; const ny = dy / dist;
+        projectiles.push({
+          x: s.x, y: s.y, vx: nx * speed, vy: ny * speed,
+          ownerId: owner ? owner.id : s.id,
+          damage: s.summonDamage || 700, timer: 999,
+          type: 'cannonball', color: '#333', fromSummon: true,
+          napoleonOwner: owner ? owner.id : s.id,
+        });
+        s.summonAttackTimer = s.summonAttackCD || 5;
+        s.effects.push({ type: 'cannon-fire', timer: 0.5 });
+      }
+    } else if (s.summonType === 'napoleon-cavalry') {
+      // Cavalry: fast melee chase, 400dmg, 2x dmg taken via napoleonCavalry flag
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 4.0) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        if (dist < GAME_TILE * 1.5 && s.summonAttackTimer <= 0) {
+          dealDamage(owner || s, bestTarget, s.summonDamage || 400, true);
+          s.summonAttackTimer = s.summonAttackCD || 2.0;
+          s.effects.push({ type: 'cavalry-charge', timer: 0.4 });
+        }
+      }
     }
 
     // Clean up summon if owner died or left the game entirely
-    if (!owner || !owner.alive) {
+    // Complex Room has owner='none' — skip cleanup for it
+    if (s.summonType !== 'complex-room' && (!owner || !owner.alive)) {
       s.alive = false;
       s.hp = 0;
       s.effects.push({ type: 'death', timer: 2 });
@@ -2751,6 +3294,33 @@ function updateSummons(dt) {
         }
         if (s.summonType === 'dnd-sidekick' && owner.dndSidekickId === s.id) owner.dndSidekickId = null;
         if ((s.summonType === 'dragon-ochre' || s.summonType === 'dragon-lich') && owner.dragonSummonId === s.id) owner.dragonSummonId = null;
+        if ((s.summonType === 'ouriel' || s.summonType === 'ouriel-room') && owner.dogtoothOurielId === s.id) owner.dogtoothOurielId = null;
+        if (s.summonType === 'unstable-infantry' && owner.unstableInfantryIds) {
+          const idx = owner.unstableInfantryIds.indexOf(s.id);
+          if (idx >= 0) owner.unstableInfantryIds.splice(idx, 1);
+        }
+        if (s.summonType === 'filbus-dino' && owner.filbusDinoIds) {
+          const idx = owner.filbusDinoIds.indexOf(s.id);
+          if (idx >= 0) owner.filbusDinoIds.splice(idx, 1);
+        }
+        if (s.summonType === 'slasher' && owner.onexSlasherId === s.id) owner.onexSlasherId = null;
+        if (s.summonType === 'cricket-trophy') {
+          if (owner.cricketTrophyId === s.id) {
+            owner.cricketTrophyId = null;
+            owner.cricketTrophyShield = false;
+          }
+        }
+        if (s.summonType === 'guest666' && owner.noliGuest666Id === s.id) owner.noliGuest666Id = null;
+        if (s.summonType === 'imploding-kitten' && owner.catImplodingKittenId === s.id) owner.catImplodingKittenId = null;
+        if (s.summonType === 'napoleon-power-cannon' && owner.napoleonPowerCannonIds) {
+          const idx = owner.napoleonPowerCannonIds.indexOf(s.id);
+          if (idx >= 0) owner.napoleonPowerCannonIds.splice(idx, 1);
+        }
+        if (s.summonType === 'napoleon-cavalry' && owner.napoleonCavalryIds) {
+          const idx = owner.napoleonCavalryIds.indexOf(s.id);
+          if (idx >= 0) owner.napoleonCavalryIds.splice(idx, 1);
+        }
+        if ((s.summonType === 'dragon-ochre' || s.summonType === 'dragon-lich') && owner.dragonSummonId2 === s.id) owner.dragonSummonId2 = null;
       }
     }
   }
@@ -2764,15 +3334,16 @@ function updateSummons(dt) {
 const AI_PARAMS = {
   easy:   { thinkDelay: 0.9, aimError: 0.25, abilityDelay: 2.0, aggroRange: 9,  retreatHp: 0.15, reactionTime: 0.6 },
   medium: { thinkDelay: 0.45, aimError: 0.12, abilityDelay: 1.0, aggroRange: 12, retreatHp: 0.25, reactionTime: 0.30 },
-  hard:   { thinkDelay: 0.18, aimError: 0.04, abilityDelay: 0.5, aggroRange: 16, retreatHp: 0.35, reactionTime: 0.10 },
+  hard:   { thinkDelay: 0.14, aimError: 0.03, abilityDelay: 0.4, aggroRange: 18, retreatHp: 0.38, reactionTime: 0.08 },
   expert: { thinkDelay: 0.12, aimError: 0.02, abilityDelay: 0.35, aggroRange: 20, retreatHp: 0.40, reactionTime: 0.06 },
 };
 
 function updateCPUs(dt) {
   for (const cpu of gamePlayers) {
     if (!cpu.isCPU || !cpu.alive || cpu.stunned > 0) continue;
-    // Skip summons handled by updateSummons (only noli-clone uses full CPU AI)
-    if (cpu.isSummon && cpu.summonType !== 'noli-clone') continue;
+    // Skip summons handled by updateSummons (noli-clone and illusion copies use full CPU AI)
+    if (cpu.isSummon && cpu.summonType !== 'noli-clone'
+        && cpu.summonType !== 'illusion-copy' && cpu.summonType !== 'illusion-special-copy') continue;
     const ai = cpu.aiState;
     if (!ai) continue; // safety: skip entities without AI state
     const params = AI_PARAMS[cpu.difficulty] || AI_PARAMS.medium;
@@ -2836,6 +3407,12 @@ function cpuChooseTarget(cpu, params) {
     if (p.id === cpu.id || !p.alive) continue;
     if (p.isSummon && p.summonOwner === cpu.id) continue; // skip own summons
     if (p.id === cpu.summonOwner) continue; // summons don't attack their owner
+    // Skip players in backrooms or Complex (isolated dimensions)
+    if (p.inBackrooms || p.dogtoothInComplex) continue;
+    // Skip Illusion players that are invisible (E or SPACE)
+    if ((p.illusionInvisTimer > 0 || p.illusionSpecialInvis) && !p.isSummon) continue;
+    // Skip Moderator with Firewall active
+    if (p.modFirewallTimer > 0) continue;
     // Check if CPU can see the player (not hidden in grass)
     if (cpuIsHidden(p, cpu)) continue;
     const dx = p.x - cpu.x; const dy = p.y - cpu.y;
@@ -2846,9 +3423,54 @@ function cpuChooseTarget(cpu, params) {
       let score = dist + hpFraction * 5 * GAME_TILE;
       // Stickiness: bias toward current target so we don't constantly switch
       if (ai.attackTarget && ai.attackTarget.id === p.id) score -= stickyBias;
+      // Fighter-specific target priority
+      const fid = cpu.fighter.id;
+      if (fid === 'deer' && p.isSummon) {
+        // Deer prioritizes summons (Spear kills them instantly)
+        score -= 4 * GAME_TILE;
+      } else if (fid === 'poker' && hpFraction < 0.4) {
+        // Poker wants to finish low-HP enemies (execute with Royal Flush)
+        score -= 6 * GAME_TILE;
+      } else if (fid === 'noli' && dist > 5 * GAME_TILE) {
+        // Noli prefers distant targets to dash toward
+        score -= 2 * GAME_TILE;
+      } else if (fid === 'illusion' && p.isSummon) {
+        // Illusion avoids summons, prefers real players
+        score += 5 * GAME_TILE;
+      } else if (fid === 'dnd' && p.isSummon && p.summonType === 'dnd-orc' && p.summonOwner === cpu.id) {
+        // D&D: heavily prioritize own orcs for GP farming
+        score -= 10 * GAME_TILE;
+      }
+      // Smart Ouriel targeting: prioritize Ouriels when close or being attacked by Dog Tooth
+      if (p.isSummon && (p.summonType === 'ouriel' || p.summonType === 'ouriel-room')) {
+        const ourielCloseRange = 5 * GAME_TILE;
+        const owner = gamePlayers.find(o => o.id === p.summonOwner);
+        const ownerIsDT = owner && owner.fighter && owner.fighter.id === 'dogtooth';
+        const beingAttackedByDT = ai.attackTarget && ownerIsDT && ai.attackTarget.id === owner.id;
+        if (dist < ourielCloseRange || beingAttackedByDT) {
+          score -= 8 * GAME_TILE; // heavy bias toward targeting Ouriels
+        }
+      }
       if (score < bestScore) {
         bestScore = score;
         bestDist = dist;
+        bestTarget = p;
+      }
+    } else if (cpu.difficulty === 'medium') {
+      // Medium: mostly nearest but also prioritize Ouriels when close and own orcs
+      let score = dist;
+      if (p.isSummon && (p.summonType === 'ouriel' || p.summonType === 'ouriel-room')) {
+        const ourielCloseRange = 4 * GAME_TILE;
+        if (dist < ourielCloseRange) {
+          score -= 5 * GAME_TILE; // bias toward nearby Ouriels
+        }
+      }
+      // D&D medium: prioritize own orcs for GP
+      if (cpu.fighter.id === 'dnd' && p.isSummon && p.summonType === 'dnd-orc' && p.summonOwner === cpu.id) {
+        score -= 6 * GAME_TILE;
+      }
+      if (score < bestDist) {
+        bestDist = score;
         bestTarget = p;
       }
     } else {
@@ -2924,6 +3546,8 @@ function cpuMove(cpu, dt, params) {
   const ai = cpu.aiState;
   const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
   let speed = cpu.fighter.speed;
+  // Unstable: use random speed
+  if (cpu.unstableOriginalFighter && cpu.unstableRandomSpeed) speed = cpu.unstableRandomSpeed;
   // Unstable Eye: 30% speed boost
   if (cpu.unstableEyeTimer > 0) speed *= 1.3;
   // Napoleon Cavalry: 2.5x speed boost
@@ -2958,8 +3582,14 @@ function cpuMove(cpu, dt, params) {
     }
   }
 
-  // Retreat if low HP
-  ai.retreating = cpu.hp / cpu.maxHp < params.retreatHp;
+  // Retreat if low HP — fighter-specific retreat thresholds
+  const fid = cpu.fighter.id;
+  let retreatThreshold = params.retreatHp;
+  // Aggressive fighters retreat later; defensive fighters retreat earlier
+  if (fid === 'dogtooth' || fid === 'cricket') retreatThreshold *= 0.7; // stay in longer
+  else if (fid === 'deer' || fid === 'poker' || fid === 'illusion') retreatThreshold *= 1.3; // retreat sooner
+  else if (fid === 'noli' && cpu.noliObservantUses < 3) retreatThreshold *= 0.8; // can escape with TP
+  ai.retreating = cpu.hp / cpu.maxHp < retreatThreshold;
 
   let goalX, goalY;
 
@@ -2970,8 +3600,8 @@ function cpuMove(cpu, dt, params) {
 
     if (ai.retreating) {
       // Run away from target
-      if (cpu.difficulty === 'expert' && appleTree && appleTree.apples.length > 0) {
-        // Expert retreat: run toward nearest apple for healing
+      if ((cpu.difficulty === 'expert' || cpu.difficulty === 'hard') && appleTree && appleTree.apples.length > 0) {
+        // Smart retreat: run toward nearest apple for healing
         let closestApple = null, closestAppleDist = Infinity;
         for (const a of appleTree.apples) {
           const ax = (a.col + 0.5) * GAME_TILE;
@@ -2991,22 +3621,104 @@ function cpuMove(cpu, dt, params) {
         goalY = cpu.y - dy / (dist || 1) * GAME_TILE * 3;
       }
     } else {
-      // Approach to ideal range based on fighter type
-      const idealRange = cpu.fighter.id === 'poker' ? 5 * GAME_TILE : cpu.fighter.id === 'filbus' ? 1.5 * GAME_TILE : cpu.fighter.id === 'cricket' ? 1.0 * GAME_TILE : cpu.fighter.id === 'deer' ? 1.0 * GAME_TILE : 1.2 * GAME_TILE;
+      // ── Fighter-specific ideal range & positioning ──
+      const fid = cpu.fighter.id;
+      const isHardPlus = cpu.difficulty === 'hard' || cpu.difficulty === 'expert';
+      const isMedPlus = isHardPlus || cpu.difficulty === 'medium';
+      let idealRange;
+      let shouldCircle = false;  // circle-strafe around target
+      let shouldAmbush = false;  // try to approach through grass
+
+      if (fid === 'poker') {
+        // Poker wants max distance to chip safely; harder CPUs keep better spacing
+        idealRange = (isHardPlus ? 5.5 : isMedPlus ? 4.5 : 3.5) * GAME_TILE;
+      } else if (fid === 'filbus') {
+        // Filbus needs to be in melee range for chair; crafts at distance
+        idealRange = (cpu.chairCharges > 0 || cpu.isCraftingChair) ? 1.5 * GAME_TILE : (isMedPlus ? 5 : 3) * GAME_TILE;
+      } else if (fid === 'onexonexonex') {
+        // 1X prefers mid range to land Entanglement, close for slash
+        idealRange = (cpu.cdE <= 0 && isMedPlus) ? 4 * GAME_TILE : 1.5 * GAME_TILE;
+      } else if (fid === 'cricket') {
+        // Cricket is short range melee; Gear Up means go in
+        idealRange = (cpu.gearUpTimer > 0 ? 0.8 : 1.0) * GAME_TILE;
+      } else if (fid === 'deer') {
+        // Deer plays far away, relying on robot; close only for Spear
+        idealRange = (cpu.deerRobotId && gamePlayers.find(p => p.id === cpu.deerRobotId && p.alive))
+          ? (isHardPlus ? 7 : 4) * GAME_TILE : 1.0 * GAME_TILE;
+      } else if (fid === 'noli') {
+        // Noli dashes in; circle-strafe between dashes
+        idealRange = (cpu.cdE <= 0 && isMedPlus) ? 5 * GAME_TILE : 1.5 * GAME_TILE;
+        shouldCircle = isHardPlus;
+      } else if (fid === 'explodingcat') {
+        // Cat needs to be very close for Scratch; faster so can afford to zigzag
+        idealRange = 0.8 * GAME_TILE;
+        shouldCircle = isMedPlus;
+      } else if (fid === 'napoleon') {
+        // Napoleon on horse charges in; otherwise sword range
+        idealRange = cpu.napoleonCavalry ? 0.8 * GAME_TILE : 1.5 * GAME_TILE;
+      } else if (fid === 'moderator') {
+        // Moderator plays safe, uses TP to bring enemies to him
+        idealRange = (isHardPlus ? 4 : 2) * GAME_TILE;
+      } else if (fid === 'dnd') {
+        // D&D depends on race — also move toward own orcs to kill them for GP
+        const race = cpu.dndRace || 'human';
+        const hasLiveOrcs = cpu.dndOrcIds && cpu.dndOrcIds.length > 0 && gamePlayers.some(p => cpu.dndOrcIds.includes(p.id) && p.alive);
+        if (hasLiveOrcs && (isHardPlus || (isMedPlus && cpu.dndOrcIds.length >= 2))) {
+          // Prioritize killing orcs: move to melee range of nearest orc
+          idealRange = 1.2 * GAME_TILE;
+        } else {
+          idealRange = race === 'elf' ? (isHardPlus ? 6 : 4) * GAME_TILE
+                     : race === 'dwarf' ? 1.2 * GAME_TILE
+                     : 1.5 * GAME_TILE;
+        }
+      } else if (fid === 'dragon') {
+        // Dragon: breath range for M1, beam at mid range
+        idealRange = (cpu.dragonBreathActive ? 3 : 4) * GAME_TILE;
+      } else if (fid === 'illusion') {
+        // Illusion sneaks up close or hides; when invisible, rush in
+        shouldAmbush = isMedPlus;
+        idealRange = (cpu.illusionInvisTimer > 0) ? 0.8 * GAME_TILE : (isHardPlus ? 3 : 1.5) * GAME_TILE;
+      } else if (fid === 'dogtooth') {
+        // Dogtooth chases aggressively; Smile mode = full rush
+        idealRange = (cpu.dogtoothSmileTimer > 0) ? 0.5 * GAME_TILE : 1.5 * GAME_TILE;
+      } else {
+        // Fighter: basic melee
+        idealRange = 1.2 * GAME_TILE;
+      }
+
       if (dist > idealRange + GAME_TILE) {
         // Move toward target
         goalX = target.x;
         goalY = target.y;
+        // Ambush: prefer grass tiles on the approach
+        if (shouldAmbush && !cpu.illusionInvisTimer) {
+          for (let angle = -1; angle <= 1; angle += 2) {
+            const testX = cpu.x + (dx / dist * Math.cos(angle * 0.4) - dy / dist * Math.sin(angle * 0.4)) * GAME_TILE * 3;
+            const testY = cpu.y + (dx / dist * Math.sin(angle * 0.4) + dy / dist * Math.cos(angle * 0.4)) * GAME_TILE * 3;
+            const tc = Math.floor(testX / GAME_TILE), tr = Math.floor(testY / GAME_TILE);
+            if (tr >= 0 && tr < gameMap.rows && tc >= 0 && tc < gameMap.cols && gameMap.tiles[tr][tc] === TILE.GRASS) {
+              goalX = testX; goalY = testY; break;
+            }
+          }
+        }
       } else if (dist < idealRange - GAME_TILE * 0.5) {
         // Too close, back off slightly
         goalX = cpu.x - dx / (dist || 1) * GAME_TILE;
         goalY = cpu.y - dy / (dist || 1) * GAME_TILE;
       } else {
-        // At ideal range — strafe
+        // At ideal range — strafe or circle
         const perpX = -dy / (dist || 1);
         const perpY = dx / (dist || 1);
-        goalX = cpu.x + perpX * ai.strafeDir * GAME_TILE * 2;
-        goalY = cpu.y + perpY * ai.strafeDir * GAME_TILE * 2;
+        if (shouldCircle) {
+          // Circle-strafe: maintain distance while orbiting
+          const orbitX = perpX * ai.strafeDir;
+          const orbitY = perpY * ai.strafeDir;
+          goalX = cpu.x + orbitX * GAME_TILE * 2;
+          goalY = cpu.y + orbitY * GAME_TILE * 2;
+        } else {
+          goalX = cpu.x + perpX * ai.strafeDir * GAME_TILE * 2;
+          goalY = cpu.y + perpY * ai.strafeDir * GAME_TILE * 2;
+        }
         // Switch strafe direction more frequently (harder CPUs strafe more)
         const strafeFlipChance = cpu.difficulty === 'expert' ? 0.06 : cpu.difficulty === 'hard' ? 0.04 : cpu.difficulty === 'medium' ? 0.025 : 0.01;
         if (Math.random() < strafeFlipChance) ai.strafeDir *= -1;
@@ -3041,12 +3753,12 @@ function cpuMove(cpu, dt, params) {
       ai.moveTarget = null;
     }
   } else {
-    const isExpert = cpu.difficulty === 'expert';
+    const isSmartCPU = cpu.difficulty === 'expert' || cpu.difficulty === 'hard';
     const centerX = (gameMap.cols / 2) * GAME_TILE;
     const centerY = (gameMap.rows / 2) * GAME_TILE;
 
-    // Expert: seek apples or apple tree area when idle
-    if (isExpert && appleTree) {
+    // Smart CPUs: seek apples or apple tree area when idle
+    if (isSmartCPU && appleTree) {
       const treeX = (appleTree.col + 1) * GAME_TILE;
       const treeY = (appleTree.row + 1) * GAME_TILE;
       // Go pick up nearby apples if we need healing
@@ -3074,7 +3786,7 @@ function cpuMove(cpu, dt, params) {
     }
 
     // Anti-corner: if near a corner, strongly push toward center
-    if (isExpert) {
+    if (isSmartCPU) {
       const mapW = gameMap.cols * GAME_TILE, mapH = gameMap.rows * GAME_TILE;
       const edgeMargin = GAME_TILE * 3;
       const nearLeft = cpu.x < edgeMargin, nearRight = cpu.x > mapW - edgeMargin;
@@ -3111,8 +3823,8 @@ function cpuMove(cpu, dt, params) {
       const toCenter = Math.sqrt((centerX - cpu.x) ** 2 + (centerY - cpu.y) ** 2) || 1;
       const toCenterX = (centerX - cpu.x) / toCenter;
       const toCenterY = (centerY - cpu.y) / toCenter;
-      if (cpu.difficulty === 'expert') {
-        // Expert: soft pull toward center (0.7 blend) — allows zone entry to avoid worse outcomes
+      if (cpu.difficulty === 'expert' || cpu.difficulty === 'hard') {
+        // Smart CPUs: soft pull toward center (0.7 blend) — allows zone entry to avoid worse outcomes
         moveX = moveX * 0.3 + toCenterX * 0.7;
         moveY = moveY * 0.3 + toCenterY * 0.7;
       } else {
@@ -3121,8 +3833,8 @@ function cpuMove(cpu, dt, params) {
         moveY = toCenterY;
       }
     }
-    // Expert: preemptive zone awareness — avoid moving INTO the zone edge
-    if (cpu.difficulty === 'expert') {
+    // Smart CPUs: preemptive zone awareness — avoid moving INTO the zone edge
+    if (cpu.difficulty === 'expert' || cpu.difficulty === 'hard') {
       const futureX = cpu.x + moveX * GAME_TILE * 2;
       const futureY = cpu.y + moveY * GAME_TILE * 2;
       const fCol = Math.floor(futureX / GAME_TILE);
@@ -3209,6 +3921,9 @@ function cpuAttack(cpu, params) {
   const target = ai.attackTarget;
   if (!target || !target.alive) return;
 
+  // Illusion E copies cannot attack at all; special copies handled below (M1 only)
+  if (cpu.illusionNoAttack) return;
+
   const dx = target.x - cpu.x; const dy = target.y - cpu.y;
   const dist = Math.sqrt(dx * dx + dy * dy);
   const fighter = cpu.fighter;
@@ -3234,13 +3949,22 @@ function cpuAttack(cpu, params) {
   // Try to use abilities in priority order: Special > R > E > T > M1
   const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
 
+  // Illusion special copies: skip all abilities, only use M1
+  if (!cpu.illusionM1Only) {
+
   // Special
   if (cpu.specialUnlocked && !cpu.specialUsed) {
     // CPUs get more urgent about using special during decay
     const decayUrgent = cpu.specialGraceTimer <= 0 && cpu.specialDecayTimer > 2;
     if (isPoker) {
+      // Poker Special (Royal Flush): Hard+ waits for close range to execute low-HP enemies.
+      // Easy/Medium use at medium range.
+      const closeRange = 3 * GAME_TILE;
       const mediumRange = 10 * GAME_TILE;
-      if (dist < mediumRange || decayUrgent) {
+      const shouldFlush = isHardPlus
+        ? ((dist < closeRange && targetHpFrac < 0.4) || decayUrgent)
+        : (dist < mediumRange || decayUrgent);
+      if (shouldFlush) {
         cpuUseSpecialPoker(cpu, params);
         return;
       }
@@ -3284,10 +4008,15 @@ function cpuAttack(cpu, params) {
       cpu.cdE = 0; cpu.cdR = 0; cpu.cdT = 0;
       return;
     } else if (isDnd) {
-      // D20: buff self (CPU solo — no teammates to buff)
-      cpu.specialUsed = true;
-      cpu.dndD20Active = true;
-      cpu.effects.push({ type: 'd20-roll', timer: 3.0 });
+      // D20: buff M1 to 650 damage. Hard+ only uses when close enough to capitalize.
+      const shouldD20 = isHardPlus
+        ? (dist < 4 * GAME_TILE || hpFrac < 0.3 || decayUrgent)
+        : (dist < 8 * GAME_TILE || decayUrgent);
+      if (shouldD20) {
+        cpu.specialUsed = true;
+        cpu.dndD20Active = true;
+        cpu.effects.push({ type: 'd20-roll', timer: 3.0 });
+      }
       return;
     } else if (isDragon) {
       // Power of Evil: summon Yellow Ochre or Lich
@@ -3337,6 +4066,56 @@ function cpuAttack(cpu, params) {
         cpu.effects.push({ type: 'summon', timer: 1.5 });
         return;
       }
+    } else if (fighter.id === 'illusion') {
+      // Illusion CPU: spawn 3 illusion copies + go invis
+      cpu.specialUsed = true;
+      cpu.illusionSpecialInvis = true;
+      cpu.illusionSpecialCopyIds = [];
+      const sAbil = fighter.abilities[4];
+      const count = sAbil.illusionCount || 3;
+      const copyHp = 500 + Math.floor(Math.random() * 101);
+      for (let i = 0; i < count; i++) {
+        const copyId = 'illusion-special-cpu-' + cpu.id + '-' + i + '-' + Date.now();
+        const safe = getRandomSafePosition();
+        const copy = createPlayerState(
+          { id: copyId, name: cpu.name, color: cpu.color || '#7f8fa6', fighterId: 'illusion' },
+          { r: Math.floor(safe.y / GAME_TILE), c: Math.floor(safe.x / GAME_TILE) }, fighter
+        );
+        copy.x = cpu.x + (Math.random() - 0.5) * GAME_TILE * 4;
+        copy.y = cpu.y + (Math.random() - 0.5) * GAME_TILE * 4;
+        const cR = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(copy.x, copy.y, cR)) { copy.x = safe.x; copy.y = safe.y; }
+        copy.hp = copyHp; copy.maxHp = copyHp;
+        copy.isSummon = true; copy.summonOwner = cpu.id;
+        copy.summonType = 'illusion-special-copy';
+        copy.isCPU = true; copy.difficulty = 'hard';
+        copy.noCloneHeal = true; copy.illusionM1Only = true;
+        copy.aiState = { moveTarget: null, attackTarget: null, thinkTimer: 0, abilityTimer: 0, lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false };
+        gamePlayers.push(copy);
+        cpu.illusionSpecialCopyIds.push(copyId);
+      }
+      cpu.effects.push({ type: 'illusion-everything', timer: 2.0 });
+      return;
+    } else if (fighter.id === 'dogtooth') {
+      // Dog Tooth CPU: 50% Puppet God, 50% Moon
+      cpu.specialUsed = true;
+      if (Math.random() < 0.5) {
+        cpu.dogtoothSpecialChoice = 'puppet';
+        cpu.dogtoothPuppetGod = true;
+      } else {
+        cpu.dogtoothSpecialChoice = 'moon';
+        cpu.dogtoothMoonUsed = true;
+        const moonAbil = fighter.abilities[4];
+        const moonRadius = (moonAbil.moonRadius || 10) * GAME_TILE;
+        const moonDelay = moonAbil.moonDelay || 3;
+        cpu.dogtoothMoonX = cpu.x;
+        cpu.dogtoothMoonY = cpu.y;
+        cpu.dogtoothMoonTimer = moonDelay;
+        cpu.dogtoothMoonRadius = moonRadius;
+        cpu.dogtoothMoonDmg = moonAbil.damage || 1200;
+        cpu.effects.push({ type: 'moon-shadow', timer: moonDelay + 1 });
+      }
+      return;
     } else {
       if (dist < 10 * GAME_TILE) {
         cpuUseSpecialFighter(cpu, target);
@@ -3345,35 +4124,78 @@ function cpuAttack(cpu, params) {
     }
   }
 
+  // F ability (Move 4) — medium+ CPUs can use F, but easy CPUs never use it
+  if (cpu.difficulty !== 'easy' && cpu.cdF <= 0 && cpu.fighter.abilities.length > 5 && cpu.move4Uses < (cpu.fighter.abilities[5].maxUses || 3)) {
+    const fAbil = cpu.fighter.abilities[5];
+    // Medium CPUs use F less frequently (50% chance per opportunity)
+    if (cpu.difficulty === 'medium' && Math.random() > 0.5) { /* skip */ }
+    else { cpuUseF(cpu, target, fAbil); }
+  }
+
+  // ── Difficulty helpers for conditional ability usage ──
+  const isHardPlus = cpu.difficulty === 'hard' || cpu.difficulty === 'expert';
+  const isMedPlus = isHardPlus || cpu.difficulty === 'medium';
+  const hpFrac = cpu.hp / cpu.maxHp;
+  const targetHpFrac = target.hp / target.maxHp;
+
   // E ability
   if (cpu.cdE <= 0) {
     if (isPoker) {
-      if (dist < 12 * GAME_TILE) {
+      // Poker E (Gamble): Hard+ saves Gamble to combo with Full House.
+      // Easy/Medium use it whenever in range.
+      const gambleRange = (isHardPlus ? 7 : 12) * GAME_TILE;
+      const shouldGamble = isHardPlus
+        ? (dist < gambleRange && (cpu.pokerFullHouseActive || targetHpFrac < 0.4))
+        : (dist < gambleRange);
+      if (shouldGamble) {
         cpuFireProjectile(cpu, target, 'card', aimAngle);
         return;
       }
     } else if (isFilbus) {
-      // Filbism (1): craft chair when not in combat range and no chairs
-      if (dist > 4 * GAME_TILE && cpu.chairCharges <= 0 && !cpu.isCraftingChair) {
+      // Filbism (1): Hard+ crafts proactively when far; Medium crafts when no chairs; Easy rarely crafts.
+      const craftDist = isHardPlus ? 3 : 4;
+      const shouldCraft = cpu.chairCharges <= (isHardPlus ? 1 : 0)
+        && dist > craftDist * GAME_TILE
+        && !cpu.isCraftingChair
+        && (cpu.difficulty !== 'easy' || Math.random() < 0.3);
+      if (shouldCraft) {
         cpu.isCraftingChair = true;
         cpu.craftTimer = fighter.abilities[1].channelTime || 10;
         return;
       }
     } else if (is1x) {
-      // Entanglement: throw swords if in range
-      if (dist < 8 * GAME_TILE) {
+      // Entanglement: Hard+ uses it to initiate (drag enemy in), then follow up with M1.
+      // Easy just uses it when close. Medium uses at mid range.
+      const entangleRange = (isHardPlus ? 8 : isMedPlus ? 6 : 4) * GAME_TILE;
+      const minEntangleDist = isHardPlus ? 2 * GAME_TILE : 0; // Hard+ won't waste at point blank
+      if (dist < entangleRange && dist > minEntangleDist) {
         cpu1xEntangle(cpu, target, aimAngle);
         return;
       }
     } else if (isCricket) {
-      // Drive: melee hit + projectile reflect
-      if (dist < 2 * GAME_TILE) {
+      // Drive: Hard+ uses Drive to reflect incoming projectiles OR stun close enemies.
+      // Easy/Medium use it only in melee range.
+      const hasIncomingProjectile = isHardPlus && projectiles.some(p => {
+        if (p.ownerId === cpu.id) return false;
+        const pdx = p.x - cpu.x, pdy = p.y - cpu.y;
+        const pDist = Math.sqrt(pdx * pdx + pdy * pdy);
+        if (pDist > 3 * GAME_TILE) return false;
+        const projSpeed = Math.sqrt(p.vx * p.vx + p.vy * p.vy) || 1;
+        return (p.vx * pdx + p.vy * pdy) / (projSpeed * pDist) < -0.3;
+      });
+      if (hasIncomingProjectile || dist < 2 * GAME_TILE) {
         cpuCricketDrive(cpu, target, aimNx, aimNy);
         return;
       }
     } else if (isDeer) {
-      // Deer's Fear: speed buff when moving away
-      if (cpu.deerFearTimer <= 0 && dist < 5 * GAME_TILE) {
+      // Deer's Fear: Hard+ uses it ONLY when retreating or when low HP.
+      // Easy uses it whenever enemy is nearby. Medium uses when below 60%.
+      const shouldFear = cpu.deerFearTimer <= 0 && dist < 5 * GAME_TILE && (
+        (cpu.difficulty === 'easy') ||
+        (cpu.difficulty === 'medium' && hpFrac < 0.6) ||
+        (isHardPlus && (ai.retreating || hpFrac < 0.4))
+      );
+      if (shouldFear) {
         cpu.cdE = fighter.abilities[1].cooldown;
         cpu.deerFearTimer = fighter.abilities[1].duration || 5;
         cpu.deerFearTargetX = target.x;
@@ -3382,27 +4204,53 @@ function cpuAttack(cpu, params) {
         return;
       }
     } else if (isNoli) {
-      // Void Rush: dash toward target
-      if (!cpu.noliVoidRushActive && !cpu.noliVoidStarAiming && dist < 8 * GAME_TILE) {
+      // Void Rush: Hard+ chains dashes to maximize damage; only dashes when target is in sweet spot.
+      // Easy just dashes whenever off cooldown. Medium checks range.
+      const voidRushRange = isHardPlus ? 6 : isMedPlus ? 8 : 10;
+      const shouldDash = !cpu.noliVoidRushActive && !cpu.noliVoidStarAiming
+        && dist < voidRushRange * GAME_TILE
+        && (isHardPlus ? dist > 2 * GAME_TILE : true); // Hard+ won't dash at point blank
+      if (shouldDash) {
         cpuNoliVoidRush(cpu, target);
         return;
       }
     } else if (isCat) {
-      // Draw: use whenever available
-      cpuCatDraw(cpu);
-      return;
+      // Draw: Hard+ saves draws for tactical moments (low HP or enemy engaged).
+      // Easy/Medium draw whenever available.
+      const shouldDraw = !isHardPlus || hpFrac < 0.6 || dist < 4 * GAME_TILE;
+      if (shouldDraw) {
+        cpuCatDraw(cpu);
+        return;
+      }
     } else if (isNapoleon) {
-      // Cavalry: toggle mount if not already mounted
-      if (!cpu.napoleonCavalry) {
+      // Cavalry: Hard+ mounts to chase injured enemies or dismounts when low HP.
+      // Easy/Medium just mount and stay mounted.
+      if (isHardPlus) {
+        if (!cpu.napoleonCavalry && (targetHpFrac < 0.5 || dist > 5 * GAME_TILE)) {
+          cpu.napoleonCavalry = true;
+          cpu.effects.push({ type: 'cavalry-mount', timer: 1.5 });
+          return;
+        } else if (cpu.napoleonCavalry && hpFrac < 0.3) {
+          // Dismount to take less damage when low HP
+          cpu.napoleonCavalry = false;
+          cpu.effects.push({ type: 'cavalry-dismount', timer: 1.0 });
+          return;
+        }
+      } else if (!cpu.napoleonCavalry) {
         cpu.napoleonCavalry = true;
         cpu.effects.push({ type: 'cavalry-mount', timer: 1.5 });
+        return;
       }
-      return;
     } else if (isModerator) {
-      // Scare: TP random enemy to self, stun, apply fear
+      // TP: Hard+ TPs the lowest HP enemy. Easy/Medium TP random.
       const enemies = gamePlayers.filter(p => p.alive && !p.isSummon && p.id !== cpu.id);
       if (enemies.length > 0) {
-        const pick = enemies[Math.floor(Math.random() * enemies.length)];
+        let pick;
+        if (isHardPlus) {
+          pick = enemies.reduce((a, b) => a.hp < b.hp ? a : b);
+        } else {
+          pick = enemies[Math.floor(Math.random() * enemies.length)];
+        }
         pick.x = cpu.x + (Math.random() - 0.5) * GAME_TILE;
         pick.y = cpu.y + (Math.random() - 0.5) * GAME_TILE;
         pick.stunned = 1;
@@ -3413,9 +4261,20 @@ function cpuAttack(cpu, params) {
       }
       return;
     } else if (isDnd) {
-      // Questing: spawn orc that chases self (CPU spawns orcs to farm GP)
+      // Questing: spawn orcs strategically based on difficulty.
+      // Expert/Hard: only farm when safe AND when not overwhelmed by existing orcs
+      // Medium: spawn if reasonably safe
+      // Easy: spawn whenever possible (can overwhelm itself)
       const abil = fighter.abilities[1];
-      if (cpu.dndOrcIds.length < 3) {
+      const liveOrcs = cpu.dndOrcIds.filter(oid => gamePlayers.some(p => p.id === oid && p.alive)).length;
+      // Expert/Hard: max 1 orc at a time, only when safe and HP is decent
+      // Medium: max 2 orcs, spawn when not too close to enemy
+      // Easy: max 3 orcs, no restrictions
+      const maxOrcs = isHardPlus ? 1 : (isMedPlus ? 2 : 3);
+      const safeToFarm = isHardPlus ? (dist > 8 * GAME_TILE && hpFrac > 0.6)
+                       : isMedPlus ? (dist > 5 * GAME_TILE || hpFrac > 0.7)
+                       : true;
+      if (liveOrcs < maxOrcs && safeToFarm) {
         cpu.cdE = abil.cooldown;
         const orcId = 'summon-' + cpu.id + '-orc-' + Date.now();
         const safe = getRandomSafePosition();
@@ -3442,9 +4301,12 @@ function cpuAttack(cpu, params) {
       }
       return;
     } else if (isDragon) {
-      // Dragon Ride: fly when low HP or to close distance
+      // Dragon Ride: Hard+ flies strategically (escape or close distance).
+      // Easy/Medium fly more loosely.
       if (!cpu.dragonFlying && !cpu.dragonBeamCharging && !cpu.dragonBeamFiring) {
-        const shouldFly = cpu.hp < cpu.maxHp * 0.3 || dist > 8 * GAME_TILE;
+        const shouldFly = isHardPlus
+          ? (hpFrac < 0.25 || (dist > 10 * GAME_TILE && targetHpFrac < 0.5))
+          : (cpu.hp < cpu.maxHp * 0.3 || dist > 8 * GAME_TILE);
         if (shouldFly) {
           cpu.cdE = fighter.abilities[1].cooldown;
           cpu.dragonFlying = true;
@@ -3452,6 +4314,69 @@ function cpuAttack(cpu, params) {
           cpu.effects.push({ type: 'dragon-fly', timer: 1.5 });
           return;
         }
+      }
+    } else if (fighter.id === 'illusion') {
+      // Illusion E: go invisible + spawn copy.
+      // ALL difficulties: only use when retreating/sneaking up, NOT in direct combat.
+      // Hard+: use to reposition and ambush from behind.
+      // Medium: use when low HP to escape. Easy: use when very low HP.
+      if (cpu.illusionInvisTimer <= 0 && !cpu.illusionSpecialInvis) {
+        const shouldInvis = isHardPlus
+          ? (ai.retreating || dist > 5 * GAME_TILE || hpFrac < 0.4)
+          : isMedPlus
+            ? (ai.retreating || hpFrac < 0.5)
+            : (hpFrac < 0.3);
+        if (shouldInvis) {
+          cpu.cdE = fighter.abilities[1].cooldown;
+          cpu.illusionInvisTimer = fighter.abilities[1].duration || 10;
+          // Kill old copy
+          if (cpu.illusionCopyId) {
+            const oldCopy = gamePlayers.find(p => p.id === cpu.illusionCopyId);
+            if (oldCopy && oldCopy.alive) { oldCopy.alive = false; oldCopy.hp = 0; }
+          }
+          const copyId = 'illusion-copy-cpu-' + cpu.id + '-' + Date.now();
+          const copy = createPlayerState(
+            { id: copyId, name: cpu.name, color: cpu.color || '#7f8fa6', fighterId: 'illusion' },
+            { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) }, fighter
+          );
+          copy.x = cpu.x; copy.y = cpu.y;
+          copy.hp = cpu.hp; copy.maxHp = cpu.maxHp;
+          copy.isSummon = true; copy.summonOwner = cpu.id;
+          copy.summonType = 'illusion-copy';
+          copy.isCPU = true; copy.difficulty = 'hard';
+          copy.noCloneHeal = true; copy.illusionNoAttack = true;
+          copy.aiState = { moveTarget: null, attackTarget: null, thinkTimer: 0, abilityTimer: 0, lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false };
+          gamePlayers.push(copy);
+          cpu.illusionCopyId = copyId;
+          cpu.effects.push({ type: 'illusion-vanish', timer: 1.0 });
+          return;
+        }
+      }
+    } else if (fighter.id === 'dogtooth') {
+      if (!cpu.dogtoothOurielId || !gamePlayers.find(p => p.id === cpu.dogtoothOurielId && p.alive)) {
+        cpu.cdE = fighter.abilities[1].cooldown;
+        const ourielId = 'ouriel-' + cpu.id + '-' + Date.now();
+        const safe = getRandomSafePosition();
+        const ourielFighter = { id: 'ouriel-summon', name: 'Ouriel', hp: 999999, healAmount: 0, healDelay: 999, healTick: 999, speed: 2.0, abilities: [] };
+        const ouriel = createPlayerState(
+          { id: ourielId, name: 'Ouriel', color: '#ddd' },
+          { r: Math.floor(safe.y / GAME_TILE), c: Math.floor(safe.x / GAME_TILE) },
+          ourielFighter
+        );
+        ouriel.x = safe.x; ouriel.y = safe.y;
+        ouriel.hp = 999999; ouriel.maxHp = 999999;
+        ouriel.isSummon = true; ouriel.summonOwner = cpu.id;
+        ouriel.summonType = 'ouriel';
+        ouriel.summonSpeed = 2.0;
+        ouriel.ourielHitsLeft = 2;
+        ouriel.ourielHealPerSec = 40;
+        ouriel.ourielRoomHp = 500;
+        ouriel.ourielRoomDPS = 40;
+        ouriel.isCPU = true;
+        gamePlayers.push(ouriel);
+        cpu.dogtoothOurielId = ourielId;
+        cpu.effects.push({ type: 'ouriel-summon', timer: 1.5 });
+        return;
       }
     } else {
       cpu.cdE = fighter.abilities[1].cooldown;
@@ -3475,16 +4400,28 @@ function cpuAttack(cpu, params) {
   // R ability
   if (cpu.cdR <= 0) {
     if (isPoker) {
+      // Blinds: Hard+ always takes Small Blind for damage reduction.
+      // Medium sometimes takes Big. Easy is random.
       cpu.cdR = fighter.abilities[2].cooldown;
-      const roll = Math.random();
-      if (roll < 0.70) { cpu.blindBuff = 'small'; cpu.blindTimer = 0; }
-      else if (roll < 0.90) { cpu.blindBuff = 'big'; cpu.blindTimer = 60; }
-      else { cpu.blindBuff = 'dealer'; cpu.blindTimer = 0; cpu.cdE = 0; }
+      if (isHardPlus) {
+        // Smart: prefer Small Blind (safe), take Dealer to reset Gamble if on CD
+        if (cpu.cdE > 15) {
+          cpu.blindBuff = 'dealer'; cpu.blindTimer = 0; cpu.cdE = 0;
+        } else {
+          cpu.blindBuff = 'small'; cpu.blindTimer = 0;
+        }
+      } else {
+        const roll = Math.random();
+        if (roll < 0.70) { cpu.blindBuff = 'small'; cpu.blindTimer = 0; }
+        else if (roll < 0.90) { cpu.blindBuff = 'big'; cpu.blindTimer = 60; }
+        else { cpu.blindBuff = 'dealer'; cpu.blindTimer = 0; cpu.cdE = 0; }
+      }
       cpu.effects.push({ type: 'blind-small', timer: 1.0 });
       return;
     } else if (isFilbus) {
-      // Filbism (2): eat chair to heal when hurt
-      if (cpu.chairCharges > 0 && cpu.hp < cpu.maxHp * 0.6 && !cpu.isEatingChair) {
+      // Filbism (2): Hard+ eats chair as soon as hurt. Easy eats only when low.
+      const eatThreshold = isHardPlus ? 0.8 : isMedPlus ? 0.6 : 0.4;
+      if (cpu.chairCharges > 0 && hpFrac < eatThreshold && !cpu.isEatingChair) {
         cpu.isEatingChair = true;
         cpu.eatTimer = fighter.abilities[2].channelTime || 3;
         cpu.eatHealPool = fighter.abilities[2].healAmount || 100;
@@ -3498,30 +4435,39 @@ function cpuAttack(cpu, params) {
         return;
       }
     } else if (isCricket) {
-      // Gear Up: use when enemy nearby and not already active
-      if (cpu.gearUpTimer <= 0 && dist < 4 * GAME_TILE) {
+      // Gear Up: Hard+ uses when enemy is committed (close + low CD on M1).
+      // Easy/Medium just pop it near enemies.
+      const gearUpRange = isHardPlus ? 3 : 4;
+      if (cpu.gearUpTimer <= 0 && dist < gearUpRange * GAME_TILE) {
         cpu.cdR = fighter.abilities[2].cooldown;
         cpu.gearUpTimer = fighter.abilities[2].duration || 10;
         cpu.effects.push({ type: 'gear-up', timer: 1.5 });
         return;
       }
     } else if (isDeer) {
-      // Deer's Seer: dodge state
-      if (cpu.deerSeerTimer <= 0 && dist < 4 * GAME_TILE && cpu.hp < cpu.maxHp * 0.5) {
+      // Deer's Seer: Hard+ uses proactively when enemy is about to attack.
+      // Easy uses only when desperate.
+      const seerThreshold = isHardPlus ? 0.7 : isMedPlus ? 0.5 : 0.35;
+      const seerRange = isHardPlus ? 5 : 4;
+      if (cpu.deerSeerTimer <= 0 && dist < seerRange * GAME_TILE && hpFrac < seerThreshold) {
         cpu.cdR = fighter.abilities[2].cooldown;
         cpu.deerSeerTimer = fighter.abilities[2].duration || 5;
         cpu.effects.push({ type: 'deer-seer', timer: fighter.abilities[2].duration || 5 });
         return;
       }
     } else if (isNoli) {
-      // Void Star: aimed area attack
-      if (!cpu.noliVoidRushActive && !cpu.noliVoidStarAiming && dist < 8 * GAME_TILE) {
+      // Void Star: Hard+ uses Void Star after stunning with Entanglement.
+      // Easy/Medium fire it whenever in range.
+      const canCombo = isHardPlus ? (target.stunned > 0 || dist < 4 * GAME_TILE) : true;
+      if (!cpu.noliVoidRushActive && !cpu.noliVoidStarAiming && dist < 8 * GAME_TILE && canCombo) {
         cpuNoliVoidStar(cpu, target);
         return;
       }
     } else if (isCat) {
-      // Attack buff when close to enemy
-      if (cpu.catAttackBuff <= 0 && dist < 3 * GAME_TILE) {
+      // Attack buff: Hard+ saves it for when close to enemy + Scratch off CD.
+      // Easy/Medium use when in range.
+      const attackRange = isHardPlus ? 2 : 3;
+      if (cpu.catAttackBuff <= 0 && dist < attackRange * GAME_TILE) {
         cpuCatAttack(cpu);
         return;
       }
@@ -3544,21 +4490,35 @@ function cpuAttack(cpu, params) {
       }
       return;
     } else if (isDnd) {
-      // Buy/Use: spend GP based on amount
+      // Buy/Use: spend GP intelligently based on difficulty and situation
       const gp = cpu.dndGP || 0;
       if (gp >= 1) {
         cpu.cdR = fighter.abilities[2].cooldown || 1;
+        // Expert/Hard: save for charm (8GP) when close, buy weapon at 5GP if charm owned,
+        //   use potion when low HP, use spell only when target is close
+        // Medium: spend at sensible thresholds
+        // Easy: spend immediately on whatever is available
         if (gp >= 8 && !cpu.dndCharm) {
-          // Buy charm + M1 buff
+          // Always buy charm when affordable — best investment
           cpu.dndGP = 0;
           cpu.dndCharm = true;
           cpu.dndWeaponBonus = (cpu.dndWeaponBonus || 0) + 50;
+        } else if (isHardPlus && gp < 8 && !cpu.dndCharm && gp >= 5 && hpFrac > 0.5) {
+          // Hard+: save for charm if HP is fine — don't spend 5GP on weapon if charm not owned yet
+          // Skip spending, keep saving
+          return;
         } else if (gp >= 5) {
           // Buy weapon upgrade
           cpu.dndGP = 0;
           cpu.dndWeaponBonus = (cpu.dndWeaponBonus || 0) + 50;
+        } else if (gp >= 2 && hpFrac < 0.4 && isMedPlus) {
+          // Medium+: if low HP with 2+ GP, buy potion instead of spell
+          cpu.dndGP = 0;
+          cpu.dndHealPool = (cpu.dndHealPool || 0) + 300;
+          return;
         } else if (gp >= 2) {
-          // Random spell
+          // Random spell — Hard+ only uses when target is in range
+          if (isHardPlus && dist > 8 * GAME_TILE) return;  // save GP, target too far
           cpu.dndGP = 0;
           const roll = Math.random();
           if (roll < 0.33) {
@@ -3611,9 +4571,15 @@ function cpuAttack(cpu, params) {
       }
       return;
     } else if (isDragon) {
-      // Dragon Beam: fire at medium range when not already charging/flying
+      // Dragon Beam: Hard+ charges beam when enemy is stunned/slowed for easier hit.
+      // Easy/Medium fire at mid range regardless.
       if (!cpu.dragonBeamCharging && !cpu.dragonBeamFiring && cpu.dragonBeamRecovery <= 0 && !cpu.dragonFlying) {
-        if (dist < 12 * GAME_TILE && dist > 3 * GAME_TILE) {
+        const beamMin = isHardPlus ? 2 : 3;
+        const beamMax = 12;
+        const shouldBeam = isHardPlus
+          ? (dist < beamMax * GAME_TILE && dist > beamMin * GAME_TILE && (target.stunned > 0 || target.buffSlowed > 0 || dist > 6 * GAME_TILE))
+          : (dist < beamMax * GAME_TILE && dist > beamMin * GAME_TILE);
+        if (shouldBeam) {
           cpu.cdR = fighter.abilities[2].cooldown;
           cpu.dragonBeamCharging = true;
           cpu.dragonBeamChargeTimer = fighter.abilities[2].chargeTime || 3;
@@ -3623,6 +4589,48 @@ function cpuAttack(cpu, params) {
           return;
         }
       }
+    } else if (fighter.id === 'illusion') {
+      // Illusion R: Rewind — Hard+ uses it when they've been pushed into a bad position.
+      // Medium uses when low HP. Easy uses randomly.
+      const shouldRewind = isHardPlus
+        ? (hpFrac < 0.4 || (ai.retreating && dist < 3 * GAME_TILE))
+        : isMedPlus
+          ? (hpFrac < 0.5)
+          : (Math.random() < 0.4);
+      if (!shouldRewind) { /* skip */ }
+      else {
+      cpu.cdR = fighter.abilities[2].cooldown;
+      const rewindTime = (fighter.abilities[2].rewindTime || 3) * 1000;
+      const now = Date.now();
+      const pRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+      for (const p of gamePlayers) {
+        if (!p.alive || p.isSummon) continue;
+        if (!p.illusionPositionHistory || p.illusionPositionHistory.length === 0) continue;
+        let bestPos = null; let bestDiff = Infinity;
+        for (const entry of p.illusionPositionHistory) {
+          const diff = Math.abs((now - entry.t) - rewindTime);
+          if (diff < bestDiff) { bestDiff = diff; bestPos = entry; }
+        }
+        if (bestPos && canMoveTo(bestPos.x, bestPos.y, pRadius)) {
+          p.x = bestPos.x; p.y = bestPos.y;
+          p.effects.push({ type: 'illusion-rewind', timer: 1.0 });
+        }
+      }
+      cpu.effects.push({ type: 'illusion-space', timer: 1.5 });
+      return;
+      }
+    } else if (fighter.id === 'dogtooth') {
+      // Smile Tapes: Hard+ uses when enemy is close and health is okay.
+      // Easy uses more recklessly.
+      const smileRange = isHardPlus ? 4 : 6;
+      const smileHpMin = isHardPlus ? 0.4 : 0.3;
+      if (cpu.dogtoothSmileTimer <= 0 && dist < smileRange * GAME_TILE && hpFrac > smileHpMin) {
+        cpu.cdR = fighter.abilities[2].cooldown;
+        cpu.dogtoothSmileTimer = fighter.abilities[2].duration || 10;
+        cpu.dogtoothSmileDmg = fighter.abilities[2].damage || 500;
+        cpu.effects.push({ type: 'smile-tapes', timer: 10 });
+        return;
+      }
     } else {
       if (dist < fighter.abilities[2].range * GAME_TILE) {
         cpuPowerSwing(cpu, target, aimNx, aimNy);
@@ -3631,14 +4639,19 @@ function cpuAttack(cpu, params) {
     }
   }
 
-  // T ability
-  if (cpu.cdT <= 0 && Math.random() < 0.3) {
+  // T ability — per-fighter strategic conditions
+  const tAbilityChance = cpu.difficulty === 'expert' ? 0.65 : cpu.difficulty === 'hard' ? 0.55 : cpu.difficulty === 'medium' ? 0.3 : 0.15;
+  if (cpu.cdT <= 0 && Math.random() < tAbilityChance) {
     if (isPoker) {
-      cpu.cdT = fighter.abilities[3].cooldown;
-      const options = [50, 100, 200, 300, 400];
-      cpu.chipChangeDmg = options[Math.floor(Math.random() * options.length)];
-      cpu.chipChangeTimer = fighter.abilities[3].duration || 30;
-      return;
+      // Chip Change: Hard+ uses when M1 damage is low. Easy uses randomly.
+      const shouldChipChange = isHardPlus ? (cpu.chipChangeDmg < 0 || cpu.chipChangeDmg < 150) : true;
+      if (shouldChipChange) {
+        cpu.cdT = fighter.abilities[3].cooldown;
+        const options = [50, 100, 200, 300, 400];
+        cpu.chipChangeDmg = options[Math.floor(Math.random() * options.length)];
+        cpu.chipChangeTimer = fighter.abilities[3].duration || 30;
+        return;
+      }
     } else if (isFilbus) {
       // Oddity Overthrow: summon a companion (block if enemy too close)
       if (!cpu.summonId) {
@@ -3698,8 +4711,10 @@ function cpuAttack(cpu, params) {
         return;
       }
     } else if (is1x) {
-      // Unstable Eye: use when enemy is nearby
-      if (cpu.unstableEyeTimer <= 0 && dist < 6 * GAME_TILE) {
+      // Unstable Eye: Hard+ uses before engaging to track enemies + speed boost.
+      // Easy uses when close.
+      const eyeRange = isHardPlus ? 10 : 6;
+      if (cpu.unstableEyeTimer <= 0 && dist < eyeRange * GAME_TILE) {
         cpu.cdT = fighter.abilities[3].cooldown;
         cpu.unstableEyeTimer = fighter.abilities[3].duration || 6;
         cpu.effects.push({ type: 'unstable-eye', timer: fighter.abilities[3].duration || 6 });
@@ -3712,14 +4727,22 @@ function cpuAttack(cpu, params) {
         return;
       }
     } else if (isDeer) {
-      // Deer T: Deer's Spear — antler stab + stun
-      if (cpu.deerSeerTimer <= 0 && dist < (fighter.abilities[3].range || 1.2) * GAME_TILE) {
-        cpuDeerSpear(cpu, target, aimNx, aimNy);
-        return;
+      // Deer T: Spear — Hard+ saves Spear for summons (killsSummons) or stunned targets.
+      // Easy/Medium just stab when in range.
+      const spearRange = (fighter.abilities[3].range || 1.2) * GAME_TILE;
+      if (cpu.deerSeerTimer <= 0 && dist < spearRange) {
+        const targetIsSummon = target.isSummon;
+        const shouldSpear = isHardPlus ? (targetIsSummon || target.stunned > 0 || targetHpFrac < 0.3) : true;
+        if (shouldSpear) {
+          cpuDeerSpear(cpu, target, aimNx, aimNy);
+          return;
+        }
       }
     } else if (isNoli) {
-      // Observant: teleport when low HP
-      if (cpu.noliObservantUses < (fighter.abilities[3].maxUses || 3) && cpu.hp < cpu.maxHp * 0.3) {
+      // Observant (teleport): Hard+ saves it as an escape tool.
+      // Easy uses it more freely.
+      const tpThreshold = isHardPlus ? 0.2 : isMedPlus ? 0.3 : 0.4;
+      if (cpu.noliObservantUses < (fighter.abilities[3].maxUses || 3) && hpFrac < tpThreshold) {
         cpuNoliObservant(cpu);
         return;
       }
@@ -3756,15 +4779,44 @@ function cpuAttack(cpu, params) {
         return;
       }
     } else if (isDnd) {
-      // Race Change: cycle races
+      // Race Change: pick race intelligently based on situation and difficulty
+      const curRace = cpu.dndRace || 'human';
+      let wantRace = curRace;
+      if (isHardPlus) {
+        // Expert/Hard: strategic race selection
+        // Elf when target is far (ranged poke), Dwarf when low HP (damage reduction),
+        // Human when chasing or farming orcs (speed)
+        const hasLiveOrcs = cpu.dndOrcIds && cpu.dndOrcIds.some(oid => gamePlayers.some(p => p.id === oid && p.alive));
+        if (hpFrac < 0.35) {
+          wantRace = 'dwarf'; // tank mode when low
+        } else if (hasLiveOrcs) {
+          wantRace = 'human'; // speed to kill orcs faster
+        } else if (dist > 5 * GAME_TILE) {
+          wantRace = 'elf'; // ranged poke at distance
+        } else if (dist < 2 * GAME_TILE) {
+          wantRace = 'dwarf'; // tanky in close fights
+        } else {
+          wantRace = 'human'; // balanced default
+        }
+      } else if (isMedPlus) {
+        // Medium: simpler logic — elf at range, dwarf when low, human otherwise
+        if (hpFrac < 0.3) wantRace = 'dwarf';
+        else if (dist > 6 * GAME_TILE) wantRace = 'elf';
+        else wantRace = 'human';
+      } else {
+        // Easy: random (original behavior)
+        const races = ['human', 'elf', 'dwarf'].filter(r => r !== curRace);
+        wantRace = races[Math.floor(Math.random() * races.length)];
+      }
+      if (wantRace === curRace) return; // don't waste cooldown switching to same race
       cpu.cdT = fighter.abilities[3].cooldown;
-      const races = ['human', 'elf', 'dwarf'].filter(r => r !== (cpu.dndRace || 'human'));
-      cpu.dndRace = races[Math.floor(Math.random() * races.length)];
+      cpu.dndRace = wantRace;
       cpu.effects.push({ type: 'race-change', timer: 1.5 });
       return;
     } else if (isDragon) {
-      // Draconic Roar: +30% speed self, +20% allies, -200HP, use once
-      if (!cpu.dragonRoarActive && cpu.hp > 300) {
+      // Draconic Roar: Hard+ only uses when HP is comfortable. Easy uses recklessly.
+      const roarHpMin = isHardPlus ? 500 : 300;
+      if (!cpu.dragonRoarActive && cpu.hp > roarHpMin) {
         cpu.cdT = fighter.abilities[3].cooldown;
         cpu.dragonRoarActive = true;
         cpu.hp -= (fighter.abilities[3].selfDamage || 200);
@@ -3772,6 +4824,39 @@ function cpuAttack(cpu, params) {
         cpu.effects.push({ type: 'dragon-roar', timer: 2 });
         return;
       }
+    } else if (fighter.id === 'illusion') {
+      // Illusion T: Time Freeze — Hard+ uses when enemy is close and about to attack.
+      // All difficulties only use when enemy is in range for follow-up.
+      const freezeRange = isHardPlus ? 5 : 8;
+      const shouldFreeze = isHardPlus
+        ? (dist < freezeRange * GAME_TILE && (targetHpFrac < 0.5 || cpu.cdM1 <= 0))
+        : (dist < freezeRange * GAME_TILE);
+      if (shouldFreeze) {
+        cpu.cdT = fighter.abilities[3].cooldown;
+        const freezeDur = fighter.abilities[3].freezeDuration || 1.5;
+        cpu.illusionTimeFreezeTimer = freezeDur;
+        for (const t of gamePlayers) {
+          if (t.id === cpu.id || !t.alive) continue;
+          if (t.isSummon && t.summonOwner === cpu.id) continue;
+          t.stunned = Math.max(t.stunned, freezeDur);
+          t.effects.push({ type: 'illusion-frozen', timer: freezeDur });
+        }
+        cpu.effects.push({ type: 'illusion-time', timer: freezeDur + 0.5 });
+        return;
+      }
+    } else if (fighter.id === 'dogtooth') {
+      cpu.cdT = fighter.abilities[3].cooldown;
+      for (const t of gamePlayers) {
+        if (t.id === cpu.id || !t.alive) continue;
+        if (t.isSummon && t.summonOwner === cpu.id) continue;
+        dealDamage(cpu, t, fighter.abilities[3].damage || 450);
+      }
+      // Self-damage
+      cpu.hp -= 600;
+      cpu.noDamageTimer = 0; cpu.isHealing = false;
+      if (cpu.hp <= 0) { cpu.hp = 0; cpu.alive = false; cpu.effects.push({ type: 'death', timer: 2 }); }
+      cpu.effects.push({ type: 'love-letter', timer: 1.5 });
+      return;
     } else {
       const sightRange = CAMERA_RANGE * GAME_TILE * 2;
       if (dist <= sightRange) {
@@ -3790,11 +4875,13 @@ function cpuAttack(cpu, params) {
     }
   }
 
+  } // end if (!cpu.illusionM1Only)
+
   // M1 — primary attack
   // Queen Bee Unicorn: blocks M1 attacks while alive (except creator)
   const cpuQueenBee = gamePlayers.find(p => p.alive && p.isSummon && p.summonType === 'queenbee-unicorn');
   const cpuQueenBeeBlocked = cpuQueenBee && cpuQueenBee.summonOwner !== cpu.id;
-  if (cpu.cdM1 <= 0 && !cpuQueenBeeBlocked) {
+  if (cpu.cdM1 <= 0 && !cpuQueenBeeBlocked && !cpu.illusionNoAttack) {
     if (isPoker) {
       if (dist < 8 * GAME_TILE) {
         cpuFireChips(cpu, target, aimAngle);
@@ -3906,11 +4993,419 @@ function cpuAttack(cpu, params) {
       } else {
         cpu.dragonBreathActive = false;
       }
+    } else if (fighter.id === 'illusion') {
+      // Illusion M1: Teleattack — melee 150, dodge attacks from hit player for 0.5s
+      const range = (fighter.abilities[0].range || 1.5) * GAME_TILE;
+      if (dist < range) {
+        const abil = fighter.abilities[0];
+        cpu.cdM1 = abil.cooldown;
+        let dmg = abil.damage || 150;
+        if (cpu.supportBuff > 0) dmg *= 1.5;
+        dealDamage(cpu, target, dmg, false);
+        _lastDealDamageWasM1 = true;
+        cpu.illusionDodgeTargetId = target.id;
+        cpu.illusionDodgeTimer = abil.dodgeDuration || 0.5;
+        cpu.effects.push({ type: 'teleattack', timer: 0.2, aimNx, aimNy });
+      }
+    } else if (fighter.id === 'dogtooth') {
+      // Dog Tooth M1: Stab — melee 150 + bleed
+      const range = (fighter.abilities[0].range || 1.5) * GAME_TILE;
+      if (dist < range) {
+        const abil = fighter.abilities[0];
+        cpu.cdM1 = abil.cooldown;
+        let dmg = abil.damage || 150;
+        if (cpu.dogtoothSmileTimer > 0) dmg = 500;
+        if (cpu.supportBuff > 0) dmg *= 1.5;
+        dealDamage(cpu, target, dmg, false);
+        _lastDealDamageWasM1 = true;
+        // Apply bleed
+        if (!target.poisonTimers) target.poisonTimers = [];
+        target.poisonTimers.push({
+          sourceId: cpu.id,
+          dps: (abil.bleedDamage || 50) / (abil.bleedDuration || 5),
+          remaining: abil.bleedDuration || 5
+        });
+        cpu.effects.push({ type: 'stab', timer: 0.2, aimNx, aimNy });
+      }
     } else {
       if (dist < fighter.abilities[0].range * GAME_TILE) {
         cpuSwordSwing(cpu, target, aimNx, aimNy);
       }
     }
+  }
+}
+
+function cpuUseF(cpu, target, fAbil) {
+  const fighter = cpu.fighter;
+  const fid = fighter.id;
+
+  if (fid === 'poker') {
+    // Full House: next move guaranteed best option
+    cpu.move4Uses++;
+    cpu.pokerFullHouseActive = true;
+    cpu.cdF = fAbil.cooldown;
+    cpu.effects.push({ type: 'full-house', timer: 2.0 });
+    return;
+  }
+
+  if (fid === 'filbus') {
+    // Analogus: only use on the real (local/human) player
+    const aliveNonSummon = gamePlayers.filter(p => p.alive && !p.isSummon);
+    if (aliveNonSummon.length <= 2) return;
+    // Find the real player (non-CPU, non-summon)
+    const realPlayer = gamePlayers.find(p => p.alive && !p.isSummon && !p.isCPU);
+    if (!realPlayer) return;
+    // 3-player HP check
+    if (aliveNonSummon.length === 3) {
+      const thirdPlayer = aliveNonSummon.find(p => p.id !== cpu.id && p.id !== realPlayer.id);
+      if (thirdPlayer && thirdPlayer.hp <= thirdPlayer.maxHp * 0.5) return;
+    }
+    cpu.move4Uses++;
+    cpu.cdF = fAbil.cooldown;
+    // Cleanup existing effects on target
+    if (realPlayer.inBackrooms) _exitBackrooms(realPlayer, 'new-analogus');
+    if (realPlayer.hasAlternate && realPlayer.alternateId) {
+      const oldAlt = gamePlayers.find(a => a.id === realPlayer.alternateId);
+      if (oldAlt && oldAlt.alive) { oldAlt.alive = false; oldAlt.hp = 0; }
+      realPlayer.hasAlternate = false; realPlayer.alternateId = null;
+    }
+    const roll = Math.random();
+    if (roll < 0.33) {
+      // Backrooms
+      const mapW = gameMap.cols, mapH = gameMap.rows;
+      let bestDoorR = -1, bestDoorC = -1, bestDoorDist = 0;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const rr = Math.floor(Math.random() * mapH);
+        const cc = Math.floor(Math.random() * mapW);
+        if (gameMap.tiles[rr] && gameMap.tiles[rr][cc] !== undefined
+            && gameMap.tiles[rr][cc] !== TILE.WATER && gameMap.tiles[rr][cc] !== TILE.ROCK) {
+          const dd = Math.sqrt((rr - Math.floor(realPlayer.y / GAME_TILE)) ** 2 +
+                               (cc - Math.floor(realPlayer.x / GAME_TILE)) ** 2);
+          if (dd > bestDoorDist) { bestDoorDist = dd; bestDoorR = rr; bestDoorC = cc; }
+        }
+      }
+      if (bestDoorR < 0) { bestDoorR = 1; bestDoorC = 1; }
+      realPlayer.inBackrooms = true;
+      realPlayer.backroomsDoorX = (bestDoorC + 0.5) * GAME_TILE;
+      realPlayer.backroomsDoorY = (bestDoorR + 0.5) * GAME_TILE;
+      realPlayer.backroomsTimer = 30;
+      const chaserId = 'br-chaser-' + realPlayer.id + '-' + Date.now();
+      const chaserFighter = getFighter('fighter');
+      const chaser = createPlayerState(
+        { id: chaserId, name: '???', color: '#8b8000', fighterId: 'fighter' },
+        { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) }, chaserFighter
+      );
+      const chaserRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+      if (canMoveTo(cpu.x, cpu.y, chaserRadius)) { chaser.x = cpu.x; chaser.y = cpu.y; }
+      else { const safe = getRandomSafePosition(); chaser.x = safe.x; chaser.y = safe.y; }
+      chaser.hp = 999999; chaser.maxHp = 999999;
+      chaser.isSummon = true; chaser.summonOwner = cpu.id; chaser.summonType = 'backrooms-chaser';
+      chaser.summonSpeed = realPlayer.fighter.speed * 1.5;
+      chaser.summonDamage = 999999; chaser.summonAttackCD = 0.5; chaser.summonAttackTimer = 0;
+      chaser.summonTargetId = realPlayer.id; chaser.isCPU = true; chaser.noCloneHeal = true;
+      gamePlayers.push(chaser);
+      realPlayer.backroomsChaserId = chaserId;
+      realPlayer.effects.push({ type: 'backrooms-enter', timer: 2.0 });
+    } else if (roll < 0.66) {
+      // Alternate
+      const altId = 'alternate-' + realPlayer.id + '-' + Date.now();
+      const alt = createPlayerState(
+        { id: altId, name: realPlayer.name, color: realPlayer.color, fighterId: realPlayer.fighter.id },
+        { r: Math.floor(realPlayer.y / GAME_TILE), c: Math.floor(realPlayer.x / GAME_TILE) }, realPlayer.fighter
+      );
+      const altRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+      let altPlaced = false;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const angle = Math.random() * Math.PI * 2;
+        const d = GAME_TILE * (6 + Math.random() * 2);
+        const tryX = realPlayer.x + Math.cos(angle) * d;
+        const tryY = realPlayer.y + Math.sin(angle) * d;
+        if (canMoveTo(tryX, tryY, altRadius)) { alt.x = tryX; alt.y = tryY; altPlaced = true; break; }
+      }
+      if (!altPlaced) { const safe = getRandomSafePosition(); alt.x = safe.x; alt.y = safe.y; }
+      alt.hp = 500; alt.maxHp = 500;
+      alt.isSummon = true; alt.summonOwner = cpu.id; alt.summonType = 'alternate';
+      alt.summonSpeed = realPlayer.fighter.speed * 0.9;
+      alt.summonDamage = 999999; alt.summonAttackCD = 0.5; alt.summonAttackTimer = 0;
+      alt.summonTargetId = realPlayer.id; alt.isCPU = true; alt.noCloneHeal = true;
+      gamePlayers.push(alt);
+      realPlayer.hasAlternate = true; realPlayer.alternateId = altId;
+      realPlayer.effects.push({ type: 'alternate-spawn', timer: 2.0 });
+    } else {
+      // Boisvert — spawn Room entities on the real player only
+      const roomId = 'room-' + realPlayer.id + '-' + Date.now();
+      const roomFighter = getFighter('fighter');
+      const room = createPlayerState(
+        { id: roomId, name: 'Room', color: '#000', fighterId: 'fighter' },
+        { r: Math.floor(realPlayer.y / GAME_TILE), c: Math.floor(realPlayer.x / GAME_TILE) }, roomFighter
+      );
+      const roomRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+      let roomPlaced = false;
+      for (let ra = 0; ra < 16; ra++) {
+        const angle = Math.random() * Math.PI * 2;
+        const d = GAME_TILE * (2 + Math.random() * 2);
+        const tryX = realPlayer.x + Math.cos(angle) * d;
+        const tryY = realPlayer.y + Math.sin(angle) * d;
+        if (canMoveTo(tryX, tryY, roomRadius)) { room.x = tryX; room.y = tryY; roomPlaced = true; break; }
+      }
+      if (!roomPlaced) { const safe = getRandomSafePosition(); room.x = safe.x; room.y = safe.y; }
+      room.hp = 500; room.maxHp = 500;
+      room.isSummon = true; room.summonOwner = cpu.id; room.summonType = 'room';
+      room.summonSpeed = 2.5; room.summonDamage = 0;
+      room.summonAttackCD = 1; room.summonAttackTimer = 0;
+      room.summonTargetId = realPlayer.id; room.roomDPS = 50;
+      room.isCPU = true; room.noCloneHeal = true;
+      gamePlayers.push(room);
+    }
+    return;
+  }
+
+  if (fid === 'onexonexonex') {
+    // c00lkidd summon
+    if (cpu.coolkiddId) return; // already has one
+    cpu.move4Uses++;
+    cpu.cdF = fAbil.cooldown;
+    const summonId = 'coolkidd-' + cpu.id + '-' + Date.now();
+    const summon = createPlayerState(
+      { id: summonId, name: 'c00lkidd', color: '#ff0000', fighterId: 'onexonexonex' },
+      { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) }, fighter
+    );
+    summon.x = cpu.x + (Math.random() - 0.5) * GAME_TILE * 2;
+    summon.y = cpu.y + (Math.random() - 0.5) * GAME_TILE * 2;
+    summon.hp = fAbil.summonHp || 500; summon.maxHp = fAbil.summonHp || 500;
+    summon.isSummon = true; summon.summonOwner = cpu.id; summon.summonType = 'coolkidd';
+    summon.summonSpeed = 0; summon.summonDamage = 0;
+    summon.summonAttackCD = fAbil.summonFireCD || 4; summon.summonAttackTimer = 0;
+    summon.summonProjectileSpeed = fAbil.projectileSpeed || 30;
+    gamePlayers.push(summon);
+    cpu.coolkiddId = summonId;
+    cpu.effects.push({ type: 'coolkidd-spawn', timer: 1.5 });
+    return;
+  }
+
+  if (fid === 'cricket') {
+    // Bowler summon
+    if (cpu.bowlerId) return;
+    cpu.move4Uses++;
+    cpu.cdF = fAbil.cooldown;
+    const summonId = 'bowler-' + cpu.id + '-' + Date.now();
+    const summon = createPlayerState(
+      { id: summonId, name: 'Bowler', color: '#228b22', fighterId: 'cricket' },
+      { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) }, fighter
+    );
+    summon.x = cpu.x + (Math.random() - 0.5) * GAME_TILE * 2;
+    summon.y = cpu.y + (Math.random() - 0.5) * GAME_TILE * 2;
+    summon.hp = fAbil.summonHp || 300; summon.maxHp = fAbil.summonHp || 300;
+    summon.isSummon = true; summon.summonOwner = cpu.id; summon.summonType = 'bowler';
+    summon.summonSpeed = 0; summon.summonDamage = fAbil.damage || 200;
+    summon.summonAttackCD = fAbil.summonFireCD || 5; summon.summonAttackTimer = 0;
+    gamePlayers.push(summon);
+    cpu.bowlerId = summonId;
+    cpu.effects.push({ type: 'bowler-spawn', timer: 1.5 });
+    return;
+  }
+
+  if (fid === 'deer') {
+    // Crabs
+    cpu.move4Uses++;
+    cpu.cdF = fAbil.cooldown;
+    const count = fAbil.crabCount || 5;
+    if (!cpu.crabIds) cpu.crabIds = [];
+    for (let i = 0; i < count; i++) {
+      const crabId = 'crab-' + cpu.id + '-' + i + '-' + Date.now();
+      const crab = createPlayerState(
+        { id: crabId, name: 'Crab', color: '#ff6347', fighterId: 'deer' },
+        { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) }, fighter
+      );
+      crab.x = cpu.x + (Math.random() - 0.5) * GAME_TILE * 3;
+      crab.y = cpu.y + (Math.random() - 0.5) * GAME_TILE * 3;
+      const crabRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+      if (!canMoveTo(crab.x, crab.y, crabRadius)) { crab.x = cpu.x; crab.y = cpu.y; }
+      crab.hp = fAbil.crabHp || 400; crab.maxHp = fAbil.crabHp || 400;
+      crab.isSummon = true; crab.summonOwner = cpu.id; crab.summonType = 'crab';
+      crab.summonSpeed = fAbil.crabSpeed || 2.0; crab.summonDamage = fAbil.damage || 200;
+      crab.summonAttackCD = fAbil.crabAttackCD || 1; crab.summonAttackTimer = 0;
+      gamePlayers.push(crab);
+      cpu.crabIds.push(crabId);
+    }
+    cpu.effects.push({ type: 'crab-spawn', timer: 2.0 });
+    return;
+  }
+
+  if (fid === 'noli') {
+    // John Doe
+    if (cpu.johnDoeId) {
+      const old = gamePlayers.find(p => p.id === cpu.johnDoeId);
+      if (old && old.alive) return; // already active
+    }
+    cpu.move4Uses++;
+    cpu.cdF = fAbil.cooldown;
+    const edgeTiles = [];
+    for (let c = 0; c < gameMap.cols; c++) {
+      if (gameMap.tiles[0] && gameMap.tiles[0][c] !== TILE.WATER && gameMap.tiles[0][c] !== TILE.ROCK) edgeTiles.push({ r: 0, c });
+      if (gameMap.tiles[gameMap.rows - 1] && gameMap.tiles[gameMap.rows - 1][c] !== TILE.WATER && gameMap.tiles[gameMap.rows - 1][c] !== TILE.ROCK) edgeTiles.push({ r: gameMap.rows - 1, c });
+    }
+    for (let r = 1; r < gameMap.rows - 1; r++) {
+      if (gameMap.tiles[r] && gameMap.tiles[r][0] !== TILE.WATER && gameMap.tiles[r][0] !== TILE.ROCK) edgeTiles.push({ r, c: 0 });
+      if (gameMap.tiles[r] && gameMap.tiles[r][gameMap.cols - 1] !== TILE.WATER && gameMap.tiles[r][gameMap.cols - 1] !== TILE.ROCK) edgeTiles.push({ r, c: gameMap.cols - 1 });
+    }
+    const edgeSpawn = edgeTiles.length > 0 ? edgeTiles[Math.floor(Math.random() * edgeTiles.length)] : { r: 0, c: 0 };
+    const summonId = 'johndoe-' + cpu.id + '-' + Date.now();
+    const summon = createPlayerState(
+      { id: summonId, name: 'John Doe', color: '#8b0000', fighterId: 'noli' }, edgeSpawn, fighter
+    );
+    summon.hp = fAbil.summonHp || 500; summon.maxHp = fAbil.summonHp || 500;
+    summon.isSummon = true; summon.summonOwner = cpu.id; summon.summonType = 'johndoe';
+    summon.summonSpeed = 0; summon.summonDamage = fAbil.damage || 500;
+    summon.summonAttackCD = fAbil.summonFireCD || 10; summon.summonAttackTimer = fAbil.summonFireCD || 10;
+    summon.spikeDuration = fAbil.spikeDuration || 5; summon.touchDPS = fAbil.touchDPS || 100;
+    gamePlayers.push(summon);
+    cpu.johnDoeId = summonId;
+    cpu.effects.push({ type: 'johndoe-spawn', timer: 1.5 });
+    return;
+  }
+
+  if (fid === 'explodingcat') {
+    // Unicorn summon
+    if (cpu.catUnicornId) return;
+    cpu.move4Uses++;
+    cpu.cdF = fAbil.cooldown;
+    const uniRoll = Math.random();
+    let uniType, uniName, uniColor;
+    if (uniRoll < 0.33) { uniType = 'destructive-unicorn'; uniName = 'Extremely Destructive Unicorn'; uniColor = '#ff2200'; }
+    else if (uniRoll < 0.66) { uniType = 'queenbee-unicorn'; uniName = 'Queen Bee Unicorn'; uniColor = '#ffd700'; }
+    else { uniType = 'seductive-unicorn'; uniName = 'Seductive Unicorn'; uniColor = '#ff69b4'; }
+    const uniId = 'unicorn-' + cpu.id + '-' + Date.now();
+    const uniFighter = getFighter('fighter');
+    const uni = createPlayerState(
+      { id: uniId, name: uniName, color: uniColor, fighterId: 'fighter' },
+      { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) }, uniFighter
+    );
+    uni.x = cpu.x + (Math.random() - 0.5) * GAME_TILE * 3;
+    uni.y = cpu.y + (Math.random() - 0.5) * GAME_TILE * 3;
+    uni.hp = 500; uni.maxHp = 500;
+    uni.isSummon = true; uni.summonOwner = cpu.id; uni.summonType = uniType;
+    uni.summonSpeed = 3.0; uni.summonDamage = uniType === 'destructive-unicorn' ? 999 : 0;
+    uni.summonAttackCD = 0.5; uni.summonAttackTimer = 0;
+    uni.isCPU = true; uni.noCloneHeal = true;
+    gamePlayers.push(uni);
+    cpu.catUnicornId = uniId;
+    cpu.effects.push({ type: 'unicorn-spawn', timer: 1.5 });
+    return;
+  }
+
+  if (fid === 'napoleon') {
+    // Light Infantry
+    cpu.move4Uses++;
+    cpu.cdF = fAbil.cooldown;
+    const count = fAbil.infantryCount || 3;
+    if (!cpu.napoleonInfantryIds) cpu.napoleonInfantryIds = [];
+    for (let i = 0; i < count; i++) {
+      const infId = 'infantry-' + cpu.id + '-f-' + i + '-' + Date.now();
+      const inf = createPlayerState(
+        { id: infId, name: 'Infantryman', color: '#2c3e50', fighterId: 'napoleon' },
+        { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) }, fighter
+      );
+      inf.x = cpu.x + (Math.random() - 0.5) * GAME_TILE * 3;
+      inf.y = cpu.y + (Math.random() - 0.5) * GAME_TILE * 3;
+      const infRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+      if (!canMoveTo(inf.x, inf.y, infRadius)) { inf.x = cpu.x; inf.y = cpu.y; }
+      inf.hp = fAbil.infantryHp || 50; inf.maxHp = fAbil.infantryHp || 50;
+      inf.isSummon = true; inf.summonOwner = cpu.id; inf.summonType = 'napoleon-infantry';
+      inf.summonSpeed = fAbil.infantrySpeed || 2.0; inf.summonDamage = fAbil.damage || 100;
+      inf.summonAttackCD = fAbil.infantryFireCD || 1; inf.summonAttackTimer = 0;
+      inf.summonProjectileSpeed = fAbil.infantryProjectileSpeed || 38;
+      inf.summonProjectileRange = fAbil.infantryRange || 0.8;
+      gamePlayers.push(inf);
+      cpu.napoleonInfantryIds.push(infId);
+    }
+    cpu.effects.push({ type: 'infantry-spawn', timer: 1.5 });
+    return;
+  }
+
+  if (fid === 'moderator') {
+    // Firewall: invincible + invisible for 5s
+    cpu.move4Uses++;
+    cpu.cdF = fAbil.cooldown;
+    cpu.modFirewallTimer = fAbil.duration || 5;
+    cpu.effects.push({ type: 'firewall', timer: (fAbil.duration || 5) + 0.5 });
+    return;
+  }
+
+  if (fid === 'dnd') {
+    // Sidekick
+    if (cpu.dndSidekickId) {
+      const oldSk = gamePlayers.find(p => p.id === cpu.dndSidekickId);
+      if (oldSk && oldSk.alive) return;
+    }
+    cpu.move4Uses++;
+    cpu.cdF = fAbil.cooldown;
+    const skId = 'dnd-sidekick-' + cpu.id + '-' + Date.now();
+    const sk = createPlayerState(
+      { id: skId, name: cpu.name + "'s Sidekick", color: cpu.color || '#daa520', fighterId: 'dnd' },
+      { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) }, fighter
+    );
+    const skRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+    const angle = Math.random() * Math.PI * 2;
+    sk.x = cpu.x + Math.cos(angle) * GAME_TILE * 2;
+    sk.y = cpu.y + Math.sin(angle) * GAME_TILE * 2;
+    if (!canMoveTo(sk.x, sk.y, skRadius)) { const safe = getRandomSafePosition(); sk.x = safe.x; sk.y = safe.y; }
+    sk.hp = Math.floor(cpu.maxHp / 2); sk.maxHp = Math.floor(cpu.maxHp / 2);
+    sk.isSummon = true; sk.summonOwner = cpu.id; sk.summonType = 'dnd-sidekick';
+    sk.dndRace = cpu.dndRace || 'human';
+    sk.summonSpeed = 3.0; sk.summonDamage = 100 + (cpu.dndWeaponBonus || 0);
+    sk.summonAttackCD = sk.dndRace === 'dwarf' ? 2 : 0.5; sk.summonAttackTimer = 0;
+    sk.isCPU = true;
+    gamePlayers.push(sk);
+    cpu.dndSidekickId = skId;
+    cpu.effects.push({ type: 'dnd-sidekick-spawn', timer: 1.5 });
+    return;
+  }
+
+  if (fid === 'dogtooth') {
+    // Dog Tooth F: The Final Battle — CPU spawns Complex Room to fight
+    if (cpu.dogtoothFUsed) return;
+    cpu.dogtoothFUsed = true;
+    cpu.move4Uses++;
+    cpu.dogtoothInComplex = true;
+    // Kill Ouriel (don't let it transform into a room)
+    if (cpu.dogtoothOurielId) {
+      const ouriel = gamePlayers.find(p => p.id === cpu.dogtoothOurielId);
+      if (ouriel && ouriel.alive) { ouriel.alive = false; ouriel.hp = 0; ouriel.effects.push({ type: 'death', timer: 2 }); }
+      cpu.dogtoothOurielId = null;
+    }
+    const roomId = 'complex-room-' + cpu.id + '-' + Date.now();
+    const roomFighter = { id: 'complex-room', name: 'Room', hp: 1300, healAmount: 0, healDelay: 999, healTick: 999, speed: 1.8, abilities: [] };
+    const safe = getRandomSafePosition();
+    const room = createPlayerState(
+      { id: roomId, name: 'Room', color: '#000' },
+      { r: Math.floor(safe.y / GAME_TILE), c: Math.floor(safe.x / GAME_TILE) },
+      roomFighter
+    );
+    room.x = safe.x; room.y = safe.y;
+    room.hp = 1300; room.maxHp = 1300;
+    room.isSummon = true; room.summonOwner = 'none';
+    room.summonType = 'complex-room';
+    room.summonTargetId = cpu.id;
+    room.summonSpeed = 1.8;
+    room.summonDamage = 0;
+    room.summonAttackCD = 999;
+    room.summonAttackTimer = 0;
+    room.complexDPS = 40;
+    room.isCPU = true;
+    gamePlayers.push(room);
+    cpu.dogtoothComplexRoomId = roomId;
+    cpu.effects.push({ type: 'complex-enter', timer: 2.0 });
+    return;
+  }
+
+  // Default (Fighter): Potion — heal 300 over 3s
+  if (cpu.hp < cpu.maxHp * 0.5) {
+    cpu.move4Uses++;
+    cpu.cdF = fAbil.cooldown;
+    cpu.potionHealPool = fAbil.healAmount || 300;
+    cpu.potionHealTimer = fAbil.healDuration || 3;
+    cpu.effects.push({ type: 'potion', timer: (fAbil.healDuration || 3) + 0.5 });
   }
 }
 
@@ -4940,6 +6435,9 @@ function useAbility(key) {
   const isModerator = fighter.id === 'moderator';
   const isDnd = fighter.id === 'dnd';
   const isDragon = fighter.id === 'dragon';
+  const isDogTooth = fighter.id === 'dogtooth';
+  const isIllusion = fighter.id === 'illusion';
+  const isUnstable = fighter.id === 'unstable';
 
   // Filbus: channeling interrupts
   if (isFilbus && (key !== 'E' && key !== 'R')) {
@@ -5280,6 +6778,103 @@ function useAbility(key) {
       const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
       lp.dragonBreathAimNx = aimDx / aimDist;
       lp.dragonBreathAimNy = aimDy / aimDist;
+    } else if (isIllusion) {
+      // Illusion M1: Teleattack — melee 150 dmg, if hit dodge that player's attacks for 0.5s
+      const range = (abil.range || 1.5) * GAME_TILE;
+      let baseDmg = abil.damage || 150;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx2 = aimX - lp.x; const aimDy2 = aimY - lp.y;
+      const aimDist2 = Math.sqrt(aimDx2 * aimDx2 + aimDy2 * aimDy2) || 1;
+      const aimNx = aimDx2 / aimDist2; const aimNy = aimDy2 / aimDist2;
+      let hitSomeone = false;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, baseDmg);
+        if (!hitSomeone) {
+          lp.illusionDodgeTargetId = target.id;
+          lp.illusionDodgeTimer = abil.dodgeDuration || 0.5;
+          hitSomeone = true;
+        }
+      }
+      lp.effects.push({ type: 'teleattack', timer: 0.2, aimNx, aimNy });
+    } else if (isDogTooth) {
+      // Dog Tooth M1: Stab — melee 150 dmg + 50 bleed over 5s
+      const range = (abil.range || 1.5) * GAME_TILE;
+      let baseDmg = abil.damage || 150;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      // Smile Tapes boost: 500 dmg during Smile
+      if (lp.dogtoothSmileTimer > 0) baseDmg = abil.damage > 0 ? 500 : 500;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        // Skip own summons EXCEPT ouriel-room (hostile to owner)
+        if (target.isSummon && target.summonOwner === lp.id && target.summonType !== 'ouriel-room') continue;
+        if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, baseDmg);
+        // Apply bleed DOT
+        if (!target.poisonTimers) target.poisonTimers = [];
+        target.poisonTimers.push({
+          sourceId: lp.id,
+          dps: (abil.bleedDamage || 50) / (abil.bleedDuration || 5),
+          remaining: abil.bleedDuration || 5
+        });
+        target.effects.push({ type: 'bleed', timer: abil.bleedDuration || 5 });
+      }
+      lp.effects.push({ type: 'stab', timer: 0.2, aimNx, aimNy });
+    } else if (isUnstable) {
+      // Unstable Fist: 100 DMG + random buff/debuff on enemy
+      const range = (abil.range || 1.5) * GAME_TILE;
+      let baseDmg = abil.damage || 100;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, baseDmg);
+        // Apply random buff or debuff
+        const roll = Math.random();
+        if (roll < 0.15) { target.stunned = 1.5; target.effects.push({ type: 'stun', timer: 1.5 }); }
+        else if (roll < 0.30) { target.supportBuff = 5; } // buff enemy (bad for us, chaotic)
+        else if (roll < 0.45) { target.intimidated = 5; target.intimidatedBy = lp.id; }
+        else if (roll < 0.60) { target.buffSlowed = 3; }
+        else if (roll < 0.75) { target.noDamageTimer = 0; target.isHealing = false; }
+        // else no effect
+      }
+      lp.effects.push({ type: 'unstable-fist', timer: 0.3, aimNx, aimNy });
     } else {
       // Fighter: Sword (original M1)
       const range = abil.range * GAME_TILE;
@@ -5688,6 +7283,39 @@ function useAbility(key) {
       lp.dndOrcIds.push(orcId);
       lp.effects.push({ type: 'dnd-quest', timer: 1.0 });
       combatLog.push({ text: '⚔️ Quest started! An Orc appears!', timer: 3, color: '#556b2f' });
+    } else if (isIllusion) {
+      // Illusion E: The Illusion Of Myself — go invisible, spawn a copy (hard AI, no attacks)
+      lp.cdE = abil.cooldown;
+      lp.illusionInvisTimer = abil.duration || 10;
+      // Kill old copy if exists
+      if (lp.illusionCopyId) {
+        const oldCopy = gamePlayers.find(p => p.id === lp.illusionCopyId);
+        if (oldCopy && oldCopy.alive) { oldCopy.alive = false; oldCopy.hp = 0; oldCopy.effects.push({ type: 'death', timer: 2 }); }
+      }
+      const copyId = 'illusion-copy-' + lp.id + '-' + Date.now();
+      const copyFighter = lp.fighter;
+      const copy = createPlayerState(
+        { id: copyId, name: lp.name, color: lp.color || '#7f8fa6', fighterId: 'illusion' },
+        { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+        copyFighter
+      );
+      copy.x = lp.x; copy.y = lp.y;
+      copy.hp = lp.hp; copy.maxHp = lp.maxHp;
+      copy.isSummon = true;
+      copy.summonOwner = lp.id;
+      copy.summonType = 'illusion-copy';
+      copy.isCPU = true;
+      copy.noCloneHeal = true;
+      copy.illusionNoAttack = true; // copy cannot attack
+      copy.difficulty = 'hard';
+      copy.aiState = {
+        moveTarget: null, attackTarget: null, thinkTimer: 0, abilityTimer: 0,
+        lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false,
+      };
+      gamePlayers.push(copy);
+      lp.illusionCopyId = copyId;
+      lp.effects.push({ type: 'illusion-vanish', timer: 1.0 });
+      combatLog.push({ text: '👻 The Illusion Of Myself! Invisible for 10s!', timer: 3, color: '#7f8fa6' });
     } else if (isDragon) {
       // Dragon E: Dragon Ride — fly over obstacles for 5s
       lp.cdE = abil.cooldown;
@@ -5695,6 +7323,70 @@ function useAbility(key) {
       lp.dragonFlyTimer = abil.flyDuration || 5;
       lp.effects.push({ type: 'dragon-fly', timer: (abil.flyDuration || 5) + 0.5 });
       combatLog.push({ text: '🐉 Dragon Ride! Flying for 5s!', timer: 3, color: '#5b8fa8' });
+    } else if (isDogTooth) {
+      // Dog Tooth E: The Power Of Ouriel — summon Ouriel (heals DT 40hp/s, 2 hits → Room)
+      lp.cdE = abil.cooldown;
+      // Kill old Ouriel if exists
+      if (lp.dogtoothOurielId) {
+        const oldO = gamePlayers.find(p => p.id === lp.dogtoothOurielId);
+        if (oldO && oldO.alive) { oldO.alive = false; oldO.hp = 0; oldO.effects.push({ type: 'death', timer: 2 }); }
+      }
+      const ourielId = 'ouriel-' + lp.id + '-' + Date.now();
+      const angle = Math.random() * Math.PI * 2;
+      const spawnX = lp.x + Math.cos(angle) * GAME_TILE * 2;
+      const spawnY = lp.y + Math.sin(angle) * GAME_TILE * 2;
+      const ourielFighter = { id: 'ouriel-summon', name: 'Ouriel', hp: 999999, healAmount: 0, healDelay: 999, healTick: 999, speed: 2.0, abilities: [] };
+      const ouriel = createPlayerState(
+        { id: ourielId, name: 'Ouriel', color: '#ddd' },
+        { r: Math.floor(spawnY / GAME_TILE), c: Math.floor(spawnX / GAME_TILE) },
+        ourielFighter
+      );
+      ouriel.x = spawnX; ouriel.y = spawnY;
+      const oR = GAME_TILE * PLAYER_RADIUS_RATIO;
+      if (!canMoveTo(ouriel.x, ouriel.y, oR)) { const s = getRandomSafePosition(); ouriel.x = s.x; ouriel.y = s.y; }
+      ouriel.hp = 999999; ouriel.maxHp = 999999;
+      ouriel.isSummon = true; ouriel.summonOwner = lp.id;
+      ouriel.summonType = 'ouriel';
+      ouriel.summonSpeed = 2.0;
+      ouriel.ourielHitsLeft = abil.ourielHitsToBreak || 2;
+      ouriel.ourielHealPerSec = abil.healPerSec || 40;
+      ouriel.ourielRoomHp = abil.roomHp || 500;
+      ouriel.ourielRoomDPS = abil.roomDPS || 40;
+      ouriel.isCPU = true;
+      gamePlayers.push(ouriel);
+      lp.dogtoothOurielId = ourielId;
+      lp.effects.push({ type: 'ouriel-summon', timer: 1.5 });
+      combatLog.push({ text: '✝️ Ouriel summoned! Heals 40 HP/s, 2 hits to break.', timer: 4, color: '#ddd' });
+    } else if (isUnstable) {
+      // Unstable Gamble: 100-1000 DMG melee + teleport enemy to random safe location
+      const range = (abil.range || 1.5) * GAME_TILE;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        // Random damage 100-1000
+        const dmg = 100 + Math.floor(Math.random() * 901);
+        dealDamage(lp, target, dmg);
+        // Teleport to random safe location
+        if (target.alive) {
+          const safe = getRandomSafePosition();
+          target.x = safe.x; target.y = safe.y;
+          target.effects.push({ type: 'unstable-teleport', timer: 1.0 });
+        }
+        combatLog.push({ text: '🎲 Unstable Gamble! ' + dmg + ' damage!', timer: 3, color: '#ff00ff' });
+      }
+      lp.effects.push({ type: 'unstable-gamble', timer: 0.5, aimNx, aimNy });
     } else {
       // Fighter: Buff — damage boost + slow nearby enemies
       lp.supportBuff = abil.duration;
@@ -6045,6 +7737,30 @@ function useAbility(key) {
         lp.effects.push({ type: 'dnd-potion', timer: 1.5 });
         combatLog.push({ text: '🧪 Healing Potion! +300 HP over 3s.', timer: 3, color: '#e74c3c' });
       }
+    } else if (isIllusion) {
+      // Illusion R: The Illusion Of Space — teleport everyone back to where they were 3s ago
+      lp.cdR = abil.cooldown;
+      const rewindTime = (abil.rewindTime || 3) * 1000; // milliseconds
+      const now = Date.now();
+      const pRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+      for (const p of gamePlayers) {
+        if (!p.alive || p.isSummon) continue;
+        if (!p.illusionPositionHistory || p.illusionPositionHistory.length === 0) continue;
+        // Find the position closest to 3s ago
+        let bestPos = null;
+        let bestDiff = Infinity;
+        for (const entry of p.illusionPositionHistory) {
+          const diff = Math.abs((now - entry.t) - rewindTime);
+          if (diff < bestDiff) { bestDiff = diff; bestPos = entry; }
+        }
+        if (bestPos && canMoveTo(bestPos.x, bestPos.y, pRadius)) {
+          p.x = bestPos.x;
+          p.y = bestPos.y;
+          p.effects.push({ type: 'illusion-rewind', timer: 1.0 });
+        }
+      }
+      lp.effects.push({ type: 'illusion-space', timer: 1.5 });
+      combatLog.push({ text: '🌀 The Illusion Of Space! Everyone rewound 3 seconds!', timer: 4, color: '#7f8fa6' });
     } else if (isDragon) {
       // Dragon R: Dragon Beam — 3s charge, then fire
       if (lp.dragonBeamCharging || lp.dragonBeamRecovery > 0) return;
@@ -6062,6 +7778,39 @@ function useAbility(key) {
       lp.dragonBeamAimNy = aimDy / aimDist;
       lp.effects.push({ type: 'dragon-beam-charge', timer: (abil.chargeTime || 3) + 0.5 });
       combatLog.push({ text: '❄️ Dragon Beam charging — aim slowly!', timer: 3, color: '#00ccff' });
+    } else if (isDogTooth) {
+      // Dog Tooth R: The Smile Tapes — auto-chase + 500 dmg M1 for 10s
+      lp.cdR = abil.cooldown;
+      lp.dogtoothSmileTimer = abil.duration || 10;
+      lp.dogtoothSmileDmg = abil.damage || 500;
+      lp.effects.push({ type: 'smile-tapes', timer: (abil.duration || 10) + 0.5 });
+      combatLog.push({ text: '😈 The Smile Tapes! Auto-chasing for 10s! M1 = 500 dmg!', timer: 4, color: '#ff0000' });
+    } else if (isUnstable) {
+      // Unstable Infantry: spawn 3 infantrymen that teleport enemies to spawn on hit
+      if (!lp.unstableInfantryIds) lp.unstableInfantryIds = [];
+      for (let i = 0; i < (abil.infantryCount || 3); i++) {
+        const infId = 'unstable-inf-' + lp.id + '-' + i + '-' + Date.now();
+        const infFighter = getFighter('fighter');
+        const inf = createPlayerState(
+          { id: infId, name: 'Unstable Infantry', color: '#ff00ff', fighterId: 'fighter' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, infFighter
+        );
+        inf.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 3;
+        inf.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 3;
+        const infR = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(inf.x, inf.y, infR)) { inf.x = lp.x; inf.y = lp.y; }
+        inf.hp = abil.infantryHp || 50; inf.maxHp = abil.infantryHp || 50;
+        inf.isSummon = true; inf.summonOwner = lp.id; inf.summonType = 'unstable-infantry';
+        inf.summonSpeed = abil.infantrySpeed || 2.0; inf.summonDamage = abil.damage || 100;
+        inf.summonAttackCD = abil.infantryFireCD || 2.5; inf.summonAttackTimer = 0;
+        inf.summonProjectileSpeed = abil.infantryProjectileSpeed || 38;
+        inf.summonProjectileRange = abil.infantryRange || 0.8;
+        inf.unstableTeleportToSpawn = true; // flag: hit enemies get teleported to spawn
+        gamePlayers.push(inf);
+        lp.unstableInfantryIds.push(infId);
+      }
+      lp.effects.push({ type: 'unstable-infantry', timer: 1.5 });
+      combatLog.push({ text: '⚡ Unstable Infantry spawned!', timer: 3, color: '#ff00ff' });
     } else {
       const range = abil.range * GAME_TILE;
       let baseDmgR = abil.damage;
@@ -6560,6 +8309,20 @@ function useAbility(key) {
       const raceNames = { human: 'Human (1.2× speed, Sword)', elf: 'Elf (+50 dmg, Bow)', dwarf: 'Dwarf (0.8× dmg taken, Axe)' };
       lp.effects.push({ type: 'dnd-race', timer: 1.5 });
       combatLog.push({ text: '🎭 Race changed to ' + raceNames[lp.dndRace] + '!', timer: 4, color: '#daa520' });
+    } else if (isIllusion) {
+      // Illusion T: The Illusion Of Time — freeze everyone except self for 1.5s
+      lp.cdT = abil.cooldown;
+      const freezeDur = abil.freezeDuration || 1.5;
+      lp.illusionTimeFreezeTimer = freezeDur;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        if (gameMode === 'teams' && lp.team && target.team === lp.team && !target.isSummon) continue;
+        target.stunned = Math.max(target.stunned, freezeDur);
+        target.effects.push({ type: 'illusion-frozen', timer: freezeDur });
+      }
+      lp.effects.push({ type: 'illusion-time', timer: freezeDur + 0.5 });
+      combatLog.push({ text: '⏱ The Illusion Of Time! Everyone frozen for 1.5s!', timer: 3, color: '#7f8fa6' });
     } else if (isDragon) {
       // Dragon T: Draconic Roar — +30% speed self, +20% allies, costs 200 HP
       lp.cdT = abil.cooldown;
@@ -6577,6 +8340,64 @@ function useAbility(key) {
       }
       lp.effects.push({ type: 'dragon-roar', timer: 2.0 });
       combatLog.push({ text: '🐉 DRACONIC ROAR! +30% speed (self)! -200 HP!', timer: 4, color: '#5b8fa8' });
+    } else if (isDogTooth) {
+      // Dog Tooth T: A_Love_Letter — global 450 dmg to enemies, 600 self-damage
+      lp.cdT = abil.cooldown;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
+        dealDamage(lp, target, abil.damage || 300);
+        target.effects.push({ type: 'hit', timer: 0.3 });
+      }
+      // Self-damage: Dog Tooth takes 600
+      lp.hp -= (abil.boisvertDamage || 600);
+      lp.noDamageTimer = 0; lp.isHealing = false;
+      if (lp.hp <= 0) {
+        if (lp.dogtoothPuppetGod && !lp.dogtoothPuppetUsed && !lp.isSummon) {
+          lp.dogtoothPuppetUsed = true;
+          lp.hp = Math.floor(lp.maxHp * 0.5);
+          lp.dogtoothReviveDmgMult = 1.5;
+          combatLog.push({ text: '💀 Kill The Puppet God! Revived with half HP! (1.5× dmg taken)', timer: 5, color: '#ff4444' });
+        } else {
+          lp.hp = 0; lp.alive = false; lp.effects.push({ type: 'death', timer: 2 });
+        }
+      }
+      lp.effects.push({ type: 'love-letter', timer: 1.5 });
+      combatLog.push({ text: '💌 A_Love_Letter! 450 dmg to all! You take 600!', timer: 4, color: '#aaa' });
+    } else if (isUnstable) {
+      // Unstable Summons: summon a random character (M1 only)
+      lp.cdT = abil.cooldown;
+      // Kill existing summon
+      if (lp.unstableSummonId) {
+        const oldSum = gamePlayers.find(p => p.id === lp.unstableSummonId);
+        if (oldSum && oldSum.alive) { oldSum.alive = false; oldSum.hp = 0; oldSum.effects.push({ type: 'death', timer: 2 }); }
+      }
+      const allIds = getAllFighterIds().filter(f => f !== 'unstable' && f !== 'moderator');
+      const sumFid = allIds[Math.floor(Math.random() * allIds.length)];
+      const sumFighter = getFighter(sumFid);
+      const sumId = 'unstable-summon-' + lp.id + '-' + Date.now();
+      const summon = createPlayerState(
+        { id: sumId, name: sumFighter.name + ' (Unstable)', color: '#ff00ff', fighterId: sumFid },
+        { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, sumFighter
+      );
+      const sR = GAME_TILE * PLAYER_RADIUS_RATIO;
+      const angle = Math.random() * Math.PI * 2;
+      summon.x = lp.x + Math.cos(angle) * GAME_TILE * 2;
+      summon.y = lp.y + Math.sin(angle) * GAME_TILE * 2;
+      if (!canMoveTo(summon.x, summon.y, sR)) { const safe = getRandomSafePosition(); summon.x = safe.x; summon.y = safe.y; }
+      summon.hp = sumFighter.hp; summon.maxHp = sumFighter.hp;
+      summon.isSummon = true; summon.summonOwner = lp.id; summon.summonType = 'unstable-random';
+      summon.summonSpeed = sumFighter.speed;
+      summon.summonDamage = sumFighter.abilities[0].damage || 100;
+      summon.summonAttackCD = sumFighter.abilities[0].cooldown || 1;
+      summon.summonAttackTimer = 0;
+      summon.isCPU = true;
+      summon.illusionM1Only = true; // restrict to M1 only
+      gamePlayers.push(summon);
+      lp.unstableSummonId = sumId;
+      lp.effects.push({ type: 'unstable-summon-spawn', timer: 1.5 });
+      combatLog.push({ text: '⚡ Summoned ' + sumFighter.name + '! (M1 only)', timer: 4, color: '#ff00ff' });
     } else {
       lp.cdT = abil.cooldown;
       const sightRange = CAMERA_RANGE * GAME_TILE * 2;
@@ -6605,19 +8426,75 @@ function useAbility(key) {
       return;
     }
 
+    // ── Unstable: Unstablism (switch back) when swapped, or Domain when original ──
+    if (lp.unstableSwapped && lp.unstableOriginalFighter) {
+      // Unstablism: switch back to Unstable
+      lp.specialUsed = true;
+      lp.fighter = lp.unstableOriginalFighter;
+      lp.maxHp = lp.fighter.hp;
+      if (lp.hp > lp.maxHp) lp.hp = lp.maxHp;
+      lp.cdE = 0; lp.cdR = 0; lp.cdT = 0;
+      lp.unstableSwapped = false;
+      lp.specialUnlocked = false;
+      lp.totalDamageTaken = 0;
+      lp.effects.push({ type: 'unstable-swap', timer: 2.0 });
+      combatLog.push({ text: '⚡ UNSTABLISM! Switched back to Unstable!', timer: 4, color: '#ff00ff' });
+      return;
+    }
+
+    if (isUnstable) {
+      // Unstable Domain: anyone in 10-tile radius gets character swapped with someone else
+      lp.specialUsed = true;
+      const domainRange = (fighter.abilities[4].radius || 10) * GAME_TILE;
+      const affectedPlayers = [];
+      for (const p of gamePlayers) {
+        if (p.id === lp.id || !p.alive || p.isSummon) continue;
+        if (gameMode === 'teams' && lp.team && p.team === lp.team) continue;
+        const dx = p.x - lp.x; const dy = p.y - lp.y;
+        if (Math.sqrt(dx * dx + dy * dy) <= domainRange) {
+          affectedPlayers.push(p);
+        }
+      }
+      // Shuffle fighters among affected players
+      if (affectedPlayers.length >= 2) {
+        const fighters = affectedPlayers.map(p => p.fighter);
+        // Fisher-Yates shuffle
+        for (let i = fighters.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [fighters[i], fighters[j]] = [fighters[j], fighters[i]];
+        }
+        for (let i = 0; i < affectedPlayers.length; i++) {
+          affectedPlayers[i].fighter = fighters[i];
+          affectedPlayers[i].maxHp = fighters[i].hp;
+          if (affectedPlayers[i].hp > affectedPlayers[i].maxHp) affectedPlayers[i].hp = affectedPlayers[i].maxHp;
+          affectedPlayers[i].cdE = 0; affectedPlayers[i].cdR = 0; affectedPlayers[i].cdT = 0;
+          affectedPlayers[i].effects.push({ type: 'unstable-domain', timer: 2.0 });
+        }
+        combatLog.push({ text: '⚡ UNSTABLE DOMAIN! ' + affectedPlayers.length + ' players swapped!', timer: 5, color: '#ff00ff' });
+      } else {
+        combatLog.push({ text: '⚡ UNSTABLE DOMAIN! Not enough targets in range!', timer: 3, color: '#999' });
+      }
+      lp.effects.push({ type: 'unstable-domain', timer: 2.5 });
+      showPopup('⚡ UNSTABLE DOMAIN!');
+      return;
+    }
+
     if (isPoker) {
       // Royal Flush — distance-tiered:
       //   Self: heal to full HP automatically
       //   Close (≤3 tiles): stun + execute <500hp + reset CDs/charges
       //   Medium (3–10 tiles): reset CDs/charges only
+      //   Power: The Price Of Gambling — apply debt (5 hits to clear, can't damage poker while in debt)
       lp.specialUsed = true;
       lp.hp = lp.maxHp;  // Self-heal
       const stunDur = fighter.abilities[4].stunDuration || 3;
       const execThresh = fighter.abilities[4].executeThreshold || 500;
       const closeRange = 3 * GAME_TILE;
       const mediumRange = (fighter.abilities[4].range || 10) * GAME_TILE;
+      const pokerHasPower = typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id);
       for (const target of gamePlayers) {
         if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon) continue;
         const dx = target.x - lp.x; const dy = target.y - lp.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist > mediumRange) continue; // out of range entirely
@@ -6643,8 +8520,21 @@ function useAbility(key) {
         target.chipChangeTimer = 0;
         target.blindBuff = null;
         target.blindTimer = 0;
+        // Power: The Price Of Gambling — apply debt to all affected targets
+        if (pokerHasPower && target.alive) {
+          target.pokerDebtTarget = lp.id;
+          target.pokerDebtHits = 5;
+          target.effects.push({ type: 'poker-debt', timer: 30 });
+          if (target.id === localPlayerId) {
+            combatLog.push({ text: '💰 THE PRICE OF GAMBLING! Deal 5 hits to clear debt!', timer: 5, color: '#ffd700' });
+          }
+        }
       }
-      showPopup('👑 ROYAL FLUSH!');
+      if (pokerHasPower) {
+        showPopup('👑 THE PRICE OF GAMBLING!');
+      } else {
+        showPopup('👑 ROYAL FLUSH!');
+      }
       lp.effects.push({ type: 'royal-flush', timer: 2.0 });
       // Broadcast to other clients with position for distance calc
       if (typeof socket !== 'undefined' && socket.emit) {
@@ -6670,11 +8560,51 @@ function useAbility(key) {
       showPopup('🩸 THE BOILED ONE PHENOMENON');
       lp.effects.push({ type: 'boiled-one', timer: stunDur + 1 });
       combatLog.push({ text: '🩸 Phen 228 has entered...', timer: 5, color: '#8b0000' });
-      // Achievement tracking
-      if (typeof trackBoiledOnePlayed === 'function') trackBoiledOnePlayed();
+      // Achievement tracking (not team mode)
+      if (typeof trackBoiledOnePlayed === 'function' && gameMode !== 'teams') trackBoiledOnePlayed();
       // Broadcast to other clients
       if (typeof socket !== 'undefined' && socket.emit) {
         if (!isHostAuthority) socket.emit('player-buff', { type: 'boiled-one', duration: stunDur, cx: lp.x, cy: lp.y });
+      }
+      // Power: Prehistoric Emergence — spawn 3 dinosaurs
+      if (typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id)) {
+        // Clear old dinos
+        for (let di = gamePlayers.length - 1; di >= 0; di--) {
+          if (gamePlayers[di].isSummon && gamePlayers[di].summonType === 'filbus-dino' && gamePlayers[di].summonOwner === lp.id) {
+            gamePlayers.splice(di, 1);
+          }
+        }
+        lp.filbusDinoIds = [];
+        for (let d = 0; d < 3; d++) {
+          const dinoId = 'dino-' + lp.id + '-' + Date.now() + '-' + d;
+          let dx2, dy2;
+          for (let attempts = 0; attempts < 50; attempts++) {
+            dx2 = (Math.floor(Math.random() * gameMap.cols) + 0.5) * GAME_TILE;
+            dy2 = (Math.floor(Math.random() * gameMap.rows) + 0.5) * GAME_TILE;
+            if (canMoveTo(dx2, dy2, GAME_TILE * PLAYER_RADIUS_RATIO)) break;
+          }
+          const dinoFighter = getFighter('filbus');
+          const dino = createPlayerState(
+            { id: dinoId, name: 'Dinosaur', color: '#556b2f', fighterId: 'filbus' },
+            { r: Math.floor(dy2 / GAME_TILE), c: Math.floor(dx2 / GAME_TILE) }, dinoFighter
+          );
+          dino.x = dx2; dino.y = dy2;
+          dino.hp = 2000; dino.maxHp = 2000;
+          dino.isSummon = true; dino.summonOwner = lp.id; dino.summonType = 'filbus-dino';
+          dino.fighter = dinoFighter;
+          dino.summonSpeed = 1.0; // slow
+          dino.summonDamage = 150;
+          dino.summonStunDur = 0;
+          dino.summonAttackCD = 3.0; // 3s cooldown
+          dino.summonAttackTimer = 0;
+          dino.summonBleedDps = 50; // dino attacks apply 5s bleed
+          dino.summonBleedDur = 5;
+          gamePlayers.push(dino);
+          lp.filbusDinoIds.push(dinoId);
+        }
+        showPopup('🦕 PREHISTORIC EMERGENCE!');
+        combatLog.push({ text: '🦕 3 Dinosaurs summoned!', timer: 4, color: '#556b2f' });
+        lp.effects.push({ type: 'dino-spawn', timer: 2.0 });
       }
     } else if (is1x) {
       // 1X1X1X1 SPACE: Rejuvenate the Rotten — summon zombies
@@ -6735,6 +8665,41 @@ function useAbility(key) {
       showPopup('🧟 REJUVENATE THE ROTTEN!');
       lp.effects.push({ type: 'rejuvenate', timer: 2.0 });
       combatLog.push({ text: '🧟 Summoned ' + zombieCount + ' zombies!', timer: 4, color: '#1a5c1a' });
+      // Power: +Slasher — spawn a fast, deadly slasher summon
+      if (typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id)) {
+        // Remove old slasher
+        if (lp.onexSlasherId) {
+          const oldIdx = gamePlayers.findIndex(p => p.id === lp.onexSlasherId);
+          if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+          lp.onexSlasherId = null;
+        }
+        const slasherId = 'slasher-' + lp.id + '-' + Date.now();
+        let sx, sy;
+        for (let attempts = 0; attempts < 50; attempts++) {
+          sx = (Math.floor(Math.random() * gameMap.cols) + 0.5) * GAME_TILE;
+          sy = (Math.floor(Math.random() * gameMap.rows) + 0.5) * GAME_TILE;
+          if (canMoveTo(sx, sy, GAME_TILE * PLAYER_RADIUS_RATIO)) break;
+        }
+        const slasherFighter = getFighter('onexonexonex');
+        const slasher = createPlayerState(
+          { id: slasherId, name: 'Slasher', color: '#8b0000', fighterId: 'onexonexonex' },
+          { r: Math.floor(sy / GAME_TILE), c: Math.floor(sx / GAME_TILE) }, slasherFighter
+        );
+        slasher.x = sx; slasher.y = sy;
+        slasher.hp = 1300; slasher.maxHp = 1300;
+        slasher.isSummon = true; slasher.summonOwner = lp.id; slasher.summonType = 'slasher';
+        slasher.fighter = slasherFighter;
+        slasher.summonSpeed = 4.0; // fast
+        slasher.summonDamage = 150;
+        slasher.summonStunDur = 0;
+        slasher.summonAttackCD = 0.5; // very fast attacks
+        slasher.summonAttackTimer = 0;
+        gamePlayers.push(slasher);
+        lp.onexSlasherId = slasherId;
+        showPopup('🔪 +SLASHER!');
+        lp.effects.push({ type: 'slasher-spawn', timer: 2.0 });
+        combatLog.push({ text: '🔪 Slasher summoned!', timer: 4, color: '#8b0000' });
+      }
     } else if (isCricket) {
       // Cricket SPACE: SIXER — same aim mechanic as Fighter's special jump
       lp.specialUsed = true;
@@ -6808,6 +8773,42 @@ function useAbility(key) {
       lp.noliCloneId = cloneId;
       lp.effects.push({ type: 'hallucination', timer: 2.0 });
       combatLog.push({ text: '👻 Hallucination: ' + closestTarget.name + '!', timer: 3, color: '#a020f0' });
+      // Power: Guest666 — spawn a giant 2x2 black/red beast
+      if (typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id)) {
+        // Remove old guest666
+        if (lp.noliGuest666Id) {
+          const oldG = gamePlayers.findIndex(p => p.id === lp.noliGuest666Id);
+          if (oldG >= 0) { gamePlayers[oldG].alive = false; gamePlayers.splice(oldG, 1); }
+          lp.noliGuest666Id = null;
+        }
+        const guestId = 'guest666-' + lp.id + '-' + Date.now();
+        const guestFighter = getFighter('noli');
+        const guest = createPlayerState(
+          { id: guestId, name: 'Guest666', color: '#1a0000', fighterId: 'noli' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, guestFighter
+        );
+        guest.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 3;
+        guest.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 3;
+        const gR = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(guest.x, guest.y, gR)) { guest.x = lp.x; guest.y = lp.y; }
+        guest.hp = 2000; guest.maxHp = 2000;
+        guest.isSummon = true; guest.summonOwner = lp.id; guest.summonType = 'guest666';
+        guest.fighter = guestFighter;
+        guest.summonSpeed = 3.5; // fast
+        guest.summonDamage = 400;
+        guest.summonStunDur = 3; // lacerates for 3s stun
+        guest.summonAttackCD = 5.0;
+        guest.summonAttackTimer = 0;
+        guest.summonBleedDps = 100; // 100dmg worth of bleeding over time
+        guest.summonBleedDur = 3;
+        guest.summonJumpCD = 8.0; // jump ability cooldown
+        guest.summonJumpTimer = 0;
+        gamePlayers.push(guest);
+        lp.noliGuest666Id = guestId;
+        showPopup('👹 GUEST666!');
+        lp.effects.push({ type: 'guest666-spawn', timer: 2.0 });
+        combatLog.push({ text: '👹 Guest666 has arrived! (2000HP, 400dmg, lacerates!)', timer: 5, color: '#8b0000' });
+      }
     } else if (isCat) {
       // Exploding Cat SPACE: Exploding Kitten — spawn 4 kittens
       lp.specialUsed = true;
@@ -6844,6 +8845,40 @@ function useAbility(key) {
       }
       lp.effects.push({ type: 'cat-explode-spawn', timer: 2.0 });
       combatLog.push({ text: '💣 Exploding Kittens unleashed!', timer: 3, color: '#ff4444' });
+      // Power: Imploding Kitten — spawn a black hole kitten
+      if (typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id)) {
+        // Remove old imploding kitten
+        if (lp.catImplodingKittenId) {
+          const oldIK = gamePlayers.findIndex(p => p.id === lp.catImplodingKittenId);
+          if (oldIK >= 0) { gamePlayers[oldIK].alive = false; gamePlayers.splice(oldIK, 1); }
+          lp.catImplodingKittenId = null;
+        }
+        const ikId = 'imploding-kitten-' + lp.id + '-' + Date.now();
+        const ikFighter = getFighter('explodingcat');
+        const ik = createPlayerState(
+          { id: ikId, name: 'Imploding Kitten', color: '#0a0a0a', fighterId: 'explodingcat' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, ikFighter
+        );
+        ik.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 2;
+        ik.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 2;
+        const ikR = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(ik.x, ik.y, ikR)) { ik.x = lp.x; ik.y = lp.y; }
+        ik.hp = 800; ik.maxHp = 800;
+        ik.isSummon = true; ik.summonOwner = lp.id; ik.summonType = 'imploding-kitten';
+        ik.fighter = ikFighter;
+        ik.summonSpeed = 0; // stationary — becomes black hole
+        ik.summonDamage = 900; // 900 dmg after 7s
+        ik.summonAttackCD = 0; ik.summonAttackTimer = 0;
+        ik.blackHoleTimer = 7.0; // 7s countdown
+        ik.blackHoleRadius = 7 * GAME_TILE; // 7-tile suction radius
+        ik.blackHoleInnerRadius = 4 * GAME_TILE; // 4-tile inner trap radius
+        ik.blackHoleActive = true;
+        gamePlayers.push(ik);
+        lp.catImplodingKittenId = ikId;
+        showPopup('🌀 IMPLODING KITTEN!');
+        lp.effects.push({ type: 'imploding-kitten-spawn', timer: 2.0 });
+        combatLog.push({ text: '🌀 Imploding Kitten! Black hole forming... 7s until detonation!', timer: 5, color: '#4a0080' });
+      }
     } else if (isNapoleon) {
       // Napoleon SPACE: The Grande Armée — spawn 12 infantrymen
       lp.specialUsed = true;
@@ -6877,6 +8912,72 @@ function useAbility(key) {
       }
       lp.effects.push({ type: 'grande-armee', timer: 2.0 });
       combatLog.push({ text: '⚔ The Grande Armée has arrived!', timer: 4, color: '#2c3e50' });
+      // Power: Full Power — also spawn 5 cannons and 3 cavalry
+      if (typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id)) {
+        // Remove old power cannons
+        for (let ci = gamePlayers.length - 1; ci >= 0; ci--) {
+          if (gamePlayers[ci].isSummon && gamePlayers[ci].summonType === 'napoleon-power-cannon' && gamePlayers[ci].summonOwner === lp.id) {
+            gamePlayers.splice(ci, 1);
+          }
+        }
+        if (!lp.napoleonPowerCannonIds) lp.napoleonPowerCannonIds = [];
+        lp.napoleonPowerCannonIds = [];
+        // Spawn 5 cannons
+        for (let c = 0; c < 5; c++) {
+          const cId = 'power-cannon-' + lp.id + '-' + c + '-' + Date.now();
+          const cannon = createPlayerState(
+            { id: cId, name: 'Cannon', color: '#555', fighterId: 'napoleon' },
+            { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, fighter
+          );
+          cannon.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 6;
+          cannon.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 6;
+          const cR = GAME_TILE * PLAYER_RADIUS_RATIO;
+          if (!canMoveTo(cannon.x, cannon.y, cR)) { cannon.x = lp.x; cannon.y = lp.y; }
+          cannon.hp = 600; cannon.maxHp = 600;
+          cannon.isSummon = true; cannon.summonOwner = lp.id;
+          cannon.summonType = 'napoleon-power-cannon';
+          cannon.summonSpeed = 0;
+          cannon.summonDamage = 700;
+          cannon.summonAttackCD = 5; cannon.summonAttackTimer = 0;
+          cannon.summonProjectileSpeed = 30;
+          gamePlayers.push(cannon);
+          lp.napoleonPowerCannonIds.push(cId);
+        }
+        // Remove old cavalry summons
+        for (let ci = gamePlayers.length - 1; ci >= 0; ci--) {
+          if (gamePlayers[ci].isSummon && gamePlayers[ci].summonType === 'napoleon-cavalry' && gamePlayers[ci].summonOwner === lp.id) {
+            gamePlayers.splice(ci, 1);
+          }
+        }
+        if (!lp.napoleonCavalryIds) lp.napoleonCavalryIds = [];
+        lp.napoleonCavalryIds = [];
+        // Spawn 3 cavalry (300HP, 400dmg, 2x dmg taken)
+        for (let cv = 0; cv < 3; cv++) {
+          const cvId = 'cavalry-' + lp.id + '-' + cv + '-' + Date.now();
+          const cav = createPlayerState(
+            { id: cvId, name: 'Cavalry', color: '#8b4513', fighterId: 'napoleon' },
+            { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, fighter
+          );
+          cav.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 5;
+          cav.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 5;
+          const cvR = GAME_TILE * PLAYER_RADIUS_RATIO;
+          if (!canMoveTo(cav.x, cav.y, cvR)) { cav.x = lp.x; cav.y = lp.y; }
+          cav.hp = 300; cav.maxHp = 300;
+          cav.isSummon = true; cav.summonOwner = lp.id;
+          cav.summonType = 'napoleon-cavalry';
+          cav.fighter = fighter;
+          cav.summonSpeed = 4.0; // fast cavalry
+          cav.summonDamage = 400;
+          cav.summonStunDur = 0;
+          cav.summonAttackCD = 2.0; cav.summonAttackTimer = 0;
+          cav.napoleonCavalry = true; // takes 2x damage (reuses existing mechanic)
+          gamePlayers.push(cav);
+          lp.napoleonCavalryIds.push(cvId);
+        }
+        showPopup('⚔ FULL POWER!');
+        combatLog.push({ text: '⚔ Full Power! 5 cannons + 3 cavalry deployed!', timer: 5, color: '#8b4513' });
+        lp.effects.push({ type: 'napoleon-full-power', timer: 2.0 });
+      }
     } else if (isModerator) {
       // Moderator SPACE: Server Update — buff all teammates + reset cooldowns
       lp.specialUsed = true;
@@ -6896,28 +8997,53 @@ function useAbility(key) {
       lp.modServerUpdateTimer = buffDur;
       lp.cdM1 = 0; lp.cdE = 0; lp.cdR = 0; lp.cdT = 0; lp.cdF = 0;
       combatLog.push({ text: '📦 SERVER UPDATE! +50% speed, damage, defense! CDs reset!', timer: 5, color: '#2ecc71' });
+      // Power: Multi Update — allow special to recharge and be used again
+      if (typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id)) {
+        lp.specialUsed = false;
+        lp.specialUnlocked = false;
+        lp.totalDamageTaken = 0;
+        showPopup('📦 MULTI UPDATE!');
+        combatLog.push({ text: '📦 Multi Update! Special recharging for next use!', timer: 4, color: '#00ff88' });
+      }
     } else if (isDnd) {
       // D&D Campaigner SPACE: D20 Roll — buff all teammates' M1 to 1000 dmg until next death
       lp.specialUsed = true;
       lp.dndD20Active = true;
+      const dndHasPower = typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id);
+      // Power: Super Lucky — buff persists through next 2 deaths instead of 1
+      const deathsNeeded = dndHasPower ? 2 : 0;
       lp.effects.push({ type: 'd20-roll', timer: 3.0 });
       for (const p of gamePlayers) {
         if (!p.alive || p.isSummon) continue;
         if (p.id === lp.id || (p.team && p.team === lp.team)) {
           p.dndD20Active = true;
+          p.dndD20DeathsRemaining = deathsNeeded;
         }
       }
-      combatLog.push({ text: '🎲 NATURAL 20! All allies deal 650 M1 dmg until next death!', timer: 5, color: '#ffd700' });
+      lp.dndD20DeathsRemaining = deathsNeeded;
+      if (dndHasPower) {
+        showPopup('🎲 SUPER LUCKY!');
+        combatLog.push({ text: '🎲 SUPER LUCKY! All allies deal 650 M1 dmg until 2 more deaths!', timer: 5, color: '#ffd700' });
+      } else {
+        combatLog.push({ text: '🎲 NATURAL 20! All allies deal 650 M1 dmg until next death!', timer: 5, color: '#ffd700' });
+      }
     } else if (isDragon) {
-      // Dragon SPACE: Power of the Evil — summon Yellow Ochre or Lich
+      // Dragon SPACE: Power of the Evil — summon Yellow Ochre or Lich (or both with Power)
       lp.specialUsed = true;
-      // Kill old summon if exists
+      const dragonHasPower = typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id);
+      // Kill old summon(s) if exist
       if (lp.dragonSummonId) {
         const oldS = gamePlayers.find(p => p.id === lp.dragonSummonId);
         if (oldS && oldS.alive) { oldS.alive = false; oldS.hp = 0; oldS.effects.push({ type: 'death', timer: 2 }); }
       }
-      const roll = Math.random();
-      if (roll < 0.5) {
+      if (lp.dragonSummonId2) {
+        const oldS2 = gamePlayers.find(p => p.id === lp.dragonSummonId2);
+        if (oldS2 && oldS2.alive) { oldS2.alive = false; oldS2.hp = 0; oldS2.effects.push({ type: 'death', timer: 2 }); }
+        lp.dragonSummonId2 = null;
+      }
+      const spawnOchre = dragonHasPower || Math.random() < 0.5;
+      const spawnLich = dragonHasPower || !spawnOchre;
+      if (spawnOchre) {
         // Yellow Ochre: 3x3 jelly, 1000HP, 50dps area + slow
         const ochreId = 'dragon-ochre-' + lp.id + '-' + Date.now();
         const ochre = createPlayerState(
@@ -6939,7 +9065,8 @@ function useAbility(key) {
         lp.dragonSummonId = ochreId;
         lp.effects.push({ type: 'dragon-summon', timer: 2.0 });
         combatLog.push({ text: '👹 Yellow Ochre summoned! (3×3 jelly, 1000HP)', timer: 4, color: '#c8a832' });
-      } else {
+      }
+      if (spawnLich) {
         // Lich: 700HP, 100dmg lightning, 0.4s CD, fast autoheal
         const lichId = 'dragon-lich-' + lp.id + '-' + Date.now();
         const lich = createPlayerState(
@@ -6959,9 +9086,103 @@ function useAbility(key) {
         lich.lichKillCount = 0;
         lich.isCPU = true;
         gamePlayers.push(lich);
-        lp.dragonSummonId = lichId;
+        if (dragonHasPower) {
+          lp.dragonSummonId2 = lichId;
+        } else {
+          lp.dragonSummonId = lichId;
+        }
         lp.effects.push({ type: 'dragon-summon', timer: 2.0 });
         combatLog.push({ text: '💀 Lich summoned! (700HP, lightning, autoheal)', timer: 4, color: '#6a0dad' });
+      }
+      if (dragonHasPower) {
+        showPopup('🐉 DOUBLE TROUBLE!');
+        combatLog.push({ text: '🐉 Double Trouble! Both villains summoned!', timer: 5, color: '#ff4444' });
+      }
+    } else if (isIllusion) {
+      // Illusion SPACE: The Illusions Of Everything — spawn 3 illusion copies, turn invisible until all killed
+      lp.specialUsed = true;
+      lp.illusionSpecialInvis = true;
+      lp.illusionSpecialCopyIds = [];
+      const sAbil = fighter.abilities[4];
+      const illusionHasPower = typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id);
+      const count = illusionHasPower ? 5 : (sAbil.illusionCount || 3);
+      const copyHp = 500 + Math.floor(Math.random() * 101);
+      for (let i = 0; i < count; i++) {
+        const copyId = 'illusion-special-' + lp.id + '-' + i + '-' + Date.now();
+        const copy = createPlayerState(
+          { id: copyId, name: lp.name, color: lp.color || '#7f8fa6', fighterId: 'illusion' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+          fighter
+        );
+        copy.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 4;
+        copy.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 4;
+        const copyRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(copy.x, copy.y, copyRadius)) { copy.x = lp.x; copy.y = lp.y; }
+        copy.hp = copyHp;
+        copy.maxHp = copyHp;
+        copy.isSummon = true;
+        copy.summonOwner = lp.id;
+        copy.summonType = 'illusion-special-copy';
+        copy.isCPU = true;
+        copy.difficulty = 'hard';
+        copy.noCloneHeal = true;
+        copy.illusionM1Only = true;
+        copy.aiState = {
+          moveTarget: null, attackTarget: null, thinkTimer: 0, abilityTimer: 0,
+          lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false,
+        };
+        gamePlayers.push(copy);
+        lp.illusionSpecialCopyIds.push(copyId);
+      }
+      lp.effects.push({ type: 'illusion-everything', timer: 2.0 });
+      // Power: and more — stun everyone for 3s (time pause) + disillusion (see through grass)
+      if (illusionHasPower) {
+        const pauseDur = 3;
+        for (const target of gamePlayers) {
+          if (!target.alive || target.isSummon) continue;
+          if (target.id === lp.id) continue;
+          if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
+          target.stunned = pauseDur;
+          target.effects.push({ type: 'stun', timer: pauseDur });
+        }
+        // Give disillusion (see through grass)
+        lp.illusionSeeGrassTimer = 10;
+        if (gameMode === 'teams' && lp.team) {
+          for (const ally of gamePlayers) {
+            if (ally.id === lp.id || !ally.alive || ally.isSummon || ally.team !== lp.team) continue;
+            ally.illusionSeeGrassTimer = 10;
+          }
+        }
+        showPopup('👻 ...AND MORE!');
+        combatLog.push({ text: '👻 ...and more! 5 illusions + time paused + disillusion!', timer: 5, color: '#7f8fa6' });
+      } else {
+        combatLog.push({ text: '👻 The Illusions Of Everything! Kill all ' + count + ' to reveal Illusion!', timer: 4, color: '#7f8fa6' });
+      }
+    } else if (isDogTooth) {
+      // Dog Tooth SPACE: 50% Puppet God, 50% Moon — instant random pick
+      if (!lp.dogtoothSpecialChoice) {
+        lp.specialUsed = true;
+        if (Math.random() < 0.5) {
+          // Kill The Puppet God
+          lp.dogtoothSpecialChoice = 'puppet';
+          lp.dogtoothPuppetGod = true;
+          combatLog.push({ text: '💀 Kill The Puppet God', timer: 4, color: '#aaa' });
+          combatLog.push({ text: '(On death → revive half HP, take 1.5× damage)', timer: 4, color: '#888' });
+        } else {
+          // The Moon Woke Up
+          lp.dogtoothSpecialChoice = 'moon';
+          lp.dogtoothMoonUsed = true;
+          const moonAbil = lp.fighter.abilities[4];
+          const moonRadius = (moonAbil.moonRadius || 10) * GAME_TILE;
+          const moonDelay = moonAbil.moonDelay || 3;
+          lp.dogtoothMoonX = lp.x;
+          lp.dogtoothMoonY = lp.y;
+          lp.dogtoothMoonTimer = moonDelay;
+          lp.dogtoothMoonRadius = moonRadius;
+          lp.dogtoothMoonDmg = moonAbil.damage || 1200;
+          lp.effects.push({ type: 'moon-shadow', timer: moonDelay + 1 });
+          combatLog.push({ text: '🌙 The Moon Woke Up! Impact in 3s!', timer: 4, color: '#ffeeaa' });
+        }
       }
     } else {
       // Fighter: Special jump
@@ -6977,13 +9198,13 @@ function useAbility(key) {
 
   // ── Move 4 (F) — achievement-unlocked abilities ───────────
   else if (key === 'F') {
-    if (lp.isCPU) return; // CPU never uses Move 4
     if (lp.fighter.abilities.length <= 5) return; // no F ability
     const fAbil = lp.fighter.abilities[5];
-    // Check if unlocked via achievement
-    if (typeof isMove4Unlocked === 'function' && !isMove4Unlocked(lp.fighter.id)) return;
-    // Max 3 uses per game
-    if (lp.move4Uses >= 3) return;
+    // Check if unlocked via achievement (skip for CPUs — always unlocked)
+    if (!lp.isCPU && typeof isMove4Unlocked === 'function' && !isMove4Unlocked(lp.fighter.id)) return;
+    // Max uses per game (default 3)
+    const _fMaxUses = fAbil.maxUses || 3;
+    if (lp.move4Uses >= _fMaxUses) return;
     if (lp.cdF > 0) return;
 
     if (isPoker) {
@@ -7474,6 +9695,68 @@ function useAbility(key) {
       lp.dndSidekickId = skId;
       lp.effects.push({ type: 'dnd-sidekick-spawn', timer: 1.5 });
       combatLog.push({ text: '🛡 Sidekick summoned!', timer: 3, color: '#daa520' });
+    } else if (isIllusion) {
+      // Illusion F: The Disillusion Of Environment — see through grass for 5s (self + allies)
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      const dur = fAbil.duration || 5;
+      lp.illusionSeeGrassTimer = dur;
+      // Apply to allies in team mode
+      if (gameMode === 'teams' && lp.team) {
+        for (const ally of gamePlayers) {
+          if (ally.id === lp.id || !ally.alive || ally.isSummon || ally.team !== lp.team) continue;
+          ally.illusionSeeGrassTimer = dur;
+        }
+      }
+      lp.effects.push({ type: 'illusion-see-grass', timer: dur + 0.5 });
+      combatLog.push({ text: '👁 Disillusion! See through grass for 5s!', timer: 3, color: '#7f8fa6' });
+    } else if (isDogTooth) {
+      // Dog Tooth F: The Final Battle — teleport to The Complex, fight 3000HP Room
+      if (lp.dogtoothFUsed) {
+        combatLog.push({ text: '⚔️ The Final Battle can only be used once!', timer: 2, color: '#888' });
+        return;
+      }
+      lp.dogtoothFUsed = true;
+      lp.move4Uses++;
+      lp.dogtoothInComplex = true;
+      // Kill old complex room if any
+      if (lp.dogtoothComplexRoomId) {
+        const oldR = gamePlayers.find(p => p.id === lp.dogtoothComplexRoomId);
+        if (oldR && oldR.alive) { oldR.alive = false; oldR.hp = 0; }
+      }
+      // Kill Ouriel (don't let it transform into a room)
+      if (lp.dogtoothOurielId) {
+        const ouriel = gamePlayers.find(p => p.id === lp.dogtoothOurielId);
+        if (ouriel && ouriel.alive) { ouriel.alive = false; ouriel.hp = 0; ouriel.effects.push({ type: 'death', timer: 2 }); }
+        lp.dogtoothOurielId = null;
+      }
+      // Spawn a 3000HP Room entity near player
+      const roomId = 'complex-room-' + lp.id + '-' + Date.now();
+      const roomFighter = { id: 'complex-room', name: 'Room', hp: 1300, healAmount: 0, healDelay: 999, healTick: 999, speed: 1.8, abilities: [] };
+      const roomSpawnX = lp.x + (Math.random() < 0.5 ? 1 : -1) * GAME_TILE * 4;
+      const roomSpawnY = lp.y + (Math.random() < 0.5 ? 1 : -1) * GAME_TILE * 4;
+      const room = createPlayerState(
+        { id: roomId, name: 'Room', color: '#000' },
+        { r: Math.floor(roomSpawnY / GAME_TILE), c: Math.floor(roomSpawnX / GAME_TILE) },
+        roomFighter
+      );
+      room.x = roomSpawnX; room.y = roomSpawnY;
+      const rR = GAME_TILE * PLAYER_RADIUS_RATIO;
+      if (!canMoveTo(room.x, room.y, rR)) { const s = getRandomSafePosition(); room.x = s.x; room.y = s.y; }
+      room.hp = 1300; room.maxHp = 1300;
+      room.isSummon = true; room.summonOwner = 'none'; // hostile to everyone
+      room.summonType = 'complex-room';
+      room.summonTargetId = lp.id; // hunts Dog Tooth
+      room.summonSpeed = 1.8;
+      room.summonDamage = 0;
+      room.summonAttackCD = 999;
+      room.summonAttackTimer = 0;
+      room.complexDPS = 30; // 30 DPS aura
+      room.isCPU = true;
+      gamePlayers.push(room);
+      lp.dogtoothComplexRoomId = roomId;
+      lp.effects.push({ type: 'complex-enter', timer: 2.0 });
+      combatLog.push({ text: '⚔️ THE FINAL BATTLE! Fight the 1300HP Room!', timer: 5, color: '#fff' });
     } else {
       // Fighter: Potion — heal 300 over 3s
       lp.move4Uses++;
@@ -7491,6 +9774,7 @@ function executeSpecialLanding() {
   const abil = lp.fighter.abilities[4]; // Special
   const isCricketSpecial = lp.fighter.id === 'cricket';
   const isDeerSpecial = lp.fighter.id === 'deer';
+  const hasPower = typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id);
   lp.specialAiming = false;
   lp.specialJumping = false;
   lp.specialUsed = true;
@@ -7500,12 +9784,60 @@ function executeSpecialLanding() {
   const landY = lp.specialAimY;
 
   if (isDeerSpecial) {
-    // Deer Igloo: place igloo at aimed location, damage over time handled in updateGame
-    lp.iglooX = landX;
-    lp.iglooY = landY;
-    lp.iglooTimer = abil.duration || 5;
-    lp.effects.push({ type: 'igloo', timer: (abil.duration || 5) + 1 });
-    combatLog.push({ text: '🏔 Igloo built!', timer: 3, color: '#87ceeb' });
+    if (hasPower) {
+      // Power Special: YOU ARE THE IGLOO — teleport all enemies to igloo location
+      lp.iglooX = landX;
+      lp.iglooY = landY;
+      lp.iglooTimer = abil.duration || 20;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive || target.isSummon) continue;
+        if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
+        // Teleport enemy into the igloo zone
+        const angle = Math.random() * Math.PI * 2;
+        const dist = Math.random() * 2 * GAME_TILE;
+        target.x = landX + Math.cos(angle) * dist;
+        target.y = landY + Math.sin(angle) * dist;
+        target.effects.push({ type: 'igloo-teleport', timer: 1.5 });
+      }
+      lp.effects.push({ type: 'igloo', timer: (abil.duration || 20) + 1 });
+      showPopup('🏔 YOU ARE THE IGLOO!');
+      combatLog.push({ text: '🏔 YOU ARE THE IGLOO! All enemies teleported!', timer: 4, color: '#87ceeb' });
+    } else {
+      // Normal Igloo
+      lp.iglooX = landX;
+      lp.iglooY = landY;
+      lp.iglooTimer = abil.duration || 5;
+      lp.effects.push({ type: 'igloo', timer: (abil.duration || 5) + 1 });
+      combatLog.push({ text: '🏔 Igloo built!', timer: 3, color: '#87ceeb' });
+    }
+    return;
+  }
+
+  if (isCricketSpecial && hasPower) {
+    // Power Special: Winning the Finals — spawn trophy at map center (near tree)
+    const centerX = (Math.floor(gameMap.cols / 2) + 0.5) * GAME_TILE;
+    const centerY = (Math.floor(gameMap.rows / 2) + 0.5) * GAME_TILE;
+    const trophyId = 'trophy-' + lp.id + '-' + Date.now();
+    // Remove old trophy if any
+    if (lp.cricketTrophyId) {
+      const oldIdx = gamePlayers.findIndex(p => p.id === lp.cricketTrophyId);
+      if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+    }
+    const trophyFighter = getFighter('cricket');
+    const trophy = createPlayerState(
+      { id: trophyId, name: 'Trophy', color: '#ffd700', fighterId: 'cricket' },
+      { r: Math.floor(centerY / GAME_TILE), c: Math.floor(centerX / GAME_TILE) }, trophyFighter
+    );
+    trophy.x = centerX; trophy.y = centerY;
+    trophy.hp = 1500; trophy.maxHp = 1500;
+    trophy.isSummon = true; trophy.summonOwner = lp.id; trophy.summonType = 'cricket-trophy';
+    trophy.fighter = trophyFighter;
+    gamePlayers.push(trophy);
+    lp.cricketTrophyId = trophyId;
+    lp.cricketTrophyShield = true; // untouchable while trophy alive
+    lp.effects.push({ type: 'trophy-spawn', timer: 2.0 });
+    showPopup('🏆 WINNING THE FINALS!');
+    combatLog.push({ text: '🏆 Trophy spawned at center! Cricket is untouchable!', timer: 5, color: '#ffd700' });
     return;
   }
 
@@ -7519,8 +9851,18 @@ function executeSpecialLanding() {
     if (dist <= hitRange) {
       const wasAlive = target.alive;
       dealDamage(lp, target, abil.damage);
-      // Achievement: Fighter special kills
-      if (wasAlive && !target.alive && lp.id === localPlayerId && lp.fighter.id === 'fighter' && !target.isSummon) {
+      // Power Special: With Extra Power — apply bleeding and 10s stun
+      if (hasPower && lp.fighter.id === 'fighter') {
+        if (target.alive) {
+          if (!target.bleedTimers) target.bleedTimers = [];
+          target.bleedTimers.push({ dps: 50, remaining: 10 });
+          target.stunned = 10;
+          target.effects.push({ type: 'stun', timer: 10 });
+          target.effects.push({ type: 'power-bleed', timer: 10 });
+        }
+      }
+      // Achievement: Fighter special kills (not team mode)
+      if (wasAlive && !target.alive && lp.id === localPlayerId && lp.fighter.id === 'fighter' && !target.isSummon && gameMode !== 'teams') {
         _fighterSpecialKillsThisGame++;
         if (_fighterSpecialKillsThisGame >= 2 && typeof trackFighterSpecialAch === 'function') {
           trackFighterSpecialAch();
@@ -7588,15 +9930,36 @@ function dealDamage(attacker, target, amount, viaSummon) {
   }
   // Obelisk and backrooms chaser are invincible
   if (target.isSummon && (target.summonType === 'obelisk' || target.summonType === 'backrooms-chaser')) return;
+  // Exploding kittens can't damage players trapped in the black hole (imploding kitten)
+  if (attacker && attacker.isSummon && attacker.summonType === 'exploding-kitten') {
+    const bh = gamePlayers.find(p => p.alive && p.isSummon && p.summonType === 'imploding-kitten' && p.summonOwner === attacker.summonOwner && p.blackHoleActive);
+    if (bh) {
+      const tdx = target.x - bh.x; const tdy = target.y - bh.y;
+      const tdist = Math.sqrt(tdx * tdx + tdy * tdy);
+      if (tdist <= (bh.blackHoleRadius || 7 * GAME_TILE)) return; // trapped in black hole — immune to kittens
+    }
+  }
   // Backrooms: players in backrooms can't be damaged by normal attacks (only the chaser)
   if (target.inBackrooms && attacker && attacker.summonType !== 'backrooms-chaser') return;
   // Backrooms: players outside backrooms can't be hit by backrooms entities
   if (!target.inBackrooms && attacker && attacker.summonType === 'backrooms-chaser') return;
   // Backrooms: player IN backrooms cannot attack players in the normal dimension
   if (attacker && attacker.inBackrooms && !target.inBackrooms && target.summonType !== 'backrooms-chaser') return;
+  // Final Battle (Complex): isolated like backrooms — only Complex Room can interact
+  if (target.dogtoothInComplex && attacker && attacker.id !== target.dogtoothComplexRoomId) return;
+  if (attacker && attacker.dogtoothInComplex && !target.dogtoothInComplex && target.id !== attacker.dogtoothComplexRoomId) return;
   // Alternate: player being hunted by an alternate can only attack the alternate, not other players
   if (attacker && attacker.hasAlternate && !target.isSummon) return;
   if (attacker && attacker.hasAlternate && target.isSummon && target.summonType !== 'alternate') return;
+  // Cricket Trophy Shield: cricket is untouchable while their trophy is alive
+  if (!target.isSummon && target.cricketTrophyShield && target.cricketTrophyId) {
+    const trophy = gamePlayers.find(p => p.alive && p.id === target.cricketTrophyId);
+    if (trophy) return; // cricket is untouchable — destroy trophy first
+  }
+  // Poker Debt: players in debt to a poker can't damage that poker
+  if (attacker && attacker.pokerDebtTarget && target.id === attacker.pokerDebtTarget) {
+    return; // debtor can't damage the poker they owe
+  }
   // Seductive Unicorn: owner is invulnerable while their seductive unicorn is alive
   if (!target.isSummon) {
     const seductiveUnicorn = gamePlayers.find(p => p.alive && p.isSummon && p.summonType === 'seductive-unicorn' && p.summonOwner === target.id);
@@ -7654,6 +10017,28 @@ function dealDamage(attacker, target, amount, viaSummon) {
     target.effects.push({ type: 'cat-dodge', timer: 0.4 });
     return; // damage fully dodged
   }
+  // Illusion Teleattack dodge: dodge attacks from the specific player hit by M1
+  if (target.illusionDodgeTimer > 0 && attacker && attacker.id === target.illusionDodgeTargetId) {
+    const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+    let jx = 0, jy = 0;
+    if (attacker.alive) {
+      const adx = target.x - attacker.x; const ady = target.y - attacker.y;
+      const ad = Math.sqrt(adx * adx + ady * ady) || 1;
+      const side = Math.random() < 0.5 ? 1 : -1;
+      jx = (-ady / ad) * side; jy = (adx / ad) * side;
+    } else {
+      const angle = Math.random() * Math.PI * 2;
+      jx = Math.cos(angle); jy = Math.sin(angle);
+    }
+    const jumpDist = GAME_TILE * 2;
+    for (let s = 10; s >= 1; s--) {
+      const tryX = target.x + jx * jumpDist * (s / 10);
+      const tryY = target.y + jy * jumpDist * (s / 10);
+      if (canMoveTo(tryX, tryY, r)) { target.x = tryX; target.y = tryY; break; }
+    }
+    target.effects.push({ type: 'illusion-dodge', timer: 0.4 });
+    return; // damage fully dodged
+  }
   // Blinds modifier (Poker)
   if (target.blindBuff === 'small') amount = Math.round(amount * 0.5);
   else if (target.blindBuff === 'big') amount = Math.round(amount * 1.5);
@@ -7690,12 +10075,54 @@ function dealDamage(attacker, target, amount, viaSummon) {
       }
     }
   }
+  // Dog Tooth Smile Tapes: 1.3x damage resistance
+  if (target.dogtoothSmileTimer > 0) amount = Math.round(amount / 1.3);
+  // Dog Tooth Puppet God: revive damage multiplier
+  if (target.dogtoothReviveDmgMult > 1) amount = Math.round(amount * target.dogtoothReviveDmgMult);
+  // Ouriel: only enemies can damage Ouriel (not the owner)
+  if (target.isSummon && target.summonType === 'ouriel') {
+    if (attacker && attacker.id === target.summonOwner) return; // owner can't hit own Ouriel
+    target.ourielHitsLeft = (target.ourielHitsLeft || 1) - 1;
+    target.effects.push({ type: 'hit', timer: 0.3 });
+    target.noDamageTimer = 0;
+    if (target.ourielHitsLeft <= 0) {
+      // Convert Ouriel to Room — hostile to owner
+      target.summonType = 'ouriel-room';
+      target.hp = 400;
+      target.maxHp = 400;
+      target.ourielRoomDPS = 20;
+      target.summonSpeed = 1.5;
+      target.effects.push({ type: 'ouriel-transform', timer: 1.5 });
+      const owner = gamePlayers.find(o => o.id === target.summonOwner);
+      if (owner && owner.id === localPlayerId) {
+        combatLog.push({ text: '✝️ Ouriel transformed into Room! (400HP, 20 DPS to you)', timer: 4, color: '#ddd' });
+      }
+    }
+    return; // Ouriel absorbs the hit completely
+  }
+  // Ouriel-Room: only the Dogtooth owner can kill it
+  if (target.isSummon && target.summonType === 'ouriel-room') {
+    if (!attacker || attacker.id !== target.summonOwner) return;
+  }
   target.hp -= amount;
   // Reset heal state on damage
   target.noDamageTimer = 0;
   target.isHealing = false;
   target.healTickTimer = 0;
   target.effects.push({ type: 'hit', timer: 0.3 });
+
+  // Poker debt: attacker landing a hit reduces their debt counter
+  if (attacker && attacker.pokerDebtTarget && attacker.pokerDebtHits > 0) {
+    attacker.pokerDebtHits--;
+    if (attacker.pokerDebtHits <= 0) {
+      attacker.pokerDebtTarget = null;
+      attacker.pokerDebtHits = 0;
+      attacker.effects.push({ type: 'debt-cleared', timer: 1.5 });
+      if (attacker.id === localPlayerId) {
+        combatLog.push({ text: '💰 Debt cleared! You can damage Poker again!', timer: 3, color: '#00ff88' });
+      }
+    }
+  }
 
   // Filbus: interrupt channeling on damage
   if (target.isCraftingChair) {
@@ -7716,7 +10143,7 @@ function dealDamage(attacker, target, amount, viaSummon) {
 
   // Track damage taken for special unlock (target's counter)
   target.totalDamageTaken += amount;
-  if (!target.specialUnlocked && !target.specialUsed && target.totalDamageTaken >= target.maxHp * 2) {
+  if (!target.specialUnlocked && !target.specialUsed && target.totalDamageTaken >= getSpecialThreshold(target)) {
     target.specialUnlocked = true;
     target.specialGraceTimer = 3;  // 3s grace before decay starts
     target.specialDecayTimer = 0;
@@ -7728,7 +10155,7 @@ function dealDamage(attacker, target, amount, viaSummon) {
   // Track damage dealt for attacker's special unlock too
   if (attacker && attacker.alive) {
     attacker.totalDamageTaken += amount;
-    if (!attacker.specialUnlocked && !attacker.specialUsed && attacker.totalDamageTaken >= attacker.maxHp * 2) {
+    if (!attacker.specialUnlocked && !attacker.specialUsed && attacker.totalDamageTaken >= getSpecialThreshold(attacker)) {
       attacker.specialUnlocked = true;
       attacker.specialGraceTimer = 3;
       attacker.specialDecayTimer = 0;
@@ -7744,21 +10171,32 @@ function dealDamage(attacker, target, amount, viaSummon) {
   }
 
   if (target.hp <= 0) {
+    // Dog Tooth Puppet God: revive on death with half HP (no signal to opponents)
+    if (target.dogtoothPuppetGod && !target.dogtoothPuppetUsed && !target.isSummon) {
+      target.dogtoothPuppetUsed = true;
+      target.hp = Math.floor(target.maxHp * 0.5);
+      target.dogtoothReviveDmgMult = 1.5;
+      // No visible effect to other players — silent revive
+      if (target.id === localPlayerId) {
+        combatLog.push({ text: '💀 Kill The Puppet God! Revived with half HP! (1.5× dmg taken)', timer: 5, color: '#ff4444' });
+      }
+      return; // don't die
+    }
     target.hp = 0;
     target.alive = false;
     target.effects.push({ type: 'death', timer: 2 });
-    // Achievement: summon kill in multiplayer
-    if (viaSummon && attacker && attacker.id === localPlayerId && !target.isSummon && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard') {
+    // Achievement: summon kill in multiplayer (not team mode)
+    if (viaSummon && attacker && attacker.id === localPlayerId && !target.isSummon && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard' && gameMode !== 'teams') {
       if (typeof trackSummonKillMP === 'function') trackSummonKillMP();
       // Filbus oddity kill in MP
       if (attacker.fighter && attacker.fighter.id === 'filbus' && typeof trackFilbusOddityKill === 'function') {
         trackFilbusOddityKill();
       }
     }
-    // Achievement: 1X kill tracking
-    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'onexonexonex' && !target.isSummon && target.fighter) {
+    // Achievement: 1X kill tracking (not team mode)
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'onexonexonex' && !target.isSummon && target.fighter && gameMode !== 'teams') {
       // Kill Noli in MP
-      if (target.fighter.id === 'noli' && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard') {
+      if (target.fighter.id === 'noli' && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard' && gameMode !== 'teams') {
         if (typeof trackOnexKilledNoliMP === 'function') trackOnexKilledNoliMP();
       }
       // Kill Cat in SP
@@ -7766,8 +10204,8 @@ function dealDamage(attacker, target, amount, viaSummon) {
         if (typeof trackOnexKilledCatSP === 'function') trackOnexKilledCatSP();
       }
     }
-    // Achievement: Deer water kill
-    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'deer' && !target.isSummon) {
+    // Achievement: Deer water kill (not team mode)
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'deer' && !target.isSummon && gameMode !== 'teams') {
       const aTileR = Math.floor(attacker.y / GAME_TILE);
       const aTileC = Math.floor(attacker.x / GAME_TILE);
       let nearWater = false;
@@ -7781,27 +10219,32 @@ function dealDamage(attacker, target, amount, viaSummon) {
       }
       if (nearWater && typeof trackDeerWaterKill === 'function') trackDeerWaterKill();
     }
-    // Achievement: Napoleon unlock — M1 kills (any fighter, not via summon or special)
-    if (attacker && attacker.id === localPlayerId && !target.isSummon && _lastDealDamageWasM1) {
+    // Achievement: Napoleon unlock — M1 kills (not team mode)
+    if (attacker && attacker.id === localPlayerId && !target.isSummon && _lastDealDamageWasM1 && gameMode !== 'teams') {
       if (typeof trackNapoleonM1Kill === 'function') trackNapoleonM1Kill();
     }
-    // Achievement: Napoleon unlock — track summon kills for win-with-summon
-    if (viaSummon && attacker && attacker.id === localPlayerId && !target.isSummon) {
+    // Achievement: Napoleon unlock — track summon kills for win-with-summon (not team mode)
+    if (viaSummon && attacker && attacker.id === localPlayerId && !target.isSummon && gameMode !== 'teams') {
       _hadSummonKillThisGame = true;
     }
-    // Achievement: Filbus boiled one kills
-    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'filbus' && attacker.boiledOneActive && !target.isSummon) {
+    // Achievement: Filbus boiled one kills (not team mode)
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'filbus' && attacker.boiledOneActive && !target.isSummon && gameMode !== 'teams') {
       _filbusBoiledKillsThisGame++;
       if (_filbusBoiledKillsThisGame >= 2 && typeof trackFilbusBoiledKill === 'function') {
         trackFilbusBoiledKill();
       }
     }
-    // Achievement: Dragon Beam kills in a single game
-    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'dragon' && attacker.dragonBeamFiring && !target.isSummon) {
+    // Achievement: Dragon Beam kills in a single game (not team mode)
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'dragon' && attacker.dragonBeamFiring && !target.isSummon && gameMode !== 'teams') {
       _dragonBeamKillsThisGame++;
       if (_dragonBeamKillsThisGame >= 2 && typeof trackDragonBeamAch === 'function') {
         trackDragonBeamAch();
       }
+    }
+    // Achievement: Illusion invisible kills (not team mode)
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'illusion' && !target.isSummon && gameMode !== 'teams'
+        && (attacker.illusionInvisTimer > 0 || attacker.illusionSpecialInvis)) {
+      if (typeof trackIllusionInvisKill === 'function') trackIllusionInvisKill();
     }
     // Init spectator camera if local player died
     if (target.id === localPlayerId) {
@@ -7860,6 +10303,48 @@ function dealDamage(attacker, target, amount, viaSummon) {
       // Unicorn death: clear catUnicornId
       if ((target.summonType === 'destructive-unicorn' || target.summonType === 'queenbee-unicorn' || target.summonType === 'seductive-unicorn') && owner) {
         if (owner.catUnicornId === target.id) owner.catUnicornId = null;
+      }
+      // Cricket Trophy death: remove cricket's shield
+      if (target.summonType === 'cricket-trophy' && owner) {
+        if (owner.cricketTrophyId === target.id) {
+          owner.cricketTrophyId = null;
+          owner.cricketTrophyShield = false;
+          owner.effects.push({ type: 'trophy-destroyed', timer: 2.0 });
+          if (owner.id === localPlayerId) {
+            combatLog.push({ text: '🏆 Trophy destroyed! Shield lost!', timer: 4, color: '#ff4444' });
+          }
+        }
+      }
+      // Filbus dinosaur death: remove from owner's filbusDinoIds
+      if (target.summonType === 'filbus-dino' && owner && owner.filbusDinoIds) {
+        const didx = owner.filbusDinoIds.indexOf(target.id);
+        if (didx >= 0) owner.filbusDinoIds.splice(didx, 1);
+      }
+      // 1X Slasher death: clear reference
+      if (target.summonType === 'slasher' && owner) {
+        if (owner.onexSlasherId === target.id) owner.onexSlasherId = null;
+      }
+      // Guest666 death: clear reference
+      if (target.summonType === 'guest666' && owner) {
+        if (owner.noliGuest666Id === target.id) owner.noliGuest666Id = null;
+      }
+      // Imploding Kitten death: clear reference
+      if (target.summonType === 'imploding-kitten' && owner) {
+        if (owner.catImplodingKittenId === target.id) owner.catImplodingKittenId = null;
+      }
+      // Napoleon power cannon death
+      if (target.summonType === 'napoleon-power-cannon' && owner && owner.napoleonPowerCannonIds) {
+        const idx = owner.napoleonPowerCannonIds.indexOf(target.id);
+        if (idx >= 0) owner.napoleonPowerCannonIds.splice(idx, 1);
+      }
+      // Napoleon cavalry death
+      if (target.summonType === 'napoleon-cavalry' && owner && owner.napoleonCavalryIds) {
+        const idx = owner.napoleonCavalryIds.indexOf(target.id);
+        if (idx >= 0) owner.napoleonCavalryIds.splice(idx, 1);
+      }
+      // Dragon summon2 death (Double Trouble)
+      if ((target.summonType === 'dragon-ochre' || target.summonType === 'dragon-lich') && owner && owner.dragonSummonId2 === target.id) {
+        owner.dragonSummonId2 = null;
       }
       // Alternate death: free the original player
       if (target.summonType === 'alternate') {
@@ -7969,12 +10454,19 @@ function dealDamage(attacker, target, amount, viaSummon) {
         }
       }
     }
-    // D&D D20: ANY death clears the D20 buff for ALL players
+    // D&D D20: ANY death clears the D20 buff for ALL players (unless Super Lucky deaths remaining)
     for (const dp of gamePlayers) {
       if (dp.dndD20Active) {
-        dp.dndD20Active = false;
-        if (dp.id === localPlayerId) {
-          combatLog.push({ text: '🎲 D20 buff ended — someone died!', timer: 3, color: '#ff6600' });
+        if (dp.dndD20DeathsRemaining > 0) {
+          dp.dndD20DeathsRemaining--;
+          if (dp.id === localPlayerId) {
+            combatLog.push({ text: '🎲 Super Lucky! D20 buff survives (' + dp.dndD20DeathsRemaining + ' deaths left)!', timer: 3, color: '#ffd700' });
+          }
+        } else {
+          dp.dndD20Active = false;
+          if (dp.id === localPlayerId) {
+            combatLog.push({ text: '🎲 D20 buff ended — someone died!', timer: 3, color: '#ff6600' });
+          }
         }
       }
     }
@@ -7992,6 +10484,33 @@ function dealDamage(attacker, target, amount, viaSummon) {
       // In host-authoritative, only the host should emit deaths to avoid duplicate server tracking
       if (isHostAuthority || (gameMode !== undefined && gameMode !== 'teams')) {
         socket.emit('player-died', { playerId: target.id });
+      }
+    }
+
+    // ── Unstable trait: on ANY death, all Unstable players swap to a random character ──
+    // Their special is replaced with "Unstablism" (switch back to Unstable)
+    const _unstableSwapFighters = getAllFighterIds().filter(f => f !== 'unstable' && f !== 'moderator');
+    for (const up of gamePlayers) {
+      if (!up.alive || up.isSummon) continue;
+      if (!up.unstableOriginalFighter) continue; // not an Unstable player
+      // Pick a random fighter to become
+      const newFid = _unstableSwapFighters[Math.floor(Math.random() * _unstableSwapFighters.length)];
+      const newFighter = getFighter(newFid);
+      up.fighter = newFighter;
+      // Keep HP as-is but cap to new maxHp
+      up.maxHp = newFighter.hp;
+      if (up.hp > up.maxHp) up.hp = up.maxHp;
+      // Reset cooldowns for new character
+      up.cdE = 0; up.cdR = 0; up.cdT = 0;
+      // Reset special: give them a new special unlock chance but mark it as "unstablism"
+      up.specialUnlocked = true;
+      up.specialUsed = false;
+      up.specialGraceTimer = 999; // no decay — they keep it
+      up.specialDecayTimer = 0;
+      up.unstableSwapped = true; // flag: special = switch back to Unstable
+      up.effects.push({ type: 'unstable-swap', timer: 2.0 });
+      if (up.id === localPlayerId) {
+        combatLog.push({ text: '⚡ UNSTABLE! Swapped to ' + newFighter.name + '! [SPACE] to switch back.', timer: 5, color: '#ff00ff' });
       }
     }
   }
@@ -8021,7 +10540,7 @@ function onRemoteDamage(targetId, amount) {
     }
   }
   target.totalDamageTaken += amount;
-  if (!target.specialUnlocked && target.totalDamageTaken >= target.maxHp * 2) {
+  if (!target.specialUnlocked && target.totalDamageTaken >= getSpecialThreshold(target)) {
     target.specialUnlocked = true;
     if (target.id === localPlayerId) {
       showPopup('⚡ SPECIAL UNLOCKED! [SPACE]');
@@ -8072,12 +10591,12 @@ function onGameOver(winnerId, winnerName, winningTeam) {
     gameCtx.fillStyle = isMyTeam ? '#2ecc71' : '#e94560';
     gameCtx.font = 'bold 36px "Press Start 2P", monospace';
     gameCtx.textAlign = 'center';
-    gameCtx.fillText(isMyTeam ? 'TEAM VICTORY!' : 'TEAM DEFEATED', cw / 2, ch / 2 - 20);
+    gameCtx.fillText(isMyTeam ? 'TEAM VICTORY!' : 'TEAM DEFEATED', cw / 2, ch / 2 - 80);
     gameCtx.fillStyle = '#fff';
     gameCtx.font = 'bold 16px "Press Start 2P", monospace';
-    gameCtx.fillText('Team ' + winningTeam + ' wins!', cw / 2, ch / 2 + 30);
-    if (isMyTeam && typeof trackMPWin === 'function') {
-      trackMPWin(localPlayer ? localPlayer.fighter.id : selectedFighterId);
+    gameCtx.fillText('Team ' + winningTeam + ' wins!', cw / 2, ch / 2 - 35);
+    if (isMyTeam && typeof trackTeamWin === 'function') {
+      trackTeamWin(localPlayer ? localPlayer.fighter.id : selectedFighterId);
     }
     _showPlayAgainOverlay();
     return;
@@ -8088,10 +10607,10 @@ function onGameOver(winnerId, winnerName, winningTeam) {
     gameCtx.fillStyle = isMe ? '#2ecc71' : '#e94560';
     gameCtx.font = 'bold 36px "Press Start 2P", monospace';
     gameCtx.textAlign = 'center';
-    gameCtx.fillText(isMe ? 'VICTORY!' : 'DEFEATED', cw / 2, ch / 2 - 20);
+    gameCtx.fillText(isMe ? 'VICTORY!' : 'DEFEATED', cw / 2, ch / 2 - 80);
     gameCtx.fillStyle = '#fff';
     gameCtx.font = 'bold 16px "Press Start 2P", monospace';
-    gameCtx.fillText((winnerName || 'Someone') + ' wins!', cw / 2, ch / 2 + 30);
+    gameCtx.fillText((winnerName || 'Someone') + ' wins!', cw / 2, ch / 2 - 35);
     // Achievement tracking: multiplayer win
     if (isMe && typeof trackMPWin === 'function') {
       trackMPWin(localPlayer ? localPlayer.fighter.id : selectedFighterId);
@@ -8125,7 +10644,7 @@ function onGameOver(winnerId, winnerName, winningTeam) {
     gameCtx.fillStyle = '#f5a623';
     gameCtx.font = 'bold 36px "Press Start 2P", monospace';
     gameCtx.textAlign = 'center';
-    gameCtx.fillText('DRAW', cw / 2, ch / 2);
+    gameCtx.fillText('DRAW', cw / 2, ch / 2 - 60);
   }
   _showPlayAgainOverlay();
 }
@@ -8168,17 +10687,34 @@ function renderGame() {
   const startRow = Math.floor(camY / GAME_TILE) - 1;
   const endRow   = Math.ceil((camY + ch) / GAME_TILE) + 1;
 
+  const _dtInComplex = localPlayer && localPlayer.dogtoothInComplex;
   for (let r = startRow; r <= endRow; r++) {
     for (let c = startCol; c <= endCol; c++) {
       const screenX = c * GAME_TILE - camX;
       const screenY = r * GAME_TILE - camY;
 
-      if (r < 0 || r >= gameMap.rows || c < 0 || c >= gameMap.cols) {
+      if (_dtInComplex) {
+        // Final Battle: all tiles plain white
+        gameCtx.fillStyle = '#fff';
+        gameCtx.fillRect(screenX, screenY, GAME_TILE, GAME_TILE);
+        // Background black stripes on tiles (static pattern based on column)
+        const stripeHash = ((c * 7919 + r * 104729) & 0xFFFFFF);
+        if ((stripeHash & 3) === 0) { // ~25% of tiles get a stripe
+          const stripeW = 2 + (stripeHash >> 4) % 4;
+          const stripeOff = (stripeHash >> 8) % Math.max(1, (GAME_TILE - stripeW));
+          gameCtx.fillStyle = 'rgba(0, 0, 0, 0.12)';
+          gameCtx.fillRect(screenX + stripeOff, screenY, stripeW, GAME_TILE);
+        }
+      } else if (r < 0 || r >= gameMap.rows || c < 0 || c >= gameMap.cols) {
         drawWater(gameCtx, screenX, screenY, GAME_TILE, Math.abs(r), Math.abs(c));
       } else {
         const tile = gameMap.tiles[r][c];
         drawGround(gameCtx, screenX, screenY, GAME_TILE);
-        if (tile === TILE.GRASS) drawGrass(gameCtx, screenX, screenY, GAME_TILE, r, c);
+        if (tile === TILE.GRASS) {
+          if (localPlayer && localPlayer.illusionSeeGrassTimer > 0) gameCtx.globalAlpha = 0.3;
+          drawGrass(gameCtx, screenX, screenY, GAME_TILE, r, c);
+          if (localPlayer && localPlayer.illusionSeeGrassTimer > 0) gameCtx.globalAlpha = 1.0;
+        }
         else if (tile === TILE.ROCK) drawRock(gameCtx, screenX, screenY, GAME_TILE);
         else if (tile === TILE.WATER) drawWater(gameCtx, screenX, screenY, GAME_TILE, r, c);
       }
@@ -8392,11 +10928,11 @@ function renderGame() {
       gameCtx.lineWidth = 3;
       gameCtx.strokeRect(doorSX - doorW / 2 - 5, doorSY - doorH / 2 - 5, doorW + 10, doorH + 10);
     }
-    // Timer display
+    // Backrooms label
     gameCtx.fillStyle = '#ff4444';
     gameCtx.font = 'bold 16px "Press Start 2P", monospace';
     gameCtx.textAlign = 'center';
-    gameCtx.fillText('BACKROOMS: ' + Math.ceil(localPlayer.backroomsTimer) + 's', cw / 2, 30);
+    gameCtx.fillText('BACKROOMS', cw / 2, 30);
     gameCtx.textAlign = 'left';
   }
 
@@ -8432,6 +10968,15 @@ function renderGame() {
     if (p.inBackrooms && p.id !== localPlayerId) continue;
     // Backrooms chaser: only visible to the trapped player
     if (p.summonType === 'backrooms-chaser' && p.summonTargetId !== localPlayerId) continue;
+    // When local player is in backrooms, hide ALL entities except the chaser hunting them
+    if (localPlayer && localPlayer.inBackrooms && p.id !== localPlayerId
+        && !(p.summonType === 'backrooms-chaser' && p.summonTargetId === localPlayerId)) continue;
+    // ── Final Battle (Complex) visibility: isolated from normal world ──
+    // Player in Complex is invisible to others (except their Complex Room)
+    if (p.dogtoothInComplex && p.id !== localPlayerId && !p.dogtoothComplexRoomId) continue;
+    // When local player is in Complex, hide ALL entities except the Complex Room
+    if (localPlayer && localPlayer.dogtoothInComplex && p.id !== localPlayerId
+        && p.id !== localPlayer.dogtoothComplexRoomId) continue;
 
     // ── Alternate visibility: the real player is invisible to everyone except themselves ──
     if (p.hasAlternate && p.id !== localPlayerId) continue;
@@ -8444,6 +10989,13 @@ function renderGame() {
 
     // ── Moderator Firewall: invisible to enemies while active ──
     if (p.modFirewallTimer > 0 && p.id !== localPlayerId) continue;
+
+    // ── Illusion invisibility: invisible to enemies (E ability + SPACE special) ──
+    // Still visible to the Illusion player themselves
+    if ((p.illusionInvisTimer > 0 || p.illusionSpecialInvis) && p.id !== localPlayerId) {
+      // In team mode, allies can still see the illusion player
+      if (!(gameMode === 'teams' && localPlayer && localPlayer.team && p.team === localPlayer.team)) continue;
+    }
 
     const sx = p.x - camX;
     const sy = p.y - camY;
@@ -8470,11 +11022,14 @@ function renderGame() {
       if (row >= 0 && row < gameMap.rows && col >= 0 && col < gameMap.cols
           && gameMap.tiles[row][col] === TILE.GRASS) grassCount++;
     }
-    const grassFraction = grassCount / samplePoints.length;
+    // In the Complex, there is no grass — ignore grass hiding
+    const grassFraction = _dtInComplex ? 0 : grassCount / samplePoints.length;
     const isHidden = grassFraction > 0.5;
     const isLocal = p.id === localPlayerId;
 
-    if (isHidden && !isLocal) continue;
+    // Illusion F: see through grass — skip hiding for the viewer
+    const canSeeGrass = localPlayer && localPlayer.illusionSeeGrassTimer > 0;
+    if (isHidden && !isLocal && !canSeeGrass) continue;
 
     const inAnyGrass = grassFraction > 0;
     const dotAlpha = isDying ? 0.7 : (isLocal && inAnyGrass) ? 0.4 : (p.alive ? 1.0 : 0.3);
@@ -8618,6 +11173,58 @@ function renderGame() {
         gameCtx.fillStyle = '#a0522d';
         gameCtx.fillRect(sx - 5, sy - stumpH / 2 - 2, 4, 2);
         gameCtx.fillRect(sx + 1, sy - stumpH / 2 - 2, 4, 2);
+      } else if (p.summonType === 'illusion-copy' || p.summonType === 'illusion-special-copy') {
+        // Illusion copy: silvery-blue dot with wizard hat + pulsing ghost outline
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#7f8fa6';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Translucent silvery overlay
+        gameCtx.fillStyle = 'rgba(200, 220, 255, 0.15)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Pulsing shimmer ring
+        const illuPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+        gameCtx.strokeStyle = `rgba(200, 220, 255, ${0.3 + illuPulse * 0.4})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // ── Wizard hat on copy ──
+        if (!isDying) {
+          const hatBase = sy - radius * 0.5;
+          const hatW = radius * 1.0;
+          const hatH = radius * 1.4;
+          // Hat brim
+          gameCtx.fillStyle = 'rgba(58, 58, 94, 0.7)';
+          gameCtx.beginPath();
+          gameCtx.ellipse(sx, hatBase + 2, hatW, radius * 0.18, 0, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Hat cone
+          gameCtx.fillStyle = 'rgba(42, 42, 78, 0.7)';
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx - hatW * 0.65, hatBase);
+          gameCtx.lineTo(sx + radius * 0.1, hatBase - hatH);
+          gameCtx.lineTo(sx + hatW * 0.65, hatBase);
+          gameCtx.closePath();
+          gameCtx.fill();
+          gameCtx.strokeStyle = 'rgba(127, 143, 166, 0.5)';
+          gameCtx.lineWidth = 0.8;
+          gameCtx.stroke();
+          // Hat band
+          gameCtx.strokeStyle = 'rgba(200, 220, 255, 0.5)';
+          gameCtx.lineWidth = 1.5;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx - hatW * 0.55, hatBase - 1);
+          gameCtx.lineTo(sx + hatW * 0.55, hatBase - 1);
+          gameCtx.stroke();
+        }
+        // Ghost indicator
+        gameCtx.fillStyle = 'rgba(200, 220, 255, 0.6)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius - 5, 3, 0, Math.PI * 2);
+        gameCtx.fill();
       } else if (p.summonType === 'noli-clone') {
         // Noli Hallucination clone: colored dot with ghostly purple overlay
         gameCtx.fillStyle = isDying ? '#8b0000' : p.color;
@@ -8847,25 +11454,25 @@ function renderGame() {
         gameCtx.arc(sx, sy, radius + 1, 0, Math.PI * 2);
         gameCtx.stroke();
       } else if (p.summonType === 'room') {
-        // Room (Boisvert): black circle with a wide black triangle on top
+        // Room (Boisvert): black dot with upside-down triangle — wide base at top (two horn points), apex hidden behind dot
+        const hornW = radius * 1.8; // how far horn tips extend sideways
         gameCtx.fillStyle = isDying ? '#8b0000' : '#000';
+        // Draw triangle first (behind dot)
         gameCtx.beginPath();
-        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
-        gameCtx.fill();
-        // Wide triangle on head (party hat shape)
-        gameCtx.fillStyle = isDying ? '#8b0000' : '#000';
-        gameCtx.beginPath();
-        gameCtx.moveTo(sx, sy - radius * 1.8);
-        gameCtx.lineTo(sx - radius * 1.0, sy - radius * 0.3);
-        gameCtx.lineTo(sx + radius * 1.0, sy - radius * 0.3);
+        gameCtx.moveTo(sx - hornW, sy - radius * 1.3);  // left horn tip (top-left)
+        gameCtx.lineTo(sx + hornW, sy - radius * 1.3);  // right horn tip (top-right)
+        gameCtx.lineTo(sx, sy + radius * 1.2);           // bottom apex (hidden behind dot)
         gameCtx.closePath();
         gameCtx.fill();
-        // Subtle dark outline
+        // Body dot drawn on top — hides the bottom apex
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.8, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Subtle outline on dot
         gameCtx.strokeStyle = '#333';
         gameCtx.lineWidth = 1.5;
-        gameCtx.stroke();
         gameCtx.beginPath();
-        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.arc(sx, sy, radius * 0.8, 0, Math.PI * 2);
         gameCtx.stroke();
       } else if (p.summonType === 'destructive-unicorn') {
         // Extremely Destructive Unicorn: red circle with horn and fire glow
@@ -9300,6 +11907,361 @@ function renderGame() {
         gameCtx.beginPath();
         gameCtx.arc(sx + radius * 0.3, sy - radius * 1.2, radius * 0.15, 0, Math.PI * 2);
         gameCtx.fill();
+      } else if (p.summonType === 'ouriel') {
+        // ── Ouriel: plain white figure, small black dot eyes, innocent ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#f8f8f8';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.95, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Soft white outline
+        gameCtx.strokeStyle = isDying ? '#600' : '#ddd';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.95, 0, Math.PI * 2);
+        gameCtx.stroke();
+        if (!isDying) {
+          // Small black dot eyes (wide apart, low = innocent look)
+          gameCtx.fillStyle = '#000';
+          gameCtx.beginPath();
+          gameCtx.arc(sx - radius * 0.25, sy + radius * 0.02, radius * 0.1, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.beginPath();
+          gameCtx.arc(sx + radius * 0.25, sy + radius * 0.02, radius * 0.1, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Tiny shine dots on eyes for innocence
+          gameCtx.fillStyle = '#fff';
+          gameCtx.beginPath();
+          gameCtx.arc(sx - radius * 0.22, sy - radius * 0.02, radius * 0.035, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.beginPath();
+          gameCtx.arc(sx + radius * 0.28, sy - radius * 0.02, radius * 0.035, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+        // Hits-left indicator
+        if (p.ourielHitsLeft !== undefined) {
+          gameCtx.fillStyle = '#999';
+          gameCtx.font = 'bold 10px monospace';
+          gameCtx.textAlign = 'center';
+          gameCtx.fillText(p.ourielHitsLeft + ' hits', sx, sy + radius + 12);
+        }
+      } else if (p.summonType === 'ouriel-room') {
+        // ── Ouriel→Room: black triangle (same as Room) with white glow ──
+        const dotR = radius * 0.5;
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, dotR, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Upside-down triangle (wide base at top)
+        const triBaseY = sy - radius * 1.0;
+        const triApexY = sy + radius * 0.9;
+        const halfBase = radius * 1.2;
+        gameCtx.fillStyle = isDying ? '#600' : '#1a1a1a';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - halfBase, triBaseY);
+        gameCtx.lineTo(sx + halfBase, triBaseY);
+        gameCtx.lineTo(sx, triApexY);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // White glow
+        gameCtx.strokeStyle = 'rgba(255,255,255,0.4)';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+        gameCtx.stroke();
+      } else if (p.summonType === 'complex-room') {
+        // ── Complex Room: red-tinged black triangle ──
+        const dotR = radius * 0.6;
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#1a0000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, dotR, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Upside-down triangle
+        const triBaseY = sy - radius * 1.2;
+        const triApexY = sy + radius * 1.0;
+        const halfBase = radius * 1.3;
+        gameCtx.fillStyle = isDying ? '#600' : '#220000';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - halfBase, triBaseY);
+        gameCtx.lineTo(sx + halfBase, triBaseY);
+        gameCtx.lineTo(sx, triApexY);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Red eye
+        gameCtx.fillStyle = '#ff0000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius * 0.2, radius * 0.15, 0, Math.PI * 2);
+        gameCtx.fill();
+        // HP bar for Complex Room
+        const hpFrac = p.hp / p.maxHp;
+        const barW = radius * 2.5;
+        gameCtx.fillStyle = '#333';
+        gameCtx.fillRect(sx - barW / 2, sy + radius + 8, barW, 4);
+        gameCtx.fillStyle = hpFrac > 0.5 ? '#c00' : '#ff0000';
+        gameCtx.fillRect(sx - barW / 2, sy + radius + 8, barW * hpFrac, 4);
+      } else if (p.summonType === 'filbus-dino') {
+        // ── Filbus Dinosaur: olive green oval body with spikes, tail, and small eyes ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#556b2f';
+        // Oval body (wider than tall)
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx, sy, radius * 1.2, radius * 0.85, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#3b4a1f';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        // Back spikes (3 triangles along top)
+        if (!isDying) {
+          gameCtx.fillStyle = '#6b8e23';
+          for (let si = -1; si <= 1; si++) {
+            gameCtx.beginPath();
+            gameCtx.moveTo(sx + si * radius * 0.4 - 3, sy - radius * 0.75);
+            gameCtx.lineTo(sx + si * radius * 0.4, sy - radius * 1.3);
+            gameCtx.lineTo(sx + si * radius * 0.4 + 3, sy - radius * 0.75);
+            gameCtx.closePath();
+            gameCtx.fill();
+          }
+          // Tail (small triangle to the right)
+          gameCtx.fillStyle = '#4a6b20';
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + radius * 1.1, sy);
+          gameCtx.lineTo(sx + radius * 1.8, sy - radius * 0.2);
+          gameCtx.lineTo(sx + radius * 1.8, sy + radius * 0.2);
+          gameCtx.closePath();
+          gameCtx.fill();
+        }
+        // Eyes
+        gameCtx.fillStyle = '#ffcc00';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.4, sy - radius * 0.15, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.15, sy - radius * 0.15, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'slasher') {
+        // ── 1X Slasher: dark red circle with knife slashes and menacing eye ──
+        gameCtx.fillStyle = isDying ? '#440000' : '#8b0000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Dark outline
+        gameCtx.strokeStyle = '#500000';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        // Pulsing red glow
+        const slashPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.01);
+        gameCtx.strokeStyle = `rgba(255, 0, 0, ${0.3 + slashPulse * 0.4})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+        gameCtx.stroke();
+        if (!isDying) {
+          // Knife slashes (X pattern)
+          gameCtx.strokeStyle = '#ff4444';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx - radius * 0.5, sy - radius * 0.5);
+          gameCtx.lineTo(sx + radius * 0.5, sy + radius * 0.5);
+          gameCtx.stroke();
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + radius * 0.5, sy - radius * 0.5);
+          gameCtx.lineTo(sx - radius * 0.5, sy + radius * 0.5);
+          gameCtx.stroke();
+          // Single menacing eye
+          gameCtx.fillStyle = '#ffffff';
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy - radius * 0.15, 3, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.fillStyle = '#ff0000';
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy - radius * 0.15, 1.5, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+      } else if (p.summonType === 'cricket-trophy') {
+        // ── Cricket Trophy: gold cup shape ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#ffd700';
+        // Cup body (trapezoid)
+        const cupW = radius * 1.2;
+        const cupH = radius * 1.4;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - cupW * 0.7, sy - cupH * 0.3);
+        gameCtx.lineTo(sx - cupW * 0.5, sy + cupH * 0.3);
+        gameCtx.lineTo(sx + cupW * 0.5, sy + cupH * 0.3);
+        gameCtx.lineTo(sx + cupW * 0.7, sy - cupH * 0.3);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#b8860b';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        // Cup base (rectangle)
+        gameCtx.fillStyle = '#daa520';
+        gameCtx.fillRect(sx - cupW * 0.3, sy + cupH * 0.3, cupW * 0.6, cupH * 0.15);
+        gameCtx.fillRect(sx - cupW * 0.45, sy + cupH * 0.45, cupW * 0.9, cupH * 0.1);
+        // Handles (two arc lines)
+        if (!isDying) {
+          gameCtx.strokeStyle = '#ffd700';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.arc(sx - cupW * 0.75, sy, cupH * 0.25, -Math.PI * 0.5, Math.PI * 0.5);
+          gameCtx.stroke();
+          gameCtx.beginPath();
+          gameCtx.arc(sx + cupW * 0.75, sy, cupH * 0.25, Math.PI * 0.5, -Math.PI * 0.5);
+          gameCtx.stroke();
+          // Star on cup
+          gameCtx.fillStyle = '#fff8dc';
+          gameCtx.font = `${radius * 0.7}px serif`;
+          gameCtx.textAlign = 'center';
+          gameCtx.textBaseline = 'middle';
+          gameCtx.fillText('★', sx, sy);
+        }
+        // Pulsing gold glow
+        const trophyPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.004);
+        gameCtx.strokeStyle = `rgba(255, 215, 0, ${0.3 + trophyPulse * 0.4})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+        gameCtx.stroke();
+      } else if (p.summonType === 'guest666') {
+        // ── Guest666: large 2x2 black/red beast ──
+        const beastRadius = radius * 2; // 2x size
+        // Dark body
+        gameCtx.fillStyle = isDying ? '#440000' : '#1a0000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, beastRadius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Red glow outline
+        const g666Pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.007);
+        gameCtx.strokeStyle = `rgba(180, 0, 0, ${0.6 + g666Pulse * 0.3})`;
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, beastRadius, 0, Math.PI * 2);
+        gameCtx.stroke();
+        if (!isDying) {
+          // Red eyes (two glowing dots)
+          gameCtx.fillStyle = '#ff0000';
+          gameCtx.beginPath();
+          gameCtx.arc(sx - beastRadius * 0.25, sy - beastRadius * 0.2, 4, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.beginPath();
+          gameCtx.arc(sx + beastRadius * 0.25, sy - beastRadius * 0.2, 4, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Red glow around eyes
+          gameCtx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+          gameCtx.beginPath();
+          gameCtx.arc(sx - beastRadius * 0.25, sy - beastRadius * 0.2, 8, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.beginPath();
+          gameCtx.arc(sx + beastRadius * 0.25, sy - beastRadius * 0.2, 8, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Claws (jagged lines at bottom)
+          gameCtx.strokeStyle = '#8b0000';
+          gameCtx.lineWidth = 2;
+          for (let cl = -2; cl <= 2; cl++) {
+            gameCtx.beginPath();
+            gameCtx.moveTo(sx + cl * beastRadius * 0.25, sy + beastRadius * 0.6);
+            gameCtx.lineTo(sx + cl * beastRadius * 0.25, sy + beastRadius * 1.0);
+            gameCtx.stroke();
+          }
+          // "666" text
+          gameCtx.fillStyle = '#ff0000';
+          gameCtx.font = `bold ${beastRadius * 0.4}px sans-serif`;
+          gameCtx.textAlign = 'center';
+          gameCtx.textBaseline = 'middle';
+          gameCtx.fillText('666', sx, sy + beastRadius * 0.15);
+        }
+      } else if (p.summonType === 'imploding-kitten') {
+        // ── Imploding Kitten: spiraling black hole ──
+        const bhRadius = radius * 2;
+        const bhProgress = p.blackHoleTimer != null ? (1 - p.blackHoleTimer / 7) : 1;
+        // Dark center
+        gameCtx.fillStyle = '#0a0a0a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, bhRadius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Spiraling rings (animated)
+        const t = Date.now() * 0.003;
+        for (let ring = 0; ring < 4; ring++) {
+          const ringR = bhRadius * (0.4 + ring * 0.2);
+          const alpha = 0.3 + ring * 0.1;
+          gameCtx.strokeStyle = `rgba(80, 0, 160, ${alpha})`;
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          const startAngle = t + ring * Math.PI * 0.5;
+          gameCtx.arc(sx, sy, ringR, startAngle, startAngle + Math.PI * 1.2);
+          gameCtx.stroke();
+        }
+        // Inner purple glow
+        const bhPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.01);
+        gameCtx.fillStyle = `rgba(80, 0, 160, ${0.15 + bhPulse * 0.1})`;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, bhRadius * 1.3, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Outer suction radius indicator
+        if (p.blackHoleActive) {
+          const outerR = (p.blackHoleRadius || 7 * GAME_TILE);
+          gameCtx.strokeStyle = `rgba(80, 0, 160, ${0.1 + bhPulse * 0.1})`;
+          gameCtx.lineWidth = 1;
+          gameCtx.setLineDash([6, 6]);
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy, outerR, 0, Math.PI * 2);
+          gameCtx.stroke();
+          gameCtx.setLineDash([]);
+          // Inner trap radius
+          const innerR = (p.blackHoleInnerRadius || 4 * GAME_TILE);
+          gameCtx.strokeStyle = `rgba(160, 0, 255, ${0.15 + bhPulse * 0.1})`;
+          gameCtx.lineWidth = 1;
+          gameCtx.setLineDash([4, 4]);
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy, innerR, 0, Math.PI * 2);
+          gameCtx.stroke();
+          gameCtx.setLineDash([]);
+        }
+        // Timer countdown text
+        if (p.blackHoleTimer != null && p.blackHoleTimer > 0) {
+          gameCtx.fillStyle = '#fff';
+          gameCtx.font = `bold ${bhRadius * 0.6}px sans-serif`;
+          gameCtx.textAlign = 'center';
+          gameCtx.textBaseline = 'middle';
+          gameCtx.fillText(Math.ceil(p.blackHoleTimer) + '', sx, sy);
+        }
+      } else if (p.summonType === 'napoleon-power-cannon') {
+        // Same render as regular napoleon-cannon
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#555';
+        const cSize = radius * 0.85;
+        gameCtx.fillRect(sx - cSize, sy - cSize, cSize * 2, cSize * 2);
+        gameCtx.strokeStyle = '#333';
+        gameCtx.lineWidth = 2;
+        gameCtx.strokeRect(sx - cSize, sy - cSize, cSize * 2, cSize * 2);
+        // Barrel
+        gameCtx.fillStyle = '#444';
+        gameCtx.fillRect(sx - 2, sy - cSize - 6, 4, 6);
+        // Star badge (power)
+        gameCtx.fillStyle = '#ffd700';
+        gameCtx.font = `${radius * 0.5}px serif`;
+        gameCtx.textAlign = 'center';
+        gameCtx.textBaseline = 'middle';
+        gameCtx.fillText('★', sx, sy);
+      } else if (p.summonType === 'napoleon-cavalry') {
+        // ── Cavalry: brown horse-like oval with rider ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#8b4513';
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx, sy, radius * 1.1, radius * 0.75, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#5c2d0e';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        if (!isDying) {
+          // Rider (small circle on top)
+          gameCtx.fillStyle = '#2c3e50';
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy - radius * 0.5, radius * 0.35, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Sword
+          gameCtx.strokeStyle = '#c0c0c0';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + radius * 0.3, sy - radius * 0.7);
+          gameCtx.lineTo(sx + radius * 0.8, sy - radius * 1.2);
+          gameCtx.stroke();
+        }
       }
     } else if (p.fighter && p.fighter.id === 'onexonexonex' && !p.isSummon) {
       // ── 1X1X1X1: Fully custom dot — dark base with neon green glitches + red eye ──
@@ -9807,6 +12769,189 @@ function renderGame() {
         gameCtx.beginPath();
         gameCtx.moveTo(sx, sy);
         gameCtx.lineTo(sx + p.dragonBeamAimNx * bLen, sy + p.dragonBeamAimNy * bLen);
+        gameCtx.stroke();
+      }
+    } else if (p.fighter && p.fighter.id === 'illusion' && !p.isSummon) {
+      // ── Illusion: wizard hat character with silvery-blue theme ──
+      const isInvis = p.illusionInvisTimer > 0 || p.illusionSpecialInvis;
+      const baseAlpha = isDying ? 0.7 : (isInvis && isLocal) ? 0.35 : 1.0;
+      gameCtx.globalAlpha = baseAlpha;
+      // Body — silvery-blue circle
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#7f8fa6';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Shimmer ring around body
+      gameCtx.strokeStyle = isDying ? '#500' : 'rgba(200, 220, 255, 0.6)';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // ── Wizard hat on top ──
+      if (!isDying) {
+        const hatBase = sy - radius * 0.5;
+        const hatW = radius * 1.1;
+        const hatH = radius * 1.6;
+        // Hat brim
+        gameCtx.fillStyle = '#3a3a5e';
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx, hatBase + 2, hatW, radius * 0.2, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#7f8fa6';
+        gameCtx.lineWidth = 0.8;
+        gameCtx.stroke();
+        // Hat cone
+        gameCtx.fillStyle = '#2a2a4e';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - hatW * 0.7, hatBase);
+        gameCtx.lineTo(sx + radius * 0.15, hatBase - hatH);
+        gameCtx.lineTo(sx + hatW * 0.7, hatBase);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#7f8fa6';
+        gameCtx.lineWidth = 1;
+        gameCtx.stroke();
+        // Hat band
+        gameCtx.strokeStyle = '#c8dcff';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - hatW * 0.6, hatBase - 1);
+        gameCtx.lineTo(sx + hatW * 0.6, hatBase - 1);
+        gameCtx.stroke();
+        // Star on hat
+        const starX = sx, starY = hatBase - hatH * 0.45;
+        gameCtx.fillStyle = '#c8dcff';
+        gameCtx.beginPath();
+        for (let i = 0; i < 5; i++) {
+          const a = -Math.PI / 2 + i * Math.PI * 2 / 5;
+          const ai = a + Math.PI / 5;
+          gameCtx.lineTo(starX + Math.cos(a) * radius * 0.2, starY + Math.sin(a) * radius * 0.2);
+          gameCtx.lineTo(starX + Math.cos(ai) * radius * 0.09, starY + Math.sin(ai) * radius * 0.09);
+        }
+        gameCtx.closePath();
+        gameCtx.fill();
+      }
+      // Eyes — mystical silvery
+      gameCtx.fillStyle = isDying ? '#500' : 'rgba(200, 220, 255, 0.7)';
+      gameCtx.beginPath();
+      gameCtx.ellipse(sx - radius * 0.25, sy - radius * 0.1, 3, 2.2, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.ellipse(sx + radius * 0.25, sy - radius * 0.1, 3, 2.2, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Pupils
+      gameCtx.fillStyle = '#111';
+      gameCtx.beginPath();
+      gameCtx.arc(sx - radius * 0.25, sy - radius * 0.1, 1.3, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.arc(sx + radius * 0.25, sy - radius * 0.1, 1.3, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.globalAlpha = dotAlpha;
+    } else if (p.fighter && p.fighter.id === 'dogtooth' && !p.isSummon) {
+      // ── Dog Tooth: black dot with small spikes, knife inside, angry black eyes ──
+      // Body — black circle
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Small spikes barely extending past the dot
+      if (!isDying) {
+        gameCtx.fillStyle = '#111';
+        gameCtx.strokeStyle = '#333';
+        gameCtx.lineWidth = 0.8;
+        const spikeCount = 10;
+        for (let i = 0; i < spikeCount; i++) {
+          const a = (i / spikeCount) * Math.PI * 2;
+          const baseL = radius * 0.88;
+          const tipL = radius * 1.25;
+          const spread = 0.15;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + Math.cos(a - spread) * baseL, sy + Math.sin(a - spread) * baseL);
+          gameCtx.lineTo(sx + Math.cos(a) * tipL, sy + Math.sin(a) * tipL);
+          gameCtx.lineTo(sx + Math.cos(a + spread) * baseL, sy + Math.sin(a + spread) * baseL);
+          gameCtx.closePath();
+          gameCtx.fill();
+          gameCtx.stroke();
+        }
+      }
+      // Angry black eyes
+      if (!isDying) {
+        gameCtx.fillStyle = '#fff';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.3, sy - radius * 0.1, radius * 0.2, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.fillStyle = '#000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.3, sy - radius * 0.1, radius * 0.1, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.fillStyle = '#fff';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.3, sy - radius * 0.1, radius * 0.2, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.fillStyle = '#000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.3, sy - radius * 0.1, radius * 0.1, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Angry eyebrows
+        gameCtx.strokeStyle = '#fff';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.5, sy - radius * 0.35);
+        gameCtx.lineTo(sx - radius * 0.15, sy - radius * 0.25);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.5, sy - radius * 0.35);
+        gameCtx.lineTo(sx + radius * 0.15, sy - radius * 0.25);
+        gameCtx.stroke();
+      }
+      // Small knife inside the dot (does not poke out)
+      if (!isDying) {
+        const kAngle = -Math.PI / 4;
+        const kPerp = kAngle + Math.PI / 2;
+        const kLen = radius * 0.75; // small, fits inside
+        // Blade start inside body
+        const kBaseX = sx + Math.cos(kAngle) * radius * 0.05;
+        const kBaseY = sy + Math.sin(kAngle) * radius * 0.05;
+        const kTipX = kBaseX + Math.cos(kAngle) * kLen;
+        const kTipY = kBaseY + Math.sin(kAngle) * kLen;
+        const bladeW = 2.5;
+        // Blade shape — one straight side (spine), one curved side (edge)
+        gameCtx.fillStyle = '#c0c0c0';
+        gameCtx.beginPath();
+        // Straight spine side (flat line from base to tip)
+        gameCtx.moveTo(kBaseX - Math.cos(kPerp) * (bladeW * 0.4), kBaseY - Math.sin(kPerp) * (bladeW * 0.4));
+        gameCtx.lineTo(kTipX, kTipY);
+        // Curved edge side (belly curve back to base)
+        const curveMidX = kBaseX + Math.cos(kAngle) * kLen * 0.5 + Math.cos(kPerp) * (bladeW * 1.3);
+        const curveMidY = kBaseY + Math.sin(kAngle) * kLen * 0.5 + Math.sin(kPerp) * (bladeW * 1.3);
+        gameCtx.quadraticCurveTo(curveMidX, curveMidY,
+          kBaseX + Math.cos(kPerp) * bladeW, kBaseY + Math.sin(kPerp) * bladeW);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#888';
+        gameCtx.lineWidth = 0.5;
+        gameCtx.stroke();
+        // Handle
+        const handleLen = radius * 0.3;
+        const hEndX = kBaseX + Math.cos(kAngle + Math.PI) * handleLen;
+        const hEndY = kBaseY + Math.sin(kAngle + Math.PI) * handleLen;
+        gameCtx.strokeStyle = '#2a1a0a';
+        gameCtx.lineWidth = 3;
+        gameCtx.lineCap = 'round';
+        gameCtx.beginPath();
+        gameCtx.moveTo(kBaseX, kBaseY);
+        gameCtx.lineTo(hEndX, hEndY);
+        gameCtx.stroke();
+        gameCtx.lineCap = 'butt';
+      }
+      // Smile infection glow
+      if (p.dogtoothSmileTimer > 0) {
+        const smilePulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.01);
+        gameCtx.strokeStyle = 'rgba(255, 0, 0, ' + (0.4 + smilePulse * 0.4) + ')';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
         gameCtx.stroke();
       }
     } else {
@@ -11210,10 +14355,755 @@ function renderGame() {
       gameCtx.fillText('IGLOO ' + Math.ceil(p.iglooTimer) + 's', ix, iy - ir - 6);
     }
 
+    // ── Dog Tooth attack renders ──
+    // Stab effect (detailed knife thrust in attack direction)
+    // Illusion: Teleattack arc (silvery-blue slash)
+    const teleattackFx = p.effects.find((fx) => fx.type === 'teleattack');
+    if (teleattackFx) {
+      const aRad = Math.atan2(teleattackFx.aimNy || 0, teleattackFx.aimNx || 1);
+      const swLen = GAME_TILE * 1.3;
+      gameCtx.strokeStyle = 'rgba(200, 220, 255, 0.8)';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
+      gameCtx.stroke();
+      // Shimmer trail
+      gameCtx.strokeStyle = 'rgba(200, 220, 255, 0.3)';
+      gameCtx.lineWidth = 6;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen + 3, aRad - 0.4, aRad + 0.4);
+      gameCtx.stroke();
+    }
+
+    // Illusion: Dodge flash (brief bright flash when dodging)
+    const illuDodgeFx = p.effects.find((fx) => fx.type === 'illusion-dodge');
+    if (illuDodgeFx) {
+      gameCtx.fillStyle = 'rgba(200, 220, 255, 0.4)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Illusion: Rewind swirl on teleported players
+    const rewindFx = p.effects.find((fx) => fx.type === 'illusion-rewind');
+    if (rewindFx) {
+      const prog = rewindFx.timer / 1.0;
+      gameCtx.strokeStyle = `rgba(200, 220, 255, ${prog * 0.6})`;
+      gameCtx.lineWidth = 2;
+      const spiralR = radius + 8 + (1 - prog) * 10;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, spiralR, 0, Math.PI * 2 * prog);
+      gameCtx.stroke();
+    }
+
+    const stabFx = p.effects.find((fx) => fx.type === 'stab');
+    if (stabFx) {
+      const kA = Math.atan2(stabFx.aimNy || 0, stabFx.aimNx || 1);
+      const kPerp = kA + Math.PI / 2;
+      const progress = 1 - (stabFx.timer / 0.2);
+      const kLen = GAME_TILE * 1.2 * (0.6 + progress * 0.4);
+      // Anchor positions along the knife axis, starting from player center
+      const oX = sx + Math.cos(kA) * radius * 0.2;
+      const oY = sy + Math.sin(kA) * radius * 0.2;
+      const hEndX = oX; const hEndY = oY;
+      const kBaseX = oX + Math.cos(kA) * kLen * 0.28;
+      const kBaseY = oY + Math.sin(kA) * kLen * 0.28;
+      const kMidX = oX + Math.cos(kA) * kLen * 0.6;
+      const kMidY = oY + Math.sin(kA) * kLen * 0.6;
+      const kTipX = oX + Math.cos(kA) * kLen;
+      const kTipY = oY + Math.sin(kA) * kLen;
+      // Blade — wide near base tapering to sharp tip
+      const bwBase = 5;
+      const bwMid = 3.5;
+      gameCtx.fillStyle = '#c8c8c8';
+      gameCtx.beginPath();
+      gameCtx.moveTo(kBaseX + Math.cos(kPerp) * bwBase, kBaseY + Math.sin(kPerp) * bwBase);
+      gameCtx.lineTo(kMidX + Math.cos(kPerp) * bwMid, kMidY + Math.sin(kPerp) * bwMid);
+      gameCtx.lineTo(kTipX, kTipY);
+      gameCtx.lineTo(kMidX - Math.cos(kPerp) * (bwMid * 0.4), kMidY - Math.sin(kPerp) * (bwMid * 0.4));
+      gameCtx.lineTo(kBaseX - Math.cos(kPerp) * (bwBase * 0.5), kBaseY - Math.sin(kPerp) * (bwBase * 0.5));
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Blade outline
+      gameCtx.strokeStyle = '#777'; gameCtx.lineWidth = 0.8; gameCtx.stroke();
+      // Spine (back edge)
+      gameCtx.strokeStyle = '#aaa'; gameCtx.lineWidth = 0.6;
+      gameCtx.beginPath();
+      gameCtx.moveTo(kBaseX - Math.cos(kPerp) * (bwBase * 0.5), kBaseY - Math.sin(kPerp) * (bwBase * 0.5));
+      gameCtx.lineTo(kTipX, kTipY);
+      gameCtx.stroke();
+      // Edge highlight (sharp side)
+      gameCtx.strokeStyle = '#eee'; gameCtx.lineWidth = 0.7;
+      gameCtx.beginPath();
+      gameCtx.moveTo(kBaseX + Math.cos(kPerp) * bwBase, kBaseY + Math.sin(kPerp) * bwBase);
+      gameCtx.lineTo(kTipX, kTipY);
+      gameCtx.stroke();
+      // Fuller (groove)
+      gameCtx.strokeStyle = 'rgba(100,100,110,0.5)'; gameCtx.lineWidth = 1.2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(kBaseX + Math.cos(kA) * kLen * 0.05 + Math.cos(kPerp) * 2,
+                     kBaseY + Math.sin(kA) * kLen * 0.05 + Math.sin(kPerp) * 2);
+      gameCtx.lineTo(kBaseX + Math.cos(kA) * kLen * 0.25 + Math.cos(kPerp) * 1,
+                     kBaseY + Math.sin(kA) * kLen * 0.25 + Math.sin(kPerp) * 1);
+      gameCtx.stroke();
+      // Crossguard
+      gameCtx.strokeStyle = '#555'; gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.moveTo(kBaseX + Math.cos(kPerp) * 7, kBaseY + Math.sin(kPerp) * 7);
+      gameCtx.lineTo(kBaseX - Math.cos(kPerp) * 7, kBaseY - Math.sin(kPerp) * 7);
+      gameCtx.stroke();
+      gameCtx.strokeStyle = '#777'; gameCtx.lineWidth = 1; gameCtx.stroke();
+      // Handle (grip with wrap lines)
+      gameCtx.strokeStyle = '#1a0e05'; gameCtx.lineWidth = 5.5; gameCtx.lineCap = 'round';
+      gameCtx.beginPath(); gameCtx.moveTo(kBaseX, kBaseY); gameCtx.lineTo(hEndX, hEndY); gameCtx.stroke();
+      gameCtx.strokeStyle = '#3a2010'; gameCtx.lineWidth = 0.8;
+      for (let g = 0.15; g < 0.9; g += 0.2) {
+        const gx = kBaseX + (hEndX - kBaseX) * g;
+        const gy = kBaseY + (hEndY - kBaseY) * g;
+        gameCtx.beginPath();
+        gameCtx.moveTo(gx + Math.cos(kPerp) * 3, gy + Math.sin(kPerp) * 3);
+        gameCtx.lineTo(gx - Math.cos(kPerp) * 3, gy - Math.sin(kPerp) * 3);
+        gameCtx.stroke();
+      }
+      // Pommel
+      gameCtx.fillStyle = '#444'; gameCtx.beginPath(); gameCtx.arc(hEndX, hEndY, 2.5, 0, Math.PI * 2); gameCtx.fill();
+      gameCtx.strokeStyle = '#666'; gameCtx.lineWidth = 0.8; gameCtx.stroke();
+      gameCtx.lineCap = 'butt';
+    }
+    // Love Letter effect (gray shockwave ring expanding outward)
+    const loveFx = p.effects.find((fx) => fx.type === 'love-letter');
+    if (loveFx) {
+      const progress = 1 - (loveFx.timer / 1.5);
+      const ringR = radius + progress * GAME_TILE * 8;
+      const alpha = Math.max(0, 0.5 - progress * 0.45);
+      gameCtx.strokeStyle = 'rgba(180, 180, 180, ' + alpha + ')';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Envelope icon at center
+      if (loveFx.timer > 1) {
+        gameCtx.fillStyle = 'rgba(200, 200, 200, 0.8)';
+        gameCtx.font = 'bold 14px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('💌', sx, sy - radius - 10);
+      }
+    }
+    // Smile Tapes active indicator (red pulsing aura + text)
+    if (p.dogtoothSmileTimer > 0 && p.fighter && p.fighter.id === 'dogtooth') {
+      gameCtx.fillStyle = 'rgba(255, 0, 0, 0.1)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#ff4444';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('SMILE ' + Math.ceil(p.dogtoothSmileTimer) + 's', sx, sy + radius + 16);
+    }
+
+    // ── Illusion status indicators ──
+    // Invisibility aura (E or SPACE) — local player only
+    if ((p.illusionInvisTimer > 0 || p.illusionSpecialInvis) && isLocal) {
+      // Ghostly shimmer ring pulsing
+      const ilPulse = 0.3 + 0.4 * Math.sin(Date.now() * 0.004);
+      gameCtx.strokeStyle = `rgba(200, 220, 255, ${ilPulse})`;
+      gameCtx.lineWidth = 2;
+      gameCtx.setLineDash([4, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      gameCtx.fillStyle = 'rgba(200, 220, 255, 0.8)';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      if (p.illusionInvisTimer > 0) {
+        gameCtx.fillText('👻 INVIS ' + Math.ceil(p.illusionInvisTimer) + 's', sx, sy - radius - 14);
+      } else {
+        gameCtx.fillText('👻 INVIS (kill copies)', sx, sy - radius - 14);
+      }
+    }
+    // Teleattack dodge indicator
+    if (p.illusionDodgeTimer > 0 && (isLocal || (gameMode === 'teams' && localPlayer && localPlayer.team && p.team === localPlayer.team))) {
+      gameCtx.strokeStyle = 'rgba(100, 200, 255, 0.5)';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+    // Time freeze indicator on frozen players
+    if (p.effects && p.effects.some(fx => fx.type === 'illusion-frozen')) {
+      gameCtx.fillStyle = 'rgba(200, 220, 255, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = 'rgba(200, 220, 255, 0.5)';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#c8dcff';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('⏱ FROZEN', sx, sy - radius - 14);
+    }
+    // See-grass indicator (F ability)
+    if (p.illusionSeeGrassTimer > 0 && isLocal) {
+      gameCtx.fillStyle = 'rgba(100, 255, 100, 0.7)';
+      gameCtx.font = 'bold 8px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('👁 SEE ' + Math.ceil(p.illusionSeeGrassTimer) + 's', sx, sy + radius + 16);
+    }
+
+    // Moon shadow warning (growing dark circle on ground + descending white moon)
+    if (p.dogtoothMoonTimer > 0 && p.dogtoothMoonX) {
+      const moonSx = p.dogtoothMoonX - camX;
+      const moonSy = p.dogtoothMoonY - camY;
+      const moonR = p.dogtoothMoonRadius || (10 * GAME_TILE);
+      const progress = 1 - (p.dogtoothMoonTimer / 3);
+      const shadowR = moonR * (0.3 + progress * 0.7);
+      // Dark shadow circle on ground — grows as moon descends
+      gameCtx.fillStyle = 'rgba(0, 0, 0, ' + (0.08 + progress * 0.35) + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(moonSx, moonSy, shadowR, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Shadow edge ring
+      gameCtx.strokeStyle = 'rgba(0, 0, 0, ' + (0.15 + progress * 0.3) + ')';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(moonSx, moonSy, shadowR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Descending white moon circle — starts high and small, ends at shadow position and full size
+      const moonVisualR = moonR * (0.4 + progress * 0.6);
+      const moonOffsetY = -(1 - progress) * moonR * 3; // starts 3× radius above, descends to 0
+      const moonAlpha = 0.3 + progress * 0.7;
+      // Moon glow
+      gameCtx.fillStyle = 'rgba(255, 255, 255, ' + (moonAlpha * 0.15) + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(moonSx, moonSy + moonOffsetY, moonVisualR * 1.4, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Moon body (bright white circle)
+      gameCtx.fillStyle = 'rgba(255, 255, 255, ' + moonAlpha + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(moonSx, moonSy + moonOffsetY, moonVisualR, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Moon crater details
+      // Unsettling smiley face — black hole eyes and mouth
+      const mCx = moonSx;
+      const mCy = moonSy + moonOffsetY;
+      const mR = moonVisualR;
+      gameCtx.fillStyle = 'rgba(0, 0, 0, ' + moonAlpha + ')';
+      // Left eye — hollow circle
+      gameCtx.beginPath();
+      gameCtx.arc(mCx - mR * 0.28, mCy - mR * 0.15, mR * 0.13, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Right eye — hollow circle
+      gameCtx.beginPath();
+      gameCtx.arc(mCx + mR * 0.28, mCy - mR * 0.15, mR * 0.13, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Mouth — wide unsettling curved smile
+      gameCtx.strokeStyle = 'rgba(0, 0, 0, ' + moonAlpha + ')';
+      gameCtx.lineWidth = mR * 0.08;
+      gameCtx.beginPath();
+      gameCtx.arc(mCx, mCy + mR * 0.1, mR * 0.5, Math.PI * 0.1, Math.PI * 0.9);
+      gameCtx.stroke();
+      // Fill the mouth as a black hole
+      gameCtx.fillStyle = 'rgba(0, 0, 0, ' + moonAlpha + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(mCx, mCy + mR * 0.1, mR * 0.5, Math.PI * 0.1, Math.PI * 0.9);
+      gameCtx.lineTo(mCx - mR * 0.48 * Math.cos(Math.PI * 0.1), mCy + mR * 0.1 + mR * 0.5 * Math.sin(Math.PI * 0.1));
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Moon outline
+      gameCtx.strokeStyle = 'rgba(200, 200, 210, ' + moonAlpha + ')';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(moonSx, moonSy + moonOffsetY, moonVisualR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Timer text
+      gameCtx.fillStyle = '#ffeeaa';
+      gameCtx.font = 'bold 14px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🌙 ' + Math.ceil(p.dogtoothMoonTimer) + 's', moonSx, moonSy - shadowR - 10);
+    }
+    // Moon impact flash — white covers the entire screen
+    const moonImpactFx = p.effects.find((fx) => fx.type === 'moon-impact');
+    if (moonImpactFx && p.dogtoothMoonX) {
+      const moonSx = p.dogtoothMoonX - camX;
+      const moonSy = p.dogtoothMoonY - camY;
+      const moonR = p.dogtoothMoonRadius || (10 * GAME_TILE);
+      const impactProgress = 1 - (moonImpactFx.timer / 1.5);
+      // Phase 1 (0-0.3): white flash covers entire screen
+      if (impactProgress < 0.3) {
+        const flashAlpha = Math.max(0, 1 - impactProgress / 0.3);
+        gameCtx.fillStyle = 'rgba(255, 255, 255, ' + (flashAlpha * 0.9) + ')';
+        gameCtx.fillRect(0, 0, gameCanvas.width, gameCanvas.height);
+      }
+      // Phase 2 (0.1-0.8): large white moon circle shrinks and fades
+      if (impactProgress > 0.1 && impactProgress < 0.8) {
+        const phase2 = (impactProgress - 0.1) / 0.7;
+        const impR = moonR * (2.0 - phase2 * 1.5);
+        const alpha = Math.max(0, 0.8 - phase2);
+        gameCtx.fillStyle = 'rgba(255, 255, 255, ' + alpha + ')';
+        gameCtx.beginPath();
+        gameCtx.arc(moonSx, moonSy, impR, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Phase 3 (0.3-1.0): shockwave ring expands outward
+      if (impactProgress > 0.3) {
+        const phase3 = (impactProgress - 0.3) / 0.7;
+        const ringR = moonR * (1 + phase3 * 3);
+        const ringAlpha = Math.max(0, 0.6 - phase3 * 0.6);
+        gameCtx.strokeStyle = 'rgba(255, 255, 255, ' + ringAlpha + ')';
+        gameCtx.lineWidth = 4 - phase3 * 3;
+        gameCtx.beginPath();
+        gameCtx.arc(moonSx, moonSy, ringR, 0, Math.PI * 2);
+        gameCtx.stroke();
+      }
+    }
+    // Complex enter/exit flash
+    if (p.effects.some((fx) => fx.type === 'complex-enter' || fx.type === 'complex-exit')) {
+      gameCtx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+    // Ouriel summon flash
+    if (p.effects.some((fx) => fx.type === 'ouriel-summon')) {
+      gameCtx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // ── Unstable effect renders ──
+    // M1: Unstable Fist — purple lightning slash arc
+    const unstFistFx = p.effects.find((fx) => fx.type === 'unstable-fist');
+    if (unstFistFx) {
+      const swLen = GAME_TILE * 1.4;
+      const aRad = Math.atan2(unstFistFx.aimNy, unstFistFx.aimNx);
+      // Main slash arc
+      gameCtx.strokeStyle = '#ff00ff';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
+      gameCtx.stroke();
+      // Inner glow arc
+      gameCtx.strokeStyle = 'rgba(255, 0, 255, 0.4)';
+      gameCtx.lineWidth = 8;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen * 0.85, aRad - 0.4, aRad + 0.4);
+      gameCtx.stroke();
+      // Lightning sparks
+      gameCtx.strokeStyle = '#ffff00';
+      gameCtx.lineWidth = 1.5;
+      for (let i = 0; i < 3; i++) {
+        const sa = aRad - 0.4 + Math.random() * 0.8;
+        const sr = swLen * (0.6 + Math.random() * 0.4);
+        const ex = sx + Math.cos(sa) * sr;
+        const ey = sy + Math.sin(sa) * sr;
+        gameCtx.beginPath();
+        gameCtx.moveTo(ex, ey);
+        gameCtx.lineTo(ex + (Math.random() - 0.5) * 10, ey + (Math.random() - 0.5) * 10);
+        gameCtx.stroke();
+      }
+    }
+
+    // E: Unstable Gamble — dice-like magenta burst with question marks
+    const unstGambleFx = p.effects.find((fx) => fx.type === 'unstable-gamble');
+    if (unstGambleFx) {
+      const swLen = GAME_TILE * 1.5;
+      const aRad = Math.atan2(unstGambleFx.aimNy || 0, unstGambleFx.aimNx || 1);
+      // Magenta sweep arc
+      gameCtx.strokeStyle = '#ff00ff';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.7, aRad + 0.7);
+      gameCtx.stroke();
+      // Glowing fill
+      gameCtx.fillStyle = 'rgba(255, 0, 255, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.7, aRad + 0.7);
+      gameCtx.lineTo(sx, sy);
+      gameCtx.fill();
+      // Random symbols flying out
+      gameCtx.fillStyle = '#ffff00';
+      gameCtx.font = 'bold 14px sans-serif';
+      gameCtx.textAlign = 'center';
+      const symbols = ['🎲', '?', '!', '💀', '⚡'];
+      for (let i = 0; i < 3; i++) {
+        const sa = aRad - 0.5 + Math.random() * 1.0;
+        const sr = swLen * (0.5 + Math.random() * 0.6);
+        gameCtx.fillText(symbols[Math.floor(Math.random() * symbols.length)],
+          sx + Math.cos(sa) * sr, sy + Math.sin(sa) * sr);
+      }
+    }
+
+    // R: Unstable Infantry spawn flash — purple ring burst
+    if (p.effects.some((fx) => fx.type === 'unstable-infantry')) {
+      const pulse = Math.sin(Date.now() * 0.01) * 0.3 + 0.7;
+      gameCtx.strokeStyle = `rgba(255, 0, 255, ${pulse})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 18, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Three small circles around player (representing infantry)
+      for (let i = 0; i < 3; i++) {
+        const a = (i / 3) * Math.PI * 2 + Date.now() * 0.004;
+        const ix = sx + Math.cos(a) * (radius + 22);
+        const iy = sy + Math.sin(a) * (radius + 22);
+        gameCtx.fillStyle = '#ff00ff';
+        gameCtx.beginPath();
+        gameCtx.arc(ix, iy, 4, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    }
+
+    // Infantry hit — purple flash on the infantry unit
+    if (p.effects.some((fx) => fx.type === 'unstable-infantry-hit')) {
+      gameCtx.fillStyle = 'rgba(255, 0, 255, 0.4)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Teleport target — purple swirl on teleported enemy
+    if (p.effects.some((fx) => fx.type === 'unstable-teleport')) {
+      const t = Date.now() * 0.008;
+      gameCtx.strokeStyle = '#ff00ff';
+      gameCtx.lineWidth = 2;
+      for (let i = 0; i < 4; i++) {
+        const a = t + (i / 4) * Math.PI * 2;
+        const r1 = radius + 4;
+        const r2 = radius + 14;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + Math.cos(a) * r1, sy + Math.sin(a) * r1);
+        gameCtx.lineTo(sx + Math.cos(a + 0.3) * r2, sy + Math.sin(a + 0.3) * r2);
+        gameCtx.stroke();
+      }
+      gameCtx.fillStyle = 'rgba(255, 0, 255, 0.2)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // T: Unstable Summon spawn — purple portal effect
+    if (p.effects.some((fx) => fx.type === 'unstable-summon-spawn')) {
+      const t = Date.now() * 0.005;
+      const portalR = radius + 20;
+      // Outer spinning ring
+      gameCtx.strokeStyle = '#ff00ff';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, portalR, t, t + Math.PI * 1.5);
+      gameCtx.stroke();
+      // Inner spinning ring (opposite direction)
+      gameCtx.strokeStyle = '#cc00cc';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, portalR * 0.7, -t, -t + Math.PI * 1.2);
+      gameCtx.stroke();
+      // Center glow
+      gameCtx.fillStyle = 'rgba(255, 0, 255, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, portalR * 0.5, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // SPACE: Unstable Domain — expanding magenta shockwave ring
+    if (p.effects.some((fx) => fx.type === 'unstable-domain')) {
+      const domFx = p.effects.find((fx) => fx.type === 'unstable-domain');
+      const progress = 1 - (domFx.timer / 2.5);
+      const ringR = radius + progress * GAME_TILE * 10;
+      const alpha = Math.max(0, 1 - progress);
+      // Expanding shockwave ring
+      gameCtx.strokeStyle = `rgba(255, 0, 255, ${alpha * 0.8})`;
+      gameCtx.lineWidth = 4 - progress * 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Inner filled pulse
+      gameCtx.fillStyle = `rgba(255, 0, 255, ${alpha * 0.1})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR * 0.8, 0, Math.PI * 2);
+      gameCtx.fill();
+      // ⚡ symbol at center
+      if (progress < 0.5) {
+        gameCtx.fillStyle = `rgba(255, 255, 0, ${alpha})`;
+        gameCtx.font = 'bold 16px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.textBaseline = 'middle';
+        gameCtx.fillText('⚡', sx, sy - radius - 14);
+      }
+    }
+
+    // Unstablism / Death swap — purple flash + character switch visual
+    if (p.effects.some((fx) => fx.type === 'unstable-swap')) {
+      const swapFx = p.effects.find((fx) => fx.type === 'unstable-swap');
+      const progress = 1 - (swapFx.timer / 2.0);
+      const flashAlpha = Math.max(0, 1 - progress * 2);
+      // Bright flash
+      gameCtx.fillStyle = `rgba(255, 0, 255, ${flashAlpha * 0.5})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 25, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Rotating arrows (swap symbol)
+      const t = Date.now() * 0.006;
+      gameCtx.strokeStyle = `rgba(255, 255, 0, ${Math.max(0, 0.8 - progress)})`;
+      gameCtx.lineWidth = 2.5;
+      for (let i = 0; i < 2; i++) {
+        const a = t + i * Math.PI;
+        const r = radius + 15;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + Math.cos(a) * r, sy + Math.sin(a) * r);
+        gameCtx.lineTo(sx + Math.cos(a + 0.5) * (r + 8), sy + Math.sin(a + 0.5) * (r + 8));
+        gameCtx.stroke();
+      }
+    }
+
+    // Unstable eye (T ability active indicator)
+    if (p.effects.some((fx) => fx.type === 'unstable-eye')) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.006);
+      gameCtx.strokeStyle = `rgba(255, 0, 255, ${0.3 + pulse * 0.4})`;
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#ff00ff';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('👁', sx, sy - radius - 8);
+    }
+
+    // Power bleed effect — dripping red overlay
+    if (p.effects.some((fx) => fx.type === 'power-bleed')) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.008);
+      gameCtx.strokeStyle = `rgba(180, 0, 0, ${0.5 + pulse * 0.3})`;
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Drip lines
+      gameCtx.strokeStyle = `rgba(180, 0, 0, ${0.4 + pulse * 0.3})`;
+      gameCtx.lineWidth = 1.5;
+      for (let d = 0; d < 3; d++) {
+        const angle = (d / 3) * Math.PI * 2 + Date.now() * 0.001;
+        const dripX = sx + Math.cos(angle) * radius * 0.6;
+        gameCtx.beginPath();
+        gameCtx.moveTo(dripX, sy + radius * 0.3);
+        gameCtx.lineTo(dripX, sy + radius * 0.3 + 6 + pulse * 4);
+        gameCtx.stroke();
+      }
+    }
+
+    // Poker debt indicator — gold chains + debt counter
+    if (p.pokerDebtTarget && p.pokerDebtHits > 0) {
+      // Gold chain ring around debtor
+      const debtPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+      gameCtx.strokeStyle = `rgba(255, 215, 0, ${0.5 + debtPulse * 0.3})`;
+      gameCtx.lineWidth = 2;
+      gameCtx.setLineDash([4, 3]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      // Debt counter text
+      gameCtx.fillStyle = '#ffd700';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.textBaseline = 'bottom';
+      gameCtx.fillText('💰' + p.pokerDebtHits, sx, sy - radius - 6);
+    }
+
+    // Cricket trophy shield — gold shimmer around protected cricket
+    if (p.cricketTrophyShield && p.cricketTrophyId) {
+      const shieldPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.004);
+      gameCtx.strokeStyle = `rgba(255, 215, 0, ${0.4 + shieldPulse * 0.4})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = `rgba(255, 215, 0, ${0.08 + shieldPulse * 0.05})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Igloo teleport flash effect
+    if (p.effects.some((fx) => fx.type === 'igloo-teleport')) {
+      const tpFx = p.effects.find((fx) => fx.type === 'igloo-teleport');
+      const progress = 1 - (tpFx.timer / 1.5);
+      const flashAlpha = Math.max(0, 1 - progress * 2);
+      gameCtx.fillStyle = `rgba(135, 206, 235, ${flashAlpha * 0.4})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 15 * (1 - progress), 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Debt cleared flash
+    if (p.effects.some((fx) => fx.type === 'debt-cleared')) {
+      const dcFx = p.effects.find((fx) => fx.type === 'debt-cleared');
+      const progress = 1 - (dcFx.timer / 1.5);
+      const flashAlpha = Math.max(0, 1 - progress);
+      gameCtx.fillStyle = `rgba(0, 255, 136, ${flashAlpha * 0.3})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Trophy spawn effect — expanding gold ring
+    if (p.effects.some((fx) => fx.type === 'trophy-spawn')) {
+      const tsFx = p.effects.find((fx) => fx.type === 'trophy-spawn');
+      const progress = 1 - (tsFx.timer / 2.0);
+      const ringR = radius + progress * GAME_TILE * 3;
+      const alpha = Math.max(0, 1 - progress);
+      gameCtx.strokeStyle = `rgba(255, 215, 0, ${alpha * 0.6})`;
+      gameCtx.lineWidth = 3 - progress * 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Trophy destroyed — red flash
+    if (p.effects.some((fx) => fx.type === 'trophy-destroyed')) {
+      const tdFx = p.effects.find((fx) => fx.type === 'trophy-destroyed');
+      const progress = 1 - (tdFx.timer / 2.0);
+      const flashAlpha = Math.max(0, 1 - progress);
+      gameCtx.fillStyle = `rgba(255, 0, 0, ${flashAlpha * 0.3})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Dino spawn effect — green pulse
+    if (p.effects.some((fx) => fx.type === 'dino-spawn')) {
+      const dsFx = p.effects.find((fx) => fx.type === 'dino-spawn');
+      const progress = 1 - (dsFx.timer / 2.0);
+      gameCtx.strokeStyle = `rgba(85, 107, 47, ${Math.max(0, 1 - progress) * 0.6})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + progress * GAME_TILE * 2, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Dino bite effect — snap animation
+    if (p.effects.some((fx) => fx.type === 'dino-bite')) {
+      const dbFx = p.effects.find((fx) => fx.type === 'dino-bite');
+      const progress = 1 - (dbFx.timer / 0.4);
+      gameCtx.fillStyle = `rgba(255, 200, 0, ${Math.max(0, 1 - progress * 2)})`;
+      gameCtx.font = `${14 + progress * 6}px sans-serif`;
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🦷', sx, sy - radius - 5);
+    }
+
+    // Slasher spawn effect — red flash
+    if (p.effects.some((fx) => fx.type === 'slasher-spawn')) {
+      const ssFx = p.effects.find((fx) => fx.type === 'slasher-spawn');
+      const progress = 1 - (ssFx.timer / 2.0);
+      gameCtx.fillStyle = `rgba(139, 0, 0, ${Math.max(0, 1 - progress) * 0.3})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Slasher slash effect — quick X flash
+    if (p.effects.some((fx) => fx.type === 'slasher-slash')) {
+      const slFx = p.effects.find((fx) => fx.type === 'slasher-slash');
+      const alpha = Math.max(0, slFx.timer / 0.3);
+      gameCtx.strokeStyle = `rgba(255, 0, 0, ${alpha})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius, sy - radius);
+      gameCtx.lineTo(sx + radius, sy + radius);
+      gameCtx.stroke();
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius, sy - radius);
+      gameCtx.lineTo(sx - radius, sy + radius);
+      gameCtx.stroke();
+    }
+
+    // Guest666 spawn effect — dark red shockwave
+    if (p.effects.some((fx) => fx.type === 'guest666-spawn')) {
+      const gFx = p.effects.find((fx) => fx.type === 'guest666-spawn');
+      const progress = 1 - (gFx.timer / 2.0);
+      const ringR = radius + progress * GAME_TILE * 4;
+      gameCtx.strokeStyle = `rgba(139, 0, 0, ${Math.max(0, 1 - progress) * 0.7})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Guest666 jump effect — red streak
+    if (p.effects.some((fx) => fx.type === 'guest666-jump')) {
+      const jFx = p.effects.find((fx) => fx.type === 'guest666-jump');
+      const alpha = Math.max(0, jFx.timer / 0.6);
+      gameCtx.fillStyle = `rgba(139, 0, 0, ${alpha * 0.4})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 3, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Guest666 lacerate effect — claw marks
+    if (p.effects.some((fx) => fx.type === 'guest666-lacerate')) {
+      const lFx = p.effects.find((fx) => fx.type === 'guest666-lacerate');
+      const alpha = Math.max(0, lFx.timer / 0.5);
+      gameCtx.strokeStyle = `rgba(255, 0, 0, ${alpha})`;
+      gameCtx.lineWidth = 3;
+      for (let cl = -1; cl <= 1; cl++) {
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + cl * 6 - 8, sy - 10);
+        gameCtx.lineTo(sx + cl * 6 + 8, sy + 10);
+        gameCtx.stroke();
+      }
+    }
+
+    // Imploding kitten spawn effect
+    if (p.effects.some((fx) => fx.type === 'imploding-kitten-spawn')) {
+      const ikFx = p.effects.find((fx) => fx.type === 'imploding-kitten-spawn');
+      const progress = 1 - (ikFx.timer / 2.0);
+      gameCtx.fillStyle = `rgba(80, 0, 160, ${Math.max(0, 1 - progress) * 0.3})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + progress * GAME_TILE * 3, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Black hole detonation flash
+    if (p.effects.some((fx) => fx.type === 'blackhole-detonate')) {
+      const bhFx = p.effects.find((fx) => fx.type === 'blackhole-detonate');
+      const progress = 1 - (bhFx.timer / 1.5);
+      const flashAlpha = Math.max(0, 1 - progress * 2);
+      gameCtx.fillStyle = `rgba(80, 0, 160, ${flashAlpha * 0.5})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 30, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Napoleon Full Power effect
+    if (p.effects.some((fx) => fx.type === 'napoleon-full-power')) {
+      const npFx = p.effects.find((fx) => fx.type === 'napoleon-full-power');
+      const progress = 1 - (npFx.timer / 2.0);
+      gameCtx.strokeStyle = `rgba(139, 69, 19, ${Math.max(0, 1 - progress) * 0.6})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + progress * GAME_TILE * 5, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Cavalry charge effect
+    if (p.effects.some((fx) => fx.type === 'cavalry-charge')) {
+      const ccFx = p.effects.find((fx) => fx.type === 'cavalry-charge');
+      const alpha = Math.max(0, ccFx.timer / 0.4);
+      gameCtx.fillStyle = `rgba(139, 69, 19, ${alpha * 0.4})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 2, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
     gameCtx.restore();
   }
 
-  // Draw projectiles
+  // Draw projectiles (hidden when local player is in backrooms or Complex)
+  if (!(localPlayer && (localPlayer.inBackrooms || localPlayer.dogtoothInComplex))) {
   for (const proj of projectiles) {
     const px = proj.x - camX;
     const py = proj.y - camY;
@@ -11405,9 +15295,10 @@ function renderGame() {
       gameCtx.restore();
     }
   }
+  } // end backrooms projectile hide
 
-  // Render spike entities (John Doe)
-  if (window._spikeEntities && window._spikeEntities.length > 0) {
+  // Render spike entities (John Doe) — hidden in backrooms
+  if (!(localPlayer && localPlayer.inBackrooms) && window._spikeEntities && window._spikeEntities.length > 0) {
     for (const spike of window._spikeEntities) {
       const sx = spike.x - camX;
       const sy = spike.y - camY;
@@ -11501,6 +15392,59 @@ function renderGame() {
     // Purple colour wash
     gameCtx.fillStyle = 'rgba(80, 0, 120, 0.2)';
     gameCtx.fillRect(0, 0, cw, ch);
+  }
+
+  // ── Final Battle overlay: Dog Tooth in Complex — grayscale filter + glitch ──
+  if (localPlayer && localPlayer.dogtoothInComplex) {
+    // Grayscale filter
+    gameCtx.save();
+    gameCtx.filter = 'grayscale(1)';
+    gameCtx.drawImage(gameCanvas, 0, 0);
+    gameCtx.filter = 'none';
+    gameCtx.restore();
+    // Heavy glitchy vertical black stripes — big, thick, lingering
+    const glitchTime = Date.now();
+    // Slow cycle vertical stripes (persist ~300ms each)
+    const slowSeed = Math.floor(glitchTime / 300);
+    for (let i = 0; i < 8; i++) {
+      const hash = (slowSeed * 7919 + i * 104729) & 0xFFFFFF;
+      if ((hash & 1) !== 0) continue; // ~50% chance
+      const stripeX = ((hash >> 1) % cw);
+      const stripeW = 8 + ((hash >> 8) % 25);
+      gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      gameCtx.fillRect(stripeX, 0, stripeW, ch);
+    }
+    // Fast cycle vertical stripes (flicker every ~80ms)
+    const fastSeed = Math.floor(glitchTime / 80);
+    for (let i = 0; i < 15; i++) {
+      const hash = (fastSeed * 3571 + i * 78917) & 0xFFFFFF;
+      if ((hash & 3) !== 0) continue; // ~25% chance
+      const stripeX = ((hash >> 2) % cw);
+      const stripeW = 3 + ((hash >> 10) % 15);
+      const stripeY = ((hash >> 14) % (ch >> 2));
+      const stripeH = ch * 0.4 + ((hash >> 6) % (ch >> 1));
+      gameCtx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+      gameCtx.fillRect(stripeX, stripeY, stripeW, stripeH);
+    }
+    // Screen-tear: occasional horizontal offset block
+    const tearSeed = Math.floor(glitchTime / 150);
+    if ((tearSeed & 3) === 0) {
+      const tearX = ((tearSeed * 4919) % (cw - 40));
+      const tearW = 15 + ((tearSeed * 7) % 30);
+      const tearShift = -20 + ((tearSeed * 13) % 40);
+      gameCtx.drawImage(gameCanvas, tearX, 0, tearW, ch, tearX + tearShift, 0, tearW, ch);
+    }
+    // Full-height white flash glitch
+    if ((fastSeed & 5) === 0) {
+      const flashX = ((fastSeed * 3571) % cw);
+      gameCtx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+      gameCtx.fillRect(flashX, 0, 3 + (fastSeed % 6), ch);
+    }
+    // "THE COMPLEX" text
+    gameCtx.fillStyle = 'rgba(100, 0, 0, 0.4)';
+    gameCtx.font = 'bold 28px sans-serif';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText('THE COMPLEX', cw / 2, 40);
   }
 
   // Draw zone overlay
@@ -11685,6 +15629,34 @@ function drawEffectLog() {
     gameCtx.fillText('🩸 BOILED ONE ' + Math.ceil(lp.boiledOneTimer) + 's', cw / 2, logY);
     logY += 20;
   }
+  if (lp.illusionInvisTimer > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('👻 INVISIBLE ' + Math.ceil(lp.illusionInvisTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#c8dcff';
+    gameCtx.fillText('👻 INVISIBLE ' + Math.ceil(lp.illusionInvisTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.illusionSpecialInvis) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('👻 INVISIBLE (kill all copies)', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#c8dcff';
+    gameCtx.fillText('👻 INVISIBLE (kill all copies)', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.illusionTimeFreezeTimer > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('⏱ TIME FROZEN ' + Math.ceil(lp.illusionTimeFreezeTimer * 10) / 10 + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#c8dcff';
+    gameCtx.fillText('⏱ TIME FROZEN ' + Math.ceil(lp.illusionTimeFreezeTimer * 10) / 10 + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.illusionSeeGrassTimer > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('👁 SEE THROUGH GRASS ' + Math.ceil(lp.illusionSeeGrassTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#7fff7f';
+    gameCtx.fillText('👁 SEE THROUGH GRASS ' + Math.ceil(lp.illusionSeeGrassTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
   for (let i = 0; i < combatLog.length; i++) {
     const entry = combatLog[i];
     gameCtx.fillStyle = '#000';
@@ -11705,13 +15677,34 @@ function buildHUD() {
   const nameMap = {};
   fighter.abilities.forEach(a => { nameMap[a.key === 'SPACE' ? 'SPC' : a.key] = a.name; });
   keys.forEach((k) => {
-    const n = nameMap[k] || k;
+    let n = nameMap[k] || k;
+    // Power Special names when achievement is unlocked
+    if (k === 'SPC' && typeof isMove4Unlocked === 'function' && isMove4Unlocked(fighter.id)) {
+      const powerNames = {
+        'fighter': 'With Extra Power',
+        'poker': 'The Price Of Gambling',
+        'filbus': 'Prehistoric Emergence',
+        'onexonexonex': '+Slasher',
+        'cricket': 'Winning the Finals',
+        'deer': 'YOU ARE THE IGLOO',
+        'noli': 'Guest666',
+        'explodingcat': 'Imploding Kitten',
+        'napoleon': 'Full Power',
+        'moderator': 'Multi Update',
+        'dragon': 'Double Trouble',
+        'dnd': 'Super Lucky',
+        'illusion': '...and more',
+      };
+      if (powerNames[fighter.id]) {
+        n = n + ' (+' + powerNames[fighter.id] + ')';
+      }
+    }
     const shortName = n.length > 7 ? n.substring(0, 6) + '.' : n;
     const div = document.createElement('div');
     div.className = 'hud-ability ready';
     div.id = 'hud-ab-' + k;
     div.innerHTML = `<span class="key-label">${k}</span>`;
-    div.title = shortName;
+    div.title = n; // show full name with power special in tooltip
     abils.appendChild(div);
   });
   // Show special bar
@@ -11731,7 +15724,7 @@ function updateHUD() {
   document.querySelector('#hud-hp-text').textContent = Math.ceil(lp.hp) + '/' + lp.maxHp;
 
   // Special meter
-  const specThresh = lp.maxHp * 2;
+  const specThresh = getSpecialThreshold(lp);
   let specFrac;
   if (lp.specialUsed) {
     specFrac = 0; // used — empty
@@ -11826,7 +15819,7 @@ function checkWinCondition() {
       gameCtx.textAlign = 'center';
       gameCtx.fillStyle = '#e94560';
       const suffix = place === 2 ? 'nd' : place === 3 ? 'rd' : 'th';
-      gameCtx.fillText(place + suffix + ' PLACE', cw / 2, ch / 2);
+      gameCtx.fillText(place + suffix + ' PLACE', cw / 2, ch / 2 - 60);
       _showPlayAgainOverlay();
       return;
     }
@@ -11842,10 +15835,10 @@ function checkWinCondition() {
       gameCtx.textAlign = 'center';
       if (alive.length === 1 && alive[0].id === localPlayerId) {
         gameCtx.fillStyle = '#2ecc71';
-        gameCtx.fillText('VICTORY!', cw / 2, ch / 2);
+        gameCtx.fillText('VICTORY!', cw / 2, ch / 2 - 80);
         gameCtx.font = 'bold 20px "Press Start 2P", monospace';
         gameCtx.fillStyle = '#fff';
-        gameCtx.fillText('1st PLACE', cw / 2, ch / 2 + 50);
+        gameCtx.fillText('1st PLACE', cw / 2, ch / 2 - 35);
         // Achievement tracking: singleplayer win
         if (typeof trackSPWin === 'function') {
           trackSPWin(localPlayer.fighter.id);
@@ -11887,7 +15880,7 @@ function checkWinCondition() {
       } else {
         gameCtx.fillStyle = '#e94560';
         const winnerName = alive.length === 1 ? alive[0].name : 'Nobody';
-        gameCtx.fillText(winnerName + ' WINS', cw / 2, ch / 2);
+        gameCtx.fillText(winnerName + ' WINS', cw / 2, ch / 2 - 60);
       }
       _showPlayAgainOverlay();
     }
@@ -12145,6 +16138,34 @@ function buildGameStateSnapshot() {
     dragonBeamAimNy: p.dragonBeamAimNy || 0,
     dragonRoarActive: p.dragonRoarActive || false,
     dragonSummonId: p.dragonSummonId || null,
+    // Dog Tooth state
+    dogtoothBleedTimers: p.dogtoothBleedTimers || [],
+    dogtoothOurielId: p.dogtoothOurielId || null,
+    dogtoothSmileTimer: p.dogtoothSmileTimer || 0,
+    dogtoothSmileDmg: p.dogtoothSmileDmg || 0,
+    dogtoothPuppetGod: p.dogtoothPuppetGod || false,
+    dogtoothPuppetUsed: p.dogtoothPuppetUsed || false,
+    dogtoothReviveDmgMult: p.dogtoothReviveDmgMult || 1,
+    dogtoothMoonUsed: p.dogtoothMoonUsed || false,
+    dogtoothSpecialChoice: p.dogtoothSpecialChoice || null,
+    dogtoothChoiceTimer: p.dogtoothChoiceTimer || 0,
+    dogtoothMoonX: p.dogtoothMoonX || 0,
+    dogtoothMoonY: p.dogtoothMoonY || 0,
+    dogtoothMoonTimer: p.dogtoothMoonTimer || 0,
+    dogtoothMoonRadius: p.dogtoothMoonRadius || 0,
+    dogtoothMoonDmg: p.dogtoothMoonDmg || 0,
+    dogtoothInComplex: p.dogtoothInComplex || false,
+    dogtoothComplexRoomId: p.dogtoothComplexRoomId || null,
+    dogtoothFUsed: p.dogtoothFUsed || false,
+    // Illusion state
+    illusionInvisTimer: p.illusionInvisTimer || 0,
+    illusionCopyId: p.illusionCopyId || null,
+    illusionDodgeTargetId: p.illusionDodgeTargetId || null,
+    illusionDodgeTimer: p.illusionDodgeTimer || 0,
+    illusionTimeFreezeTimer: p.illusionTimeFreezeTimer || 0,
+    illusionSpecialInvis: p.illusionSpecialInvis || false,
+    illusionSpecialCopyIds: p.illusionSpecialCopyIds || [],
+    illusionSeeGrassTimer: p.illusionSeeGrassTimer || 0,
     // Movement state for non-host position correction
     specialJumping: p.specialJumping || false,
     // visual effects (include aimNx/aimNy for directional rendering, stolenType for cat-steal-fire)
@@ -12208,7 +16229,8 @@ function onRemoteGameState(snapshot) {
       if (dx * dx + dy * dy > 10000) { p.x = sp.x; p.y = sp.y; }
     } else {
       // Local player: accept host position when in non-predicted states
-      if (sp.stunned > 0 || !sp.alive || sp.noliVoidRushActive || sp.specialJumping) {
+      if (sp.stunned > 0 || !sp.alive || sp.noliVoidRushActive || sp.specialJumping
+          || sp.dogtoothSmileTimer > 0 || sp.dogtoothInComplex) {
         p.x = sp.x; p.y = sp.y;
       } else {
         // Soft correction: gently pull local prediction toward host position to prevent drift
@@ -12379,6 +16401,34 @@ function onRemoteGameState(snapshot) {
     p.dragonBeamAimNy = sp.dragonBeamAimNy || 0;
     p.dragonRoarActive = sp.dragonRoarActive || false;
     p.dragonSummonId = sp.dragonSummonId || null;
+    // Dog Tooth
+    p.dogtoothBleedTimers = sp.dogtoothBleedTimers || [];
+    p.dogtoothOurielId = sp.dogtoothOurielId || null;
+    p.dogtoothSmileTimer = sp.dogtoothSmileTimer || 0;
+    p.dogtoothSmileDmg = sp.dogtoothSmileDmg || 0;
+    p.dogtoothPuppetGod = sp.dogtoothPuppetGod || false;
+    p.dogtoothPuppetUsed = sp.dogtoothPuppetUsed || false;
+    p.dogtoothReviveDmgMult = sp.dogtoothReviveDmgMult || 1;
+    p.dogtoothMoonUsed = sp.dogtoothMoonUsed || false;
+    p.dogtoothSpecialChoice = sp.dogtoothSpecialChoice || null;
+    p.dogtoothChoiceTimer = sp.dogtoothChoiceTimer || 0;
+    p.dogtoothMoonX = sp.dogtoothMoonX || 0;
+    p.dogtoothMoonY = sp.dogtoothMoonY || 0;
+    p.dogtoothMoonTimer = sp.dogtoothMoonTimer || 0;
+    p.dogtoothMoonRadius = sp.dogtoothMoonRadius || 0;
+    p.dogtoothMoonDmg = sp.dogtoothMoonDmg || 0;
+    p.dogtoothInComplex = sp.dogtoothInComplex || false;
+    p.dogtoothComplexRoomId = sp.dogtoothComplexRoomId || null;
+    p.dogtoothFUsed = sp.dogtoothFUsed || false;
+    // Illusion
+    p.illusionInvisTimer = sp.illusionInvisTimer || 0;
+    p.illusionCopyId = sp.illusionCopyId || null;
+    p.illusionDodgeTargetId = sp.illusionDodgeTargetId || null;
+    p.illusionDodgeTimer = sp.illusionDodgeTimer || 0;
+    p.illusionTimeFreezeTimer = sp.illusionTimeFreezeTimer || 0;
+    p.illusionSpecialInvis = sp.illusionSpecialInvis || false;
+    p.illusionSpecialCopyIds = sp.illusionSpecialCopyIds || [];
+    p.illusionSeeGrassTimer = sp.illusionSeeGrassTimer || 0;
     p.specialJumping = sp.specialJumping || false;
     if (sp.effects) p.effects = sp.effects;
   }
@@ -12444,6 +16494,8 @@ function onRemotePosition(data) {
   const p = gamePlayers.find(pl => pl.id === id);
   if (!p) return;
   if (isHostAuthority) {
+    // Host: skip position updates when host controls movement (Smile auto-chase, Complex)
+    if (p.dogtoothSmileTimer > 0 || p.dogtoothInComplex) return;
     // Host: directly update remote player's position for authoritative combat resolution
     p.x = x; p.y = y;
   }
@@ -12453,7 +16505,8 @@ function onRemotePosition(data) {
 
 // Apply movement from a remote input object to a player (host-side)
 function applyRemoteMovement(p, inp, dt) {
-  if (!p.alive || p.stunned > 0 || p.isCraftingChair || p.isEatingChair || p.specialAiming) return;
+  if (!p.alive || p.stunned > 0 || p.isCraftingChair || p.isEatingChair || p.specialAiming
+      || p.dogtoothSmileTimer > 0 || p.dogtoothInComplex) return;
   let dx = 0, dy = 0;
   const k = inp.keys || {};
   if (k['ArrowUp']   || k['w'] || k['W']) dy -= 1;
@@ -12475,6 +16528,14 @@ function applyRemoteMovement(p, inp, dt) {
   // Deer: slower while building robot
   if (p.deerBuildSlowTimer > 0 && p.fighter && p.fighter.id === 'deer') {
     speed *= 0.6;
+  }
+  // Moderator Fear: 2x speed when running away from fear source
+  if (p.modFearTimer > 0 && p.modFearSourceId) {
+    const src = gamePlayers.find(pl => pl.id === p.modFearSourceId);
+    if (src && src.alive) {
+      const fdx = p.x - src.x, fdy = p.y - src.y;
+      if (fdx * dx + fdy * dy > 0) speed *= 2.0;
+    }
   }
   // Igloo slow: severely slow anyone inside an enemy igloo
   for (const owner of gamePlayers) {

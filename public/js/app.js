@@ -836,6 +836,174 @@ function drawFighterIcon(canvas, fighterId, customSize) {
     ctx.moveTo(gx + Math.cos(gAngle) * 6, gy + Math.sin(gAngle) * 6);
     ctx.lineTo(gx - Math.cos(gAngle) * 6, gy - Math.sin(gAngle) * 6);
     ctx.stroke();
+  } else if (fighterId === 'dogtooth') {
+    // Dog Tooth: large detailed knife with red wavy blood
+    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Knife orientation — angled from lower-left to upper-right
+    const kA = -Math.PI / 4;
+    const kPerp = kA + Math.PI / 2;
+    const kLen = r * 2.0;
+    // Anchor positions
+    const hEndX = cx - Math.cos(kA) * kLen * 0.28;
+    const hEndY = cy - Math.sin(kA) * kLen * 0.28;
+    const kBaseX = cx - Math.cos(kA) * kLen * 0.05;
+    const kBaseY = cy - Math.sin(kA) * kLen * 0.05;
+    const kMidX = cx + Math.cos(kA) * kLen * 0.35;
+    const kMidY = cy + Math.sin(kA) * kLen * 0.35;
+    const kTipX = cx + Math.cos(kA) * kLen * 0.55;
+    const kTipY = cy + Math.sin(kA) * kLen * 0.55;
+    // Blade — wide near base tapering to sharp tip
+    const bwBase = 6;
+    const bwMid = 4.5;
+    ctx.fillStyle = '#c8c8c8';
+    ctx.beginPath();
+    ctx.moveTo(kBaseX + Math.cos(kPerp) * bwBase, kBaseY + Math.sin(kPerp) * bwBase);
+    ctx.lineTo(kMidX + Math.cos(kPerp) * bwMid, kMidY + Math.sin(kPerp) * bwMid);
+    ctx.lineTo(kTipX, kTipY);
+    ctx.lineTo(kMidX - Math.cos(kPerp) * (bwMid * 0.4), kMidY - Math.sin(kPerp) * (bwMid * 0.4));
+    ctx.lineTo(kBaseX - Math.cos(kPerp) * (bwBase * 0.5), kBaseY - Math.sin(kPerp) * (bwBase * 0.5));
+    ctx.closePath();
+    ctx.fill();
+    // Blade outline
+    ctx.strokeStyle = '#777'; ctx.lineWidth = 0.8; ctx.stroke();
+    // Spine (back edge)
+    ctx.strokeStyle = '#aaa'; ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(kBaseX - Math.cos(kPerp) * (bwBase * 0.5), kBaseY - Math.sin(kPerp) * (bwBase * 0.5));
+    ctx.lineTo(kTipX, kTipY);
+    ctx.stroke();
+    // Edge highlight (sharp side)
+    ctx.strokeStyle = '#eee'; ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(kBaseX + Math.cos(kPerp) * bwBase, kBaseY + Math.sin(kPerp) * bwBase);
+    ctx.lineTo(kTipX, kTipY);
+    ctx.stroke();
+    // Fuller (groove)
+    ctx.strokeStyle = 'rgba(100,100,110,0.5)'; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(kBaseX + Math.cos(kA) * kLen * 0.08 + Math.cos(kPerp) * 2,
+               kBaseY + Math.sin(kA) * kLen * 0.08 + Math.sin(kPerp) * 2);
+    ctx.lineTo(kBaseX + Math.cos(kA) * kLen * 0.4 + Math.cos(kPerp) * 1,
+               kBaseY + Math.sin(kA) * kLen * 0.4 + Math.sin(kPerp) * 1);
+    ctx.stroke();
+    // Crossguard
+    ctx.strokeStyle = '#555'; ctx.lineWidth = 3.5;
+    ctx.beginPath();
+    ctx.moveTo(kBaseX + Math.cos(kPerp) * 9, kBaseY + Math.sin(kPerp) * 9);
+    ctx.lineTo(kBaseX - Math.cos(kPerp) * 9, kBaseY - Math.sin(kPerp) * 9);
+    ctx.stroke();
+    ctx.strokeStyle = '#777'; ctx.lineWidth = 1; ctx.stroke();
+    // Handle (grip with wrap lines)
+    ctx.strokeStyle = '#1a0e05'; ctx.lineWidth = 7; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(kBaseX, kBaseY); ctx.lineTo(hEndX, hEndY); ctx.stroke();
+    ctx.strokeStyle = '#3a2010'; ctx.lineWidth = 0.9;
+    for (let g = 0.15; g < 0.9; g += 0.2) {
+      const gx = kBaseX + (hEndX - kBaseX) * g;
+      const gy = kBaseY + (hEndY - kBaseY) * g;
+      ctx.beginPath();
+      ctx.moveTo(gx + Math.cos(kPerp) * 4, gy + Math.sin(kPerp) * 4);
+      ctx.lineTo(gx - Math.cos(kPerp) * 4, gy - Math.sin(kPerp) * 4);
+      ctx.stroke();
+    }
+    // Pommel
+    ctx.fillStyle = '#444'; ctx.beginPath(); ctx.arc(hEndX, hEndY, 3.5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#666'; ctx.lineWidth = 0.8; ctx.stroke();
+    ctx.lineCap = 'butt';
+    // ── Black wavy blood on blade ──
+    // Main blood stream — thick wavy bezier trail along blade
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(kBaseX + Math.cos(kA) * kLen * 0.15 + Math.cos(kPerp) * 2,
+               kBaseY + Math.sin(kA) * kLen * 0.15 + Math.sin(kPerp) * 2);
+    ctx.bezierCurveTo(
+      kBaseX + Math.cos(kA) * kLen * 0.25 + Math.cos(kPerp) * 6,
+      kBaseY + Math.sin(kA) * kLen * 0.25 + Math.sin(kPerp) * 6,
+      kBaseX + Math.cos(kA) * kLen * 0.35 - Math.cos(kPerp) * 3,
+      kBaseY + Math.sin(kA) * kLen * 0.35 - Math.sin(kPerp) * 3,
+      kBaseX + Math.cos(kA) * kLen * 0.48 + Math.cos(kPerp) * 1,
+      kBaseY + Math.sin(kA) * kLen * 0.48 + Math.sin(kPerp) * 1
+    );
+    ctx.stroke();
+    // Second blood wave — thinner, offset
+    ctx.strokeStyle = 'rgba(20, 20, 20, 0.6)'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(kBaseX + Math.cos(kA) * kLen * 0.2 - Math.cos(kPerp) * 1,
+               kBaseY + Math.sin(kA) * kLen * 0.2 - Math.sin(kPerp) * 1);
+    ctx.bezierCurveTo(
+      kBaseX + Math.cos(kA) * kLen * 0.3 - Math.cos(kPerp) * 4,
+      kBaseY + Math.sin(kA) * kLen * 0.3 - Math.sin(kPerp) * 4,
+      kBaseX + Math.cos(kA) * kLen * 0.4 + Math.cos(kPerp) * 3,
+      kBaseY + Math.sin(kA) * kLen * 0.4 + Math.sin(kPerp) * 3,
+      kBaseX + Math.cos(kA) * kLen * 0.52 - Math.cos(kPerp) * 1,
+      kBaseY + Math.sin(kA) * kLen * 0.52 - Math.sin(kPerp) * 1
+    );
+    ctx.stroke();
+    // Drip from tip — wavy downward
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(kTipX, kTipY);
+    ctx.bezierCurveTo(
+      kTipX + 3, kTipY + 4,
+      kTipX - 2, kTipY + 8,
+      kTipX + 1, kTipY + 13
+    );
+    ctx.stroke();
+    // Small drip from crossguard
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(kBaseX + Math.cos(kPerp) * 5, kBaseY + Math.sin(kPerp) * 5);
+    ctx.bezierCurveTo(
+      kBaseX + Math.cos(kPerp) * 7 + 2, kBaseY + Math.sin(kPerp) * 7 + 3,
+      kBaseX + Math.cos(kPerp) * 6 - 1, kBaseY + Math.sin(kPerp) * 6 + 7,
+      kBaseX + Math.cos(kPerp) * 8, kBaseY + Math.sin(kPerp) * 8 + 10
+    );
+    ctx.stroke();
+    ctx.lineCap = 'butt';
+  } else if (fighterId === 'illusion') {
+    // Illusion: wizard hat with mystical eye
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Hat brim — wide silver arc at bottom
+    ctx.fillStyle = '#555';
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + r * 0.3, r * 0.85, r * 0.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#888'; ctx.lineWidth = 1; ctx.stroke();
+    // Hat cone — tall pointed wizard hat
+    ctx.fillStyle = '#2a2a4e';
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.55, cy + r * 0.25);
+    ctx.lineTo(cx + r * 0.1, cy - r * 0.85);
+    ctx.lineTo(cx + r * 0.55, cy + r * 0.25);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#7f8fa6'; ctx.lineWidth = 1; ctx.stroke();
+    // Hat band — silvery-blue stripe
+    ctx.strokeStyle = '#c8dcff'; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.5, cy + r * 0.2);
+    ctx.lineTo(cx + r * 0.5, cy + r * 0.2);
+    ctx.stroke();
+    // Star on hat
+    const starX = cx, starY = cy - r * 0.15;
+    ctx.fillStyle = '#c8dcff';
+    ctx.beginPath();
+    for (let i = 0; i < 5; i++) {
+      const a = -Math.PI / 2 + i * Math.PI * 2 / 5;
+      const ai = a + Math.PI / 5;
+      ctx.lineTo(starX + Math.cos(a) * r * 0.18, starY + Math.sin(a) * r * 0.18);
+      ctx.lineTo(starX + Math.cos(ai) * r * 0.08, starY + Math.sin(ai) * r * 0.08);
+    }
+    ctx.closePath();
+    ctx.fill();
+    // Mystical eye below hat
+    ctx.fillStyle = 'rgba(200, 220, 255, 0.6)';
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + r * 0.55, r * 0.15, r * 0.1, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath();
+    ctx.arc(cx, cy + r * 0.55, r * 0.06, 0, Math.PI * 2);
+    ctx.fill();
   } else {
     // Fighter: sword icon
     ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
@@ -863,6 +1031,8 @@ function populateFighterScreen() {
 
   _shuffledFighterIds.forEach((fid) => {
     const f = getFighter(fid);
+    // Hide admin-only fighters entirely unless unlocked
+    if (f.adminOnly && !isFighterUnlocked(fid)) return;
     const locked = !isFighterUnlocked(fid);
     const mpOnly = f.multiplayerOnly && (flowTarget === 'fight' || flowTarget === 'fight-hard' || flowTarget === 'training');
     const btn = document.createElement('button');
@@ -963,6 +1133,8 @@ function populateLobbyFighters() {
 
   _shuffledFighterIds.forEach((fid) => {
     const f = getFighter(fid);
+    // Hide admin-only fighters entirely unless unlocked
+    if (f.adminOnly && !isFighterUnlocked(fid)) return;
     const locked = !isFighterUnlocked(fid);
     const btn = document.createElement('button');
     btn.className = 'lobby-fighter-btn' + (fid === selectedFighterId ? ' active' : '') + (locked ? ' locked' : '');
@@ -1041,6 +1213,22 @@ function escapeHtml(str) {
 const _ACH_KEY = 'rbg_achievements'; // localStorage key
 
 const _OLD_PROGRESS_KEYS = ['mpWins', 'spWins', 'winsAs1x', 'boiledOnePlays', 'summonKillMP', 'deerRestrictedWin'];
+const _PREV_PROGRESS_KEYS = [
+  'mpWins', 'spWins', 'winsAs1x', 'boiledOnePlays', 'summonKillMP', 'deerRestrictedWin',
+  'fighterSpecialAch', 'pokerNoSpecialAch', 'filbusBoiledKillAch',
+  'onexKilledNoliMP', 'onexKilledCatSP', 'gearDmgAbsorbed',
+  'deerWaterKill', 'noliVoidRushAch', 'catKittenAch',
+  'napoleonM1Kills', 'napoleonSummonWins',
+  'modWins',
+  'dndWinsPoker', 'dndWinsFighter', 'dndWinsCricket',
+  'dndElfWins', 'dndDwarfWins', 'dndHumanWins',
+  'dragonWinsNapoleon', 'dragonWinsDnD',
+  'dragonBeamAch',
+  'dogtoothWinsFilbus', 'dogtoothWinsNoli',
+  'dogtoothTotalWins',
+  'illusionWinsMod', 'illusionWinsNoli',
+  'illusionInvisKills',
+];
 const _PROGRESS_KEYS = [
   'mpWins', 'spWins', 'winsAs1x', 'boiledOnePlays', 'summonKillMP', 'deerRestrictedWin',
   // Round 2 per-fighter progress
@@ -1059,6 +1247,19 @@ const _PROGRESS_KEYS = [
   'dragonWinsNapoleon', 'dragonWinsDnD',
   // Dragon F-move
   'dragonBeamAch',
+  // Dog Tooth unlock
+  'dogtoothWinsFilbus', 'dogtoothWinsNoli',
+  // Dog Tooth F-move
+  'dogtoothTotalWins',
+  // Illusion unlock
+  'illusionWinsMod', 'illusionWinsNoli',
+  // Illusion F-move
+  'illusionInvisKills',
+  // Team mode wins per fighter
+  'teamWinsFighter', 'teamWinsPoker', 'teamWinsFilbus', 'teamWins1x',
+  'teamWinsCricket', 'teamWinsDeer', 'teamWinsNoli', 'teamWinsCat',
+  'teamWinsNapoleon', 'teamWinsModerator', 'teamWinsDragon', 'teamWinsDnd',
+  'teamWinsIllusion', 'teamWinsDogtooth',
 ];
 
 function _defaultProgress() {
@@ -1067,55 +1268,81 @@ function _defaultProgress() {
   return p;
 }
 
-function _achStateToBits(completed) {
+const _ACH_BYTE_COUNT = 5; // supports up to 40 achievements
+
+function _achStateToBytes(completed) {
   const ids = Object.keys(ACHIEVEMENTS);
-  let bits = 0;
-  ids.forEach((id, i) => { if (completed.has(id)) bits |= (1 << i); });
-  return bits;
+  const bytes = new Array(_ACH_BYTE_COUNT).fill(0);
+  ids.forEach((id, i) => {
+    if (completed.has(id)) bytes[Math.floor(i / 8)] |= (1 << (i % 8));
+  });
+  return bytes;
 }
 
-function _achBitsToState(bits) {
+function _achBytesToState(achBytes) {
   const ids = Object.keys(ACHIEVEMENTS);
   const set = new Set();
-  ids.forEach((id, i) => { if (bits & (1 << i)) set.add(id); });
+  ids.forEach((id, i) => {
+    const byteIdx = Math.floor(i / 8);
+    if (byteIdx < achBytes.length && (achBytes[byteIdx] & (1 << (i % 8)))) set.add(id);
+  });
   return set;
 }
 
-// Pack state into bytes: [achBitsLow, achBitsMid, achBitsHigh, ...progressKeys]
+// Legacy compat helpers (3-byte bitmask)
+function _achStateToBits(completed) {
+  const ids = Object.keys(ACHIEVEMENTS);
+  let bits = 0;
+  ids.forEach((id, i) => { if (i < 24 && completed.has(id)) bits |= (1 << i); });
+  return bits;
+}
+function _achBitsToState(bits) {
+  const ids = Object.keys(ACHIEVEMENTS);
+  const set = new Set();
+  ids.forEach((id, i) => { if (i < 24 && (bits & (1 << i))) set.add(id); });
+  return set;
+}
+
+// Pack state into bytes: [5 ach bytes, ...progressKeys]
 function _packState(completed, progress) {
-  const bytes = [];
-  const bits = _achStateToBits(completed);
-  bytes.push(bits & 0xFF);
-  bytes.push((bits >> 8) & 0xFF);
-  bytes.push((bits >> 16) & 0xFF);
+  const bytes = _achStateToBytes(completed);
   _PROGRESS_KEYS.forEach(k => bytes.push(Math.min(255, Math.max(0, progress[k] || 0))));
   return bytes;
 }
 
 function _unpackState(bytes) {
-  // Newest format: 3 ach bytes + full progress keys
-  const newestLen = 3 + _PROGRESS_KEYS.length;
-  if (bytes.length >= newestLen) {
+  // Current format: 5 ach bytes + full progress keys
+  const currentLen = _ACH_BYTE_COUNT + _PROGRESS_KEYS.length;
+  if (bytes.length >= currentLen) {
+    const achBytes = bytes.slice(0, _ACH_BYTE_COUNT);
+    const completed = _achBytesToState(achBytes);
+    const progress = _defaultProgress();
+    _PROGRESS_KEYS.forEach((k, i) => { progress[k] = bytes[_ACH_BYTE_COUNT + i]; });
+    return { completed, progress };
+  }
+  // Previous format: 3 ach bytes + 32 progress keys (pre-team-achievements)
+  const prevLen = 3 + _PREV_PROGRESS_KEYS.length;
+  if (bytes.length >= prevLen) {
     const bits = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16);
     const completed = _achBitsToState(bits);
     const progress = _defaultProgress();
-    _PROGRESS_KEYS.forEach((k, i) => { progress[k] = bytes[3 + i]; });
+    _PREV_PROGRESS_KEYS.forEach((k, i) => { progress[k] = bytes[3 + i]; });
     return { completed, progress };
   }
-  // Previous format: 2 ach bytes + 17 old progress keys
-  const prevKeys = [
+  // Older format: 2 ach bytes + 17 old progress keys
+  const olderKeys = [
     'mpWins', 'spWins', 'winsAs1x', 'boiledOnePlays', 'summonKillMP', 'deerRestrictedWin',
     'fighterSpecialAch', 'pokerNoSpecialAch', 'filbusBoiledKillAch',
     'onexKilledNoliMP', 'onexKilledCatSP', 'gearDmgAbsorbed',
     'deerWaterKill', 'noliVoidRushAch', 'catKittenAch',
     'napoleonM1Kills', 'napoleonSummonWins',
   ];
-  const prevLen = 2 + prevKeys.length;
-  if (bytes.length >= prevLen) {
+  const olderLen = 2 + olderKeys.length;
+  if (bytes.length >= olderLen) {
     const bits = bytes[0] | (bytes[1] << 8);
     const completed = _achBitsToState(bits);
     const progress = _defaultProgress();
-    prevKeys.forEach((k, i) => { progress[k] = bytes[2 + i]; });
+    olderKeys.forEach((k, i) => { progress[k] = bytes[2 + i]; });
     return { completed, progress };
   }
   // Old format: 1 ach byte + 6 old progress keys
@@ -1154,6 +1381,9 @@ function decodeAchCode(code) {
   if (code === 'NAPOLEON') {
     return { completed: new Set(Object.keys(ACHIEVEMENTS)), progress: _defaultProgress(), unlockAll: true };
   }
+  if (code === 'MATTHEWISACHEATER') {
+    return { completed: new Set(Object.keys(ACHIEVEMENTS)), progress: _defaultProgress(), unlockAll: true, unlockUnstable: true };
+  }
   const parts = code.split('-');
   if (parts.length !== 2 || parts[0].length !== 4) return null;
   const saltStr = parts[0];
@@ -1179,6 +1409,7 @@ function decodeAchCode(code) {
 let completedAchievements = new Set();
 let achProgress = _defaultProgress();
 let allFightersUnlocked = false;
+let unstableUnlocked = false;
 
 function loadAchievements() {
   try {
@@ -1187,6 +1418,7 @@ function loadAchievements() {
       const decoded = decodeAchCode(saved);
       if (decoded) {
         if (decoded.unlockAll) allFightersUnlocked = true;
+        if (decoded.unlockUnstable) unstableUnlocked = true;
         completedAchievements = decoded.completed;
         achProgress = decoded.progress;
       }
@@ -1196,7 +1428,9 @@ function loadAchievements() {
 
 function saveAchievements() {
   try {
-    if (allFightersUnlocked) {
+    if (unstableUnlocked) {
+      localStorage.setItem(_ACH_KEY, 'MATTHEWISACHEATER');
+    } else if (allFightersUnlocked) {
       localStorage.setItem(_ACH_KEY, 'NAPOLEON');
     } else {
       const code = generateAchCode(completedAchievements, achProgress);
@@ -1205,13 +1439,9 @@ function saveAchievements() {
   } catch (e) { /* ignore */ }
 }
 
-// ── Achievement checking with reset logic ────────────────────
+// ── Achievement checking (no reset) ──────────────────────
 function _resetCategoriesFor(achId) {
-  const cats = ACH_RESET_CATEGORIES[achId] || [];
-  cats.forEach(cat => {
-    const stats = PROGRESS_BY_CATEGORY[cat] || [];
-    stats.forEach(s => { achProgress[s] = 0; });
-  });
+  // No-op: achievements no longer reset each other's progress
 }
 
 function _showMove4Toast(ach) {
@@ -1347,13 +1577,62 @@ function checkAndUnlockAchievements() {
     newlyCompleted.push('dragonAch');
     changed = true;
   }
+  // dogtoothAchUnlock: 3 wins as Filbus + 3 wins as Noli
+  if (!completedAchievements.has('dogtoothAchUnlock') && achProgress.dogtoothWinsFilbus >= 3 && achProgress.dogtoothWinsNoli >= 3) {
+    completedAchievements.add('dogtoothAchUnlock');
+    changed = true;
+  }
+  // dogtoothAch: Dog Tooth F-move — win any game as Dogtooth
+  if (!completedAchievements.has('dogtoothAch') && isAchievementAvailable('dogtoothAch') && achProgress.dogtoothTotalWins >= 1) {
+    completedAchievements.add('dogtoothAch');
+    newlyCompleted.push('dogtoothAch');
+    changed = true;
+  }
+  // illusionAchUnlock: 3 wins as Moderator + 3 wins as Noli
+  if (!completedAchievements.has('illusionAchUnlock') && achProgress.illusionWinsMod >= 3 && achProgress.illusionWinsNoli >= 3) {
+    completedAchievements.add('illusionAchUnlock');
+    changed = true;
+  }
+  // illusionAch: Illusion F-move — kill 10 enemies while invisible
+  if (!completedAchievements.has('illusionAch') && isAchievementAvailable('illusionAch') && achProgress.illusionInvisKills >= 10) {
+    completedAchievements.add('illusionAch');
+    newlyCompleted.push('illusionAch');
+    changed = true;
+  }
+
+  // ── Team mode achievements (win 3 team games as each fighter) ──
+  const _teamAchMap = {
+    fighterTeamAch: 'teamWinsFighter',
+    pokerTeamAch: 'teamWinsPoker',
+    filbusTeamAch: 'teamWinsFilbus',
+    onexTeamAch: 'teamWins1x',
+    cricketTeamAch: 'teamWinsCricket',
+    deerTeamAch: 'teamWinsDeer',
+    noliTeamAch: 'teamWinsNoli',
+    catTeamAch: 'teamWinsCat',
+    napoleonTeamAch: 'teamWinsNapoleon',
+    moderatorTeamAch: 'teamWinsModerator',
+    dragonTeamAch: 'teamWinsDragon',
+    dndTeamAch: 'teamWinsDnd',
+    illusionTeamAch: 'teamWinsIllusion',
+    dogtoothTeamAch: 'teamWinsDogtooth',
+  };
+  for (const [achId, progressKey] of Object.entries(_teamAchMap)) {
+    if (!completedAchievements.has(achId) && isAchievementAvailable(achId) && (achProgress[progressKey] || 0) >= 3) {
+      completedAchievements.add(achId);
+      newlyCompleted.push(achId);
+      changed = true;
+    }
+  }
 
   if (changed) {
     saveAchievements();
-    // Show Move 4 unlock toast for newly completed Move 4 achievements
+    // Show toast for newly completed achievements
     for (const achId of newlyCompleted) {
       const ach = ACHIEVEMENTS[achId];
       if (ach && ach.unlocksMove4 && ach.forFighter) {
+        _showMove4Toast(ach);
+      } else if (ach && ach.teamAch) {
         _showMove4Toast(ach);
       }
     }
@@ -1368,6 +1647,13 @@ function trackSPWin(fighterId) {
   if (fighterId === 'poker' || fighterId === 'fighter' || fighterId === 'cricket') trackDndFighterWin(fighterId);
   if (fighterId === 'napoleon' && isAchievementAvailable('dragonAchUnlock')) achProgress.dragonWinsNapoleon++;
   if (fighterId === 'dnd' && isAchievementAvailable('dragonAchUnlock')) achProgress.dragonWinsDnD++;
+  // Dog Tooth tracking
+  if (fighterId === 'filbus') achProgress.dogtoothWinsFilbus++;
+  if (fighterId === 'noli') achProgress.dogtoothWinsNoli++;
+  if (fighterId === 'dogtooth') achProgress.dogtoothTotalWins++;
+  // Illusion unlock tracking
+  if (fighterId === 'moderator') achProgress.illusionWinsMod++;
+  if (fighterId === 'noli') achProgress.illusionWinsNoli++;
   checkAndUnlockAchievements();
   saveAchievements();
 }
@@ -1378,6 +1664,38 @@ function trackMPWin(fighterId) {
   if (fighterId === 'poker' || fighterId === 'fighter' || fighterId === 'cricket') trackDndFighterWin(fighterId);
   if (fighterId === 'napoleon' && isAchievementAvailable('dragonAchUnlock')) achProgress.dragonWinsNapoleon++;
   if (fighterId === 'dnd' && isAchievementAvailable('dragonAchUnlock')) achProgress.dragonWinsDnD++;
+  // Dog Tooth tracking
+  if (fighterId === 'filbus') achProgress.dogtoothWinsFilbus++;
+  if (fighterId === 'noli') achProgress.dogtoothWinsNoli++;
+  if (fighterId === 'dogtooth') achProgress.dogtoothTotalWins++;
+  // Illusion unlock tracking
+  if (fighterId === 'moderator') achProgress.illusionWinsMod++;
+  if (fighterId === 'noli') achProgress.illusionWinsNoli++;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackTeamWin(fighterId) {
+  const teamKeyMap = {
+    fighter: 'teamWinsFighter',
+    poker: 'teamWinsPoker',
+    filbus: 'teamWinsFilbus',
+    onexonexonex: 'teamWins1x',
+    cricket: 'teamWinsCricket',
+    deer: 'teamWinsDeer',
+    noli: 'teamWinsNoli',
+    explodingcat: 'teamWinsCat',
+    napoleon: 'teamWinsNapoleon',
+    moderator: 'teamWinsModerator',
+    dragon: 'teamWinsDragon',
+    dnd: 'teamWinsDnd',
+    illusion: 'teamWinsIllusion',
+    dogtooth: 'teamWinsDogtooth',
+  };
+  const key = teamKeyMap[fighterId];
+  if (key) {
+    achProgress[key] = Math.min(255, (achProgress[key] || 0) + 1);
+  }
   checkAndUnlockAchievements();
   saveAchievements();
 }
@@ -1518,6 +1836,13 @@ function trackDragonBeamAch() {
   saveAchievements();
 }
 
+function trackIllusionInvisKill() {
+  if (!isAchievementAvailable('illusionAch')) return;
+  achProgress.illusionInvisKills = Math.min(255, (achProgress.illusionInvisKills || 0) + 1);
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
 function unlockAchievement(achId) {
   if (completedAchievements.has(achId)) return;
   completedAchievements.add(achId);
@@ -1526,6 +1851,7 @@ function unlockAchievement(achId) {
 }
 
 function isFighterUnlocked(fid) {
+  if (fid === 'unstable') return unstableUnlocked;
   if (allFightersUnlocked) return true;
   if (isFighterFree(fid)) return true;
   for (const achId of completedAchievements) {
@@ -1597,6 +1923,8 @@ function _getProgressText(achId) {
     case 'deerAch2': return p.deerWaterKill ? '' : 'Not yet completed';
     case 'noliAch2': return p.noliVoidRushAch ? '' : 'Not yet completed';
     case 'catAch2': return p.catKittenAch ? '' : 'Not yet completed';
+    case 'illusionAchUnlock': return 'Mod wins: ' + Math.min(p.illusionWinsMod, 3) + '/3 · Noli wins: ' + Math.min(p.illusionWinsNoli, 3) + '/3';
+    case 'illusionAch': return 'Invisible kills: ' + Math.min(p.illusionInvisKills || 0, 10) + '/10';
     default: return '';
   }
 }
@@ -1618,6 +1946,9 @@ function loadAchievementCode() {
   // Merge achievements and progress (take max of each counter)
   if (decoded.unlockAll) {
     allFightersUnlocked = true;
+  }
+  if (decoded.unlockUnstable) {
+    unstableUnlocked = true;
   }
   for (const id of decoded.completed) completedAchievements.add(id);
   _PROGRESS_KEYS.forEach(k => {

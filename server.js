@@ -40,7 +40,7 @@ function generateCode() {
 
 // ── Socket.io events ────────────────────────────────────────
 io.on('connection', (socket) => {
-  console.log(`Player connected: ${socket.id}`);
+  console.log(`[${new Date().toISOString()}] Player connected: ${socket.id}`);
 
   // HOST a new game
   socket.on('host-game', ({ playerName, mapIndex, fighterId, lobbyMode }) => {
@@ -58,6 +58,7 @@ io.on('connection', (socket) => {
     socket.join(code);
     socket.lobbyCode = code;
     socket.playerName = playerName;
+    socket._lastFighterId = fighterId || 'fighter';
 
     socket.emit('game-hosted', {
       code,
@@ -78,7 +79,7 @@ io.on('connection', (socket) => {
       socket.emit('join-error', { message: 'Lobby not found. Check the code and try again.' });
       return;
     }
-    const maxPlayers = (lobby.mode === 'teams2' || lobby.mode === 'teams3') ? 6 : 4;
+    const maxPlayers = 6;
     if (lobby.players.size >= maxPlayers) {
       socket.emit('join-error', { message: `Lobby is full (max ${maxPlayers} players).` });
       return;
@@ -90,6 +91,7 @@ io.on('connection', (socket) => {
     socket.join(upperCode);
     socket.lobbyCode = upperCode;
     socket.playerName = playerName;
+    socket._lastFighterId = fighterId || 'fighter';
 
     // Tell the joiner
     socket.emit('game-joined', {
@@ -135,6 +137,7 @@ io.on('connection', (socket) => {
     const player = lobby.players.get(socket.id);
     if (!player) return;
     player.fighterId = fighterId;
+    socket._lastFighterId = fighterId;
     io.to(socket.lobbyCode).emit('player-updated', {
       players: lobbyPlayerList(lobby),
       availableColors: getAvailableColors(lobby),
@@ -163,9 +166,14 @@ io.on('connection', (socket) => {
     const lobby = lobbies.get(socket.lobbyCode);
     if (!lobby || lobby.host !== socket.id) return;
 
-    // 3 Teams requires exactly 6 players
-    if (lobby.mode === 'teams3' && lobby.players.size < 6) {
-      socket.emit('start-error', { message: 'Not enough people — 3 Teams requires 6 players.' });
+    // Team mode requires minimum 2 players
+    if (lobby.mode === 'teams2' && lobby.players.size < 2) {
+      socket.emit('start-error', { message: 'Need at least 2 players for 2 Teams.' });
+      return;
+    }
+    // 3 Teams requires at least 3 players
+    if (lobby.mode === 'teams3' && lobby.players.size < 3) {
+      socket.emit('start-error', { message: 'Need at least 3 players for 3 Teams.' });
       return;
     }
 
@@ -409,8 +417,9 @@ io.on('connection', (socket) => {
     // Add the requester as first player
     const pName = socket.playerName || 'Player';
     const pColor = PLAYER_COLORS[0];
-    const pFighter = (oldLobby.players.get(socket.id) || {}).fighterId || 'fighter';
+    const pFighter = (oldLobby.players.get(socket.id) || {}).fighterId || socket._lastFighterId || 'fighter';
     newLobby.players.set(socket.id, { name: pName, color: pColor, fighterId: pFighter });
+    socket._lastFighterId = pFighter; // persist fighter across play-again transitions
     lobbies.set(newCode, newLobby);
 
     // Mark old lobby so others can find the play-again code
@@ -458,11 +467,17 @@ io.on('connection', (socket) => {
     // Already in the new lobby?
     if (sock.lobbyCode === newCode) return;
 
-    const maxPlayers = (newLobby.mode === 'teams2' || newLobby.mode === 'teams3') ? 6 : 4;
+    const maxPlayers = 6;
     if (newLobby.players.size >= maxPlayers) {
       sock.emit('join-error', { message: 'New lobby is full.' });
       return;
     }
+
+    // Add to new lobby — read fighter data BEFORE deletion from old lobby
+    const pName = sock.playerName || 'Player';
+    const available = getAvailableColors(newLobby);
+    const pColor = available[0] || '#ffffff';
+    const pFighter = (oldLobby && oldLobby.players.get(sock.id) || {}).fighterId || sock._lastFighterId || 'fighter';
 
     // Leave old lobby
     if (oldLobby) {
@@ -477,11 +492,8 @@ io.on('connection', (socket) => {
     }
 
     // Add to new lobby
-    const pName = sock.playerName || 'Player';
-    const available = getAvailableColors(newLobby);
-    const pColor = available[0] || '#ffffff';
-    const pFighter = (oldLobby && oldLobby.players.get(sock.id) || {}).fighterId || 'fighter';
     newLobby.players.set(sock.id, { name: pName, color: pColor, fighterId: pFighter });
+    sock._lastFighterId = pFighter; // persist fighter selection across play-again transitions
     sock.join(newCode);
     sock.lobbyCode = newCode;
 
@@ -532,7 +544,7 @@ io.on('connection', (socket) => {
   socket.on('leave-lobby', () => leaveLobby(socket));
   socket.on('disconnect', () => {
     leaveLobby(socket);
-    console.log(`Player disconnected: ${socket.id}`);
+    console.log(`[${new Date().toISOString()}] Player disconnected: ${socket.id}`);
   });
 });
 
