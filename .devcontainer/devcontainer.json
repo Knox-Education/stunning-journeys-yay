@@ -1,8 +1,13 @@
 {
-  "forwardPorts": [3000],
+  "forwardPorts": [3000, 8080],
   "portsAttributes": {
     "3000": {
       "label": "Game Server",
+      "visibility": "public",
+      "onAutoForward": "openBrowser"
+    },
+    "8080": {
+      "label": "Game Server 8080",
       "visibility": "public",
       "onAutoForward": "openBrowser"
     }

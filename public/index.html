@@ -10,8 +10,61 @@
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
-  <!-- ───── START SCREEN ───── -->
-  <div id="screen-start" class="screen active">
+  <!-- ───── RANDOM GAMES LANDING ───── -->
+  <div id="screen-games" class="screen active">
+    <div class="title-area">
+      <svg class="landing-sword" width="120" height="260" viewBox="0 0 120 260" xmlns="http://www.w3.org/2000/svg">
+        <!-- Blade -->
+        <polygon points="60,0 72,160 60,170 48,160" fill="#c0c8d4" stroke="#8899aa" stroke-width="1.5"/>
+        <!-- Blade edge highlight -->
+        <polygon points="60,6 66,155 60,163 54,155" fill="#dce4ee" opacity="0.5"/>
+        <!-- Fuller (groove) -->
+        <rect x="57" y="20" width="6" height="120" rx="3" fill="#9aa8b8" opacity="0.6"/>
+        <!-- Cross-guard -->
+        <rect x="20" y="168" width="80" height="14" rx="4" fill="#b8860b" stroke="#8b6914" stroke-width="1.5"/>
+        <rect x="24" y="171" width="72" height="8" rx="3" fill="#d4a017" opacity="0.5"/>
+        <!-- Grip -->
+        <rect x="50" y="182" width="20" height="50" rx="4" fill="#5c3a1e" stroke="#3e2712" stroke-width="1"/>
+        <!-- Grip wrapping -->
+        <line x1="50" y1="192" x2="70" y2="188" stroke="#7a5030" stroke-width="2" opacity="0.7"/>
+        <line x1="50" y1="202" x2="70" y2="198" stroke="#7a5030" stroke-width="2" opacity="0.7"/>
+        <line x1="50" y1="212" x2="70" y2="208" stroke="#7a5030" stroke-width="2" opacity="0.7"/>
+        <line x1="50" y1="222" x2="70" y2="218" stroke="#7a5030" stroke-width="2" opacity="0.7"/>
+        <!-- Pommel -->
+        <circle cx="60" cy="240" r="12" fill="#b8860b" stroke="#8b6914" stroke-width="1.5"/>
+        <circle cx="60" cy="240" r="6" fill="#d4a017" opacity="0.6"/>
+      </svg>
+      <h1 class="game-title">Random Games</h1>
+      <p class="subtitle">Pick a game</p>
+    </div>
+    <div class="menu-buttons">
+      <button class="menu-btn primary" id="btn-game-battlegrounds">⚔ Battlegrounds</button>
+      <button class="menu-btn primary" id="btn-game-cards">🃏 Card Games</button>
+      <button class="menu-btn primary" id="btn-game-adventure">� Under Construction</button>
+      <button class="menu-btn secondary" id="btn-game-save">💾 Save Data</button>
+    </div>
+  </div>
+
+  <!-- ───── ADVENTURE MODE ───── -->
+  <div id="screen-adventure" class="screen">
+    <div class="title-area">
+      <h1 class="game-title">Under Construction</h1>
+      <p class="subtitle">Explore the village</p>
+    </div>
+    <div class="menu-buttons">
+      <button class="menu-btn primary" id="btn-adventure-start">Start</button>
+      <button class="menu-btn secondary" id="btn-adventure-back">Back</button>
+    </div>
+  </div>
+
+  <!-- ───── ADVENTURE GAME SCREEN ───── -->
+  <div id="screen-adventure-game" class="screen">
+    <canvas id="adventure-canvas"></canvas>
+    <button id="btn-adventure-exit" class="exit-game-btn" title="Exit to menu">✕</button>
+  </div>
+
+  <!-- ───── BATTLEGROUNDS START SCREEN ───── -->
+  <div id="screen-start" class="screen">
     <div class="title-area">
       <h1 class="game-title">random battlegrounds game</h1>
       <p class="subtitle">Choose your path</p>
@@ -21,14 +74,15 @@
       <button class="menu-btn primary" id="btn-host">Host Game</button>
       <button class="menu-btn primary" id="btn-join">Join Game</button>
       <button class="menu-btn secondary" id="btn-achievements">🏆 Achievements</button>
+      <button class="menu-btn secondary" id="btn-battlegrounds-back">Back</button>
     </div>
   </div>
 
-  <!-- ───── ACHIEVEMENTS SCREEN ───── -->
+  <!-- ───── SAVE / ACHIEVEMENTS SCREEN ───── -->
   <div id="screen-achievements" class="screen">
-    <h2>🏆 Achievements</h2>
+    <h2>💾 Save Data</h2>
     <div class="achv-code-area">
-      <p class="achv-label">Your unique code (save this!):</p>
+      <p class="achv-label">Your save code (covers all games):</p>
       <div class="achv-code-display" id="achv-code-display">------</div>
     </div>
     <div class="achv-divider"></div>
@@ -37,6 +91,11 @@
       <input type="text" id="achv-code-input" maxlength="32" placeholder="Enter code…" autocomplete="off" />
       <button class="menu-btn primary achv-btn" id="btn-achv-load">Load Code</button>
       <p class="achv-msg" id="achv-msg"></p>
+    </div>
+    <div class="achv-divider"></div>
+    <div class="achv-unlocks">
+      <h3>Game Stats</h3>
+      <div class="achv-game-stats" id="achv-game-stats"></div>
     </div>
     <div class="achv-divider"></div>
     <div class="achv-list" id="achv-list"></div>
@@ -111,6 +170,12 @@
           <span id="lobby-mode-label" style="margin-left:8px;font-size:0.85em;color:#ccc;">FFA (max 4)</span>
           <span id="lobby-mode-warning" style="margin-left:8px;font-size:0.8em;color:#e94560;display:none;"></span>
         </div>
+        <div class="team-color-picker hidden" id="team-color-picker">
+          <span style="font-size:0.8em;color:#aaa;margin-right:6px;">Team Colors:</span>
+          <span id="team-color-label" style="font-size:0.85em;color:#ccc;margin-right:8px;">Red vs Blue</span>
+          <button class="menu-btn secondary" id="btn-cycle-team-color" style="font-size:0.75em;padding:4px 10px;">Change</button>
+          <button class="menu-btn secondary" id="btn-random-team-color" style="font-size:0.75em;padding:4px 10px;">Random</button>
+        </div>
         <button class="menu-btn primary hidden" id="btn-start-game">Start Game</button>
         <button class="menu-btn secondary" id="btn-leave-lobby">Leave</button>
       </div>
@@ -128,6 +193,7 @@
           </div>
           <h3 class="abilities-title">Abilities</h3>
           <div class="ability-list" id="lfc-abilities"></div>
+          <div class="trait-note hidden" id="lfc-trait"></div>
           <div class="special-note">⚡ Special unlocks after dealing 2× your max HP in damage without dying</div>
         </div>
       </div>
@@ -165,12 +231,142 @@
           </div>
           <h3 class="abilities-title">Abilities</h3>
           <div class="ability-list" id="fc-abilities"></div>
+          <div class="trait-note hidden" id="fc-trait"></div>
           <div class="special-note">⚡ Special unlocks after dealing 2× your max HP in damage without dying</div>
         </div>
       </div>
     </div>
     <button class="menu-btn primary" id="btn-select-fighter">Select Fighter</button>
     <button class="menu-btn secondary" id="btn-fighters-back">Back</button>
+  </div>
+
+  <!-- ───── CARD GAMES MENU ───── -->
+  <div id="screen-card-games" class="screen">
+    <div class="title-area">
+      <h1 class="game-title">Card Games</h1>
+    </div>
+    <div class="menu-buttons">
+      <button class="menu-btn primary" id="btn-cards-sp">Singleplayer</button>
+      <button class="menu-btn primary" id="btn-cards-mp">Multiplayer</button>
+      <button class="menu-btn secondary" id="btn-cards-back">Back</button>
+    </div>
+  </div>
+
+  <!-- ───── CARD GAMES: Singleplayer game select ───── -->
+  <div id="screen-cards-sp-select" class="screen">
+    <div class="title-area">
+      <h1 class="game-title">Singleplayer</h1>
+    </div>
+    <div class="menu-buttons">
+      <button class="menu-btn primary" id="btn-cards-sp-ek">💣 Exploding Kittens</button>
+      <button class="menu-btn primary" id="btn-cards-sp-mantis">🦂 Mantis</button>
+      <button class="menu-btn secondary" id="btn-cards-sp-back">Back</button>
+    </div>
+  </div>
+
+  <!-- ───── CARD GAMES: Multiplayer name input ───── -->
+  <div id="screen-cards-mp-name" class="screen">
+    <h2>Enter your name</h2>
+    <input type="text" id="cards-mp-name-input" maxlength="16" placeholder="Your name…" autocomplete="off" />
+    <div class="menu-buttons">
+      <button class="menu-btn primary" id="btn-cards-mp-name-ok">Continue</button>
+      <button class="menu-btn secondary" id="btn-cards-mp-name-back">Back</button>
+    </div>
+  </div>
+
+  <!-- ───── CARD GAMES: Host/Join choice ───── -->
+  <div id="screen-cards-mp-choice" class="screen">
+    <div class="title-area">
+      <h1 class="game-title">Multiplayer</h1>
+    </div>
+    <div class="menu-buttons">
+      <button class="menu-btn primary" id="btn-cards-mp-host">Host Game</button>
+      <button class="menu-btn primary" id="btn-cards-mp-join">Join Game</button>
+      <button class="menu-btn secondary" id="btn-cards-mp-choice-back">Back</button>
+    </div>
+  </div>
+
+  <!-- ───── CARD GAMES: Join (code entry) ───── -->
+  <div id="screen-cards-mp-join" class="screen">
+    <h2>Enter lobby code</h2>
+    <input type="text" id="cards-mp-code-input" maxlength="6" placeholder="ABC123" autocomplete="off" style="text-transform:uppercase;" />
+    <p class="error-msg" id="cards-mp-join-error"></p>
+    <div class="menu-buttons">
+      <button class="menu-btn primary" id="btn-cards-mp-join-go">Join</button>
+      <button class="menu-btn secondary" id="btn-cards-mp-join-back">Back</button>
+    </div>
+  </div>
+
+  <!-- ───── CARD GAMES: Lobby ───── -->
+  <div id="screen-cards-lobby" class="screen">
+    <h2>Card Game Lobby</h2>
+    <div class="cards-lobby-info">
+      <p>Code: <span id="cards-lobby-code" class="lobby-code-text">------</span>
+        <button class="copy-btn" id="btn-cards-lobby-copy">📋</button>
+      </p>
+    </div>
+    <div class="cards-lobby-game-select" id="cards-lobby-game-select">
+      <label>Game:</label>
+      <button class="menu-btn primary cards-game-option selected" id="btn-lobby-game-ek">💣 Exploding Kittens</button>
+    </div>
+    <div class="cards-lobby-players" id="cards-lobby-players"></div>
+    <p class="error-msg" id="cards-lobby-error"></p>
+    <div class="menu-buttons">
+      <button class="menu-btn primary" id="btn-cards-lobby-start" style="display:none;">Start Game</button>
+      <button class="menu-btn secondary" id="btn-cards-lobby-leave">Leave</button>
+    </div>
+  </div>
+
+  <!-- ───── CARD GAMES: Exploding Kittens gameplay ───── -->
+  <div id="screen-cards-game" class="screen cards-game-screen">
+    <div class="ek-game-log" id="ek-game-log"></div>
+    <div class="ek-top-bar">
+      <span id="ek-draw-pile-count">Draw: 0</span>
+      <span id="ek-turn-indicator">Waiting...</span>
+      <button class="menu-btn secondary ek-exit-btn" id="btn-ek-exit">✕</button>
+    </div>
+    <div class="ek-players-area" id="ek-players-area"></div>
+    <div class="ek-play-area" id="ek-play-area">
+      <div class="ek-discard" id="ek-discard">
+        <p class="ek-discard-label">Discard</p>
+        <div class="ek-discard-top" id="ek-discard-top"></div>
+      </div>
+      <div class="ek-action-prompt" id="ek-action-prompt"></div>
+      <div class="ek-draw" id="ek-draw">
+        <button class="ek-draw-btn" id="btn-ek-draw">Draw Card</button>
+      </div>
+    </div>
+    <div class="ek-hand" id="ek-hand"></div>
+    <div class="ek-modal hidden" id="ek-modal">
+      <div class="ek-modal-content" id="ek-modal-content"></div>
+    </div>
+    <div class="ek-see-future hidden" id="ek-see-future">
+      <h3>Top 3 Cards</h3>
+      <div class="ek-future-cards" id="ek-future-cards"></div>
+      <button class="menu-btn primary" id="btn-ek-close-future">OK</button>
+    </div>
+  </div>
+
+  <!-- ───── MANTIS GAME SCREEN ───── -->
+  <div id="screen-mantis-game" class="screen mantis-game-screen">
+    <div class="mantis-top-bar">
+      <span id="mantis-score-display">Your Score: 0 / 10</span>
+      <span id="mantis-turn-info">Waiting...</span>
+      <button class="menu-btn secondary ek-exit-btn" id="btn-mantis-exit">✕</button>
+    </div>
+    <div class="mantis-opponents" id="mantis-opponents"></div>
+    <div class="mantis-center">
+      <div class="mantis-next-card" id="mantis-next-hints"></div>
+      <div class="mantis-action-buttons" id="mantis-actions">
+        <button class="menu-btn primary" id="btn-mantis-score">Score (match your tank)</button>
+      </div>
+      <p class="mantis-steal-hint">Click an opponent to steal from them</p>
+    </div>
+    <div class="mantis-my-tank" id="mantis-my-tank"></div>
+    <div class="mantis-game-log" id="mantis-game-log"></div>
+    <div class="mantis-modal hidden" id="mantis-modal">
+      <div class="mantis-modal-content" id="mantis-modal-content"></div>
+    </div>
   </div>
 
   <!-- ───── GAME CANVAS (shown after start) ───── -->
@@ -198,6 +394,9 @@
   <script src="js/fighters.js"></script>
   <script src="js/mapRenderer.js"></script>
   <script src="js/game.js"></script>
+  <script src="js/cardGame.js"></script>
+  <script src="js/mantis.js"></script>
+  <script src="js/adventure.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

@@ -7,16 +7,35 @@
 let socket;
 try {
   socket = io({
-    transports: ['polling', 'websocket'],
+    transports: ['websocket', 'polling'],
     upgrade: true,
     reconnection: true,
-    reconnectionDelay: 1000,
-    reconnectionAttempts: 10,
-    timeout: 20000,
+    reconnectionDelay: 500,
+    reconnectionDelayMax: 3000,
+    reconnectionAttempts: Infinity,
+    timeout: 10000,
+    forceNew: false,
   });
   socket.on('connect', () => console.log('Socket connected:', socket.id));
-  socket.on('connect_error', (err) => console.warn('Socket connect error:', err.message));
-  socket.on('disconnect', (reason) => console.warn('Socket disconnected:', reason));
+  socket.on('connect_error', (err) => {
+    console.warn('Socket connect error:', err.message);
+    // If websocket fails, fall back to polling temporarily
+    if (socket.io.opts.transports[0] === 'websocket') {
+      socket.io.opts.transports = ['polling', 'websocket'];
+    }
+  });
+  socket.on('disconnect', (reason) => {
+    console.warn('Socket disconnected:', reason);
+    // Auto-reconnect on server-side disconnect
+    if (reason === 'io server disconnect') {
+      socket.connect();
+    }
+  });
+  // Once reconnected, prefer websocket again
+  socket.io.on('reconnect', () => {
+    console.log('Socket reconnected');
+    socket.io.opts.transports = ['websocket', 'polling'];
+  });
 } catch (e) {
   console.warn('Socket.io init failed:', e);
   socket = { on() {}, emit() {} }; // stub so UI still works
@@ -29,21 +48,22 @@ let currentLobbyCode = null;
 let isHost = false;
 let flowTarget = ''; // 'host' | 'join' | 'single'
 let myColor = '#e94560';
-let lobbyMode = 'ffa'; // 'ffa' | 'teams2' | 'teams3'
+let lobbyMode = 'ffa'; // 'ffa' | 'teams2' | 'teams4' | 'teams2r'
 
-const PLAYER_COLORS = ['#e94560', '#3498db', '#2ecc71', '#f5a623', '#9b59b6', '#e67e22'];
+const PLAYER_COLORS = ['#e94560', '#3498db', '#2ecc71', '#f5a623', '#9b59b6', '#e67e22', '#1abc9c', '#fd79a8'];
+const TEAM_COLOR_SET_KEYS = ['red-blue', 'green-purple', 'orange-teal', 'pink-cyan'];
+const TEAM_COLOR_SET_NAMES = { 'red-blue': 'Red vs Blue', 'green-purple': 'Green vs Purple', 'orange-teal': 'Orange vs Teal', 'pink-cyan': 'Pink vs Cyan' };
+let currentTeamColorSet = 'red-blue';
+let _lastPlayerList = [];
 
-// Shuffled fighter order (Fighter & Poker stay at front)
-const _shuffledFighterIds = (() => {
-  const all = getAllFighterIds();
-  const fixed = all.filter(id => id === 'fighter' || id === 'poker');
-  const rest = all.filter(id => id !== 'fighter' && id !== 'poker');
-  for (let i = rest.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [rest[i], rest[j]] = [rest[j], rest[i]];
-  }
-  return [...fixed, ...rest];
-})();
+// Fixed fighter order
+const _shuffledFighterIds = [
+  'fighter', 'poker', 'onexonexonex', 'filbus', 'cricket', 'deer',
+  'noli', 'explodingcat', 'napoleon', 'moderator', 'dnd', 'dragon',
+  'dogtooth', 'illusion', 'pyromaniac', 'heavyrope',
+  // admin / hidden fighters at the end
+  'hitman', 'unstable',
+];
 
 // ── DOM helpers ──────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
@@ -54,7 +74,113 @@ function showScreen(id) {
   $(`#${id}`).classList.add('active');
 }
 
+// ── Init card game MP listeners (socket is now ready) ────────
+if (typeof initCardsMPListeners === 'function') initCardsMPListeners();
+
+// ── Screen: Random Games Landing ─────────────────────────────
+$('#btn-game-battlegrounds').addEventListener('click', () => showScreen('screen-start'));
+$('#btn-game-cards').addEventListener('click', () => showScreen('screen-card-games'));
+$('#btn-game-adventure').addEventListener('click', () => showScreen('screen-adventure'));
+$('#btn-adventure-start').addEventListener('click', () => {
+  showScreen('screen-adventure-game');
+  if (typeof initAdventure === 'function') initAdventure();
+});
+$('#btn-adventure-exit').addEventListener('click', () => {
+  if (typeof stopAdventure === 'function') stopAdventure();
+  showScreen('screen-adventure');
+});
+$('#btn-game-save').addEventListener('click', () => {
+  renderAchievementsScreen();
+  showScreen('screen-achievements');
+});
+$('#btn-cards-back').addEventListener('click', () => showScreen('screen-games'));
+$('#btn-adventure-back').addEventListener('click', () => showScreen('screen-games'));
+
+// ── Screen: Card Games ───────────────────────────────────────
+$('#btn-cards-sp').addEventListener('click', () => showScreen('screen-cards-sp-select'));
+$('#btn-cards-mp').addEventListener('click', () => showScreen('screen-cards-mp-name'));
+$('#btn-cards-sp-back').addEventListener('click', () => showScreen('screen-card-games'));
+$('#btn-cards-sp-ek').addEventListener('click', () => {
+  showScreen('screen-cards-game');
+  if (typeof startEKSingleplayer === 'function') startEKSingleplayer();
+});
+$('#btn-cards-sp-mantis').addEventListener('click', () => {
+  showScreen('screen-mantis-game');
+  if (typeof startMantisSingleplayer === 'function') startMantisSingleplayer();
+});
+
+// Mantis game buttons
+$('#btn-mantis-score').addEventListener('click', () => {
+  if (typeof handleMantisAction === 'function') handleMantisAction('score');
+});
+$('#btn-mantis-exit').addEventListener('click', () => {
+  if (typeof stopMantisGame === 'function') stopMantisGame();
+  showScreen('screen-card-games');
+});
+
+// Card games MP: name
+$('#btn-cards-mp-name-ok').addEventListener('click', () => {
+  const raw = $('#cards-mp-name-input').value.trim();
+  if (raw.length < 1 || raw.length > 16) return;
+  cardsMPName = raw;
+  showScreen('screen-cards-mp-choice');
+});
+$('#cards-mp-name-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#btn-cards-mp-name-ok').click();
+});
+$('#btn-cards-mp-name-back').addEventListener('click', () => showScreen('screen-card-games'));
+
+// Card games MP: host/join choice
+$('#btn-cards-mp-host').addEventListener('click', () => {
+  socket.emit('cards-host-game', { playerName: cardsMPName, gameType: 'exploding_kittens' });
+});
+$('#btn-cards-mp-join').addEventListener('click', () => showScreen('screen-cards-mp-join'));
+$('#btn-cards-mp-choice-back').addEventListener('click', () => showScreen('screen-cards-mp-name'));
+
+// Card games MP: join code
+$('#btn-cards-mp-join-go').addEventListener('click', () => {
+  const code = $('#cards-mp-code-input').value.trim().toUpperCase();
+  if (code.length < 4) return;
+  socket.emit('cards-join-game', { playerName: cardsMPName, code });
+});
+$('#cards-mp-code-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#btn-cards-mp-join-go').click();
+});
+$('#btn-cards-mp-join-back').addEventListener('click', () => showScreen('screen-cards-mp-choice'));
+
+// Card games lobby
+$('#btn-cards-lobby-start').addEventListener('click', () => {
+  socket.emit('cards-start-game');
+});
+$('#btn-cards-lobby-copy').addEventListener('click', () => {
+  const code = document.getElementById('cards-lobby-code').textContent;
+  if (navigator.clipboard) navigator.clipboard.writeText(code);
+});
+$('#btn-cards-lobby-leave').addEventListener('click', () => {
+  socket.emit('cards-leave-lobby');
+  showScreen('screen-card-games');
+});
+
+// Card game exit
+$('#btn-ek-exit').addEventListener('click', () => {
+  if (typeof stopEKGame === 'function') stopEKGame();
+  socket.emit('cards-leave-lobby');
+  showScreen('screen-card-games');
+});
+
+// See the future close
+$('#btn-ek-close-future').addEventListener('click', () => {
+  const el = document.getElementById('ek-see-future');
+  if (el) el.classList.add('hidden');
+});
+
+// Draw button
+$('#btn-ek-draw').addEventListener('click', () => {
+  if (typeof handleEKAction === 'function') handleEKAction('draw', {});
+});
+
 // ── Screen: Start ────────────────────────────────────────────
+$('#btn-battlegrounds-back').addEventListener('click', () => showScreen('screen-games'));
 $('#btn-singleplayer').addEventListener('click', () => {
   showScreen('screen-sp-mode');
 });
@@ -191,9 +317,17 @@ function openLobby(code, mapIndex, players, hosting, availableColors, mode) {
 function _updateModeLabel() {
   const el = $('#lobby-mode-label');
   if (el) {
-    if (lobbyMode === 'teams3') el.textContent = '3 Teams (max 6)';
-    else if (lobbyMode === 'teams2') el.textContent = '2 Teams (max 6)';
-    else el.textContent = 'FFA (max 4)';
+    if (lobbyMode === 'teams4') el.textContent = '4 Teams of 2 (max 8)';
+    else if (lobbyMode === 'teams2r') el.textContent = 'Two Teams - Timed (max 8)';
+    else if (lobbyMode === 'teams2') el.textContent = '2 Teams (max 8)';
+    else el.textContent = 'Free for All (max 8)';
+  }
+  // Show/hide team color picker (host only, team modes only)
+  const tcp = $('#team-color-picker');
+  if (tcp) {
+    const isTeamMode = lobbyMode === 'teams2' || lobbyMode === 'teams4' || lobbyMode === 'teams2r';
+    if (isHost && isTeamMode) tcp.classList.remove('hidden');
+    else tcp.classList.add('hidden');
   }
 }
 
@@ -229,10 +363,21 @@ socket.on('start-error', ({ message }) => {
 
 $('#btn-toggle-mode').addEventListener('click', () => {
   if (lobbyMode === 'ffa') lobbyMode = 'teams2';
-  else if (lobbyMode === 'teams2') lobbyMode = 'teams3';
+  else if (lobbyMode === 'teams2') lobbyMode = 'teams4';
+  else if (lobbyMode === 'teams4') lobbyMode = 'teams2r';
   else lobbyMode = 'ffa';
   _updateModeLabel();
   socket.emit('change-mode', { lobbyMode });
+});
+
+$('#btn-cycle-team-color').addEventListener('click', () => {
+  const idx = TEAM_COLOR_SET_KEYS.indexOf(currentTeamColorSet);
+  const next = TEAM_COLOR_SET_KEYS[(idx + 1) % TEAM_COLOR_SET_KEYS.length];
+  socket.emit('change-team-colors', { colorSet: next });
+});
+
+$('#btn-random-team-color').addEventListener('click', () => {
+  socket.emit('random-team-colors');
 });
 
 $('#btn-leave-lobby').addEventListener('click', () => {
@@ -242,15 +387,29 @@ $('#btn-leave-lobby').addEventListener('click', () => {
 });
 
 function refreshPlayerList(players) {
+  _lastPlayerList = players;
   const list = $('#player-list');
   list.innerHTML = '';
-  players.forEach((p) => {
+  const isTeamMode = lobbyMode === 'teams2' || lobbyMode === 'teams4' || lobbyMode === 'teams2r';
+  const numTeams = lobbyMode === 'teams4' ? 4 : 2;
+  // Team primary colors from the set names
+  const teamLabels = { 'red-blue': ['Red','Blue','Green','Orange'], 'green-purple': ['Green','Purple','Red','Orange'], 'orange-teal': ['Orange','Teal','Red','Purple'], 'pink-cyan': ['Pink','Cyan','Orange','Green'] };
+  const teamPrimaryColors = { 'red-blue': ['#e94560','#3498db','#2ecc71','#f5a623'], 'green-purple': ['#2ecc71','#9b59b6','#e94560','#f5a623'], 'orange-teal': ['#e67e22','#1abc9c','#e94560','#9b59b6'], 'pink-cyan': ['#fd79a8','#00cec9','#f5a623','#2ecc71'] };
+  players.forEach((p, i) => {
     const div = document.createElement('div');
     div.className = 'player-item';
     const fighterName = (typeof getFighter === 'function' && p.fighterId) ? getFighter(p.fighterId).name : '';
+    let teamHtml = '';
+    if (isTeamMode) {
+      const team = (i % numTeams);
+      const labels = teamLabels[currentTeamColorSet] || teamLabels['red-blue'];
+      const colors = teamPrimaryColors[currentTeamColorSet] || teamPrimaryColors['red-blue'];
+      teamHtml = `<span class="team-badge" style="background:${colors[team]}">${escapeHtml(labels[team])}</span>`;
+    }
     div.innerHTML =
       `<span class="player-dot" style="background:${p.color}"></span>` +
       `<span>${escapeHtml(p.name)}</span>` +
+      teamHtml +
       (fighterName ? `<span style="opacity:0.6;margin-left:6px;font-size:0.85em">(${escapeHtml(fighterName)})</span>` : '') +
       (p.isHost ? '<span class="host-badge">Host</span>' : '');
     list.appendChild(div);
@@ -328,11 +487,22 @@ socket.on('map-changed', ({ mapIndex }) => {
 socket.on('mode-changed', ({ lobbyMode: lm }) => {
   lobbyMode = lm || 'ffa';
   _updateModeLabel();
+  if (_lastPlayerList.length) refreshPlayerList(_lastPlayerList);
+});
+
+socket.on('team-colors-changed', ({ colorSet, colorSetName }) => {
+  currentTeamColorSet = colorSet;
+  const label = $('#team-color-label');
+  if (label) label.textContent = colorSetName || TEAM_COLOR_SET_NAMES[colorSet] || colorSet;
+  if (_lastPlayerList.length) refreshPlayerList(_lastPlayerList);
 });
 
 socket.on('game-starting', ({ mapIndex, players, lobbyMode: lm }) => {
   if (lm) lobbyMode = lm;
-  const mode = (lobbyMode === 'teams2' || lobbyMode === 'teams3') ? 'teams' : undefined;
+  let mode;
+  if (lobbyMode === 'teams2' || lobbyMode === 'teams4') mode = 'teams';
+  else if (lobbyMode === 'teams2r') mode = 'teams-respawn';
+  else mode = undefined;
   enterGame(mapIndex, players, mode);
 });
 
@@ -377,9 +547,24 @@ socket.on('player-death', ({ playerId }) => {
 });
 
 // Game over from server
-socket.on('game-over', ({ winnerId, winnerName, winningTeam }) => {
+socket.on('game-over', ({ winnerId, winnerName, winningTeam, respawnMode: rm, team1Kills, team2Kills }) => {
   if (typeof onGameOver === 'function') {
-    onGameOver(winnerId, winnerName, winningTeam);
+    onGameOver(winnerId, winnerName, winningTeam, rm, team1Kills, team2Kills);
+  }
+});
+
+// Respawn mode: player should respawn after delay
+socket.on('player-respawn', ({ playerId, delay }) => {
+  if (typeof onPlayerRespawn === 'function') {
+    onPlayerRespawn(playerId, delay);
+  }
+});
+
+// Respawn mode: kill count update
+socket.on('respawn-kill-update', ({ team1Kills, team2Kills }) => {
+  if (typeof respawnTeam1Kills !== 'undefined') {
+    respawnTeam1Kills = team1Kills;
+    respawnTeam2Kills = team2Kills;
   }
 });
 
@@ -1004,6 +1189,103 @@ function drawFighterIcon(canvas, fighterId, customSize) {
     ctx.beginPath();
     ctx.arc(cx, cy + r * 0.55, r * 0.06, 0, Math.PI * 2);
     ctx.fill();
+  } else if (fighterId === 'pyromaniac') {
+    // Pyromaniac: flame icon
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Outer flame (orange-red)
+    ctx.fillStyle = '#ff4400';
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.4, cy + r * 0.5);
+    ctx.quadraticCurveTo(cx - r * 0.55, cy - r * 0.1, cx - r * 0.15, cy - r * 0.6);
+    ctx.quadraticCurveTo(cx - r * 0.05, cy - r * 0.2, cx, cy - r * 0.85);
+    ctx.quadraticCurveTo(cx + r * 0.05, cy - r * 0.2, cx + r * 0.15, cy - r * 0.6);
+    ctx.quadraticCurveTo(cx + r * 0.55, cy - r * 0.1, cx + r * 0.4, cy + r * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    // Inner flame (yellow)
+    ctx.fillStyle = '#ffcc00';
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.2, cy + r * 0.5);
+    ctx.quadraticCurveTo(cx - r * 0.3, cy + r * 0.1, cx - r * 0.05, cy - r * 0.35);
+    ctx.quadraticCurveTo(cx, cy - r * 0.1, cx, cy - r * 0.55);
+    ctx.quadraticCurveTo(cx, cy - r * 0.1, cx + r * 0.05, cy - r * 0.35);
+    ctx.quadraticCurveTo(cx + r * 0.3, cy + r * 0.1, cx + r * 0.2, cy + r * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    // Core (white-hot)
+    ctx.fillStyle = '#fff8e0';
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + r * 0.25, r * 0.1, r * 0.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Glow
+    ctx.shadowColor = '#ff4400'; ctx.shadowBlur = 8;
+    ctx.strokeStyle = '#ff6600'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.95, 0, Math.PI * 2); ctx.stroke();
+    ctx.shadowBlur = 0;
+  } else if (fighterId === 'heavyrope') {
+    // Heavy Rope: coiled rope icon
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Rope coil (brown spiral)
+    ctx.strokeStyle = '#8b4513'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    for (let t = 0; t < Math.PI * 4; t += 0.1) {
+      const sr = r * 0.15 + t * r * 0.08;
+      const x = cx + Math.cos(t) * sr;
+      const y = cy + Math.sin(t) * sr;
+      if (t === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    // Rope end (darker knot)
+    ctx.fillStyle = '#5c3317';
+    ctx.beginPath();
+    ctx.arc(cx + r * 0.6, cy - r * 0.3, r * 0.12, 0, Math.PI * 2);
+    ctx.fill();
+    // Outer ring
+    ctx.strokeStyle = '#a0522d'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.95, 0, Math.PI * 2); ctx.stroke();
+  } else if (fighterId === 'omori') {
+    // Omori: black and white lightbulb
+    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Bulb glass (white teardrop/circle shape)
+    const bulbR = r * 0.55;
+    const bulbY = cy - r * 0.15;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(cx, bulbY, bulbR, 0, Math.PI * 2);
+    ctx.fill();
+    // Bulb bottom taper into screw base
+    ctx.beginPath();
+    ctx.moveTo(cx - bulbR * 0.65, bulbY + bulbR * 0.7);
+    ctx.lineTo(cx - bulbR * 0.45, bulbY + bulbR * 1.6);
+    ctx.lineTo(cx + bulbR * 0.45, bulbY + bulbR * 1.6);
+    ctx.lineTo(cx + bulbR * 0.65, bulbY + bulbR * 0.7);
+    ctx.closePath();
+    ctx.fill();
+    // Screw base (grey bands)
+    const baseTop = bulbY + bulbR * 1.6;
+    const baseW = bulbR * 0.4;
+    ctx.fillStyle = '#888';
+    ctx.fillRect(cx - baseW, baseTop, baseW * 2, r * 0.12);
+    ctx.fillStyle = '#666';
+    ctx.fillRect(cx - baseW * 0.85, baseTop + r * 0.14, baseW * 1.7, r * 0.1);
+    ctx.fillStyle = '#888';
+    ctx.fillRect(cx - baseW * 0.7, baseTop + r * 0.26, baseW * 1.4, r * 0.08);
+    // Bottom contact point
+    ctx.fillStyle = '#555';
+    ctx.beginPath();
+    ctx.arc(cx, baseTop + r * 0.38, baseW * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+    // Filament (thin dark lines inside bulb)
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx - bulbR * 0.15, bulbY + bulbR * 0.5);
+    ctx.lineTo(cx - bulbR * 0.1, bulbY - bulbR * 0.3);
+    ctx.lineTo(cx + bulbR * 0.1, bulbY - bulbR * 0.3);
+    ctx.lineTo(cx + bulbR * 0.15, bulbY + bulbR * 0.5);
+    ctx.stroke();
+    // Glass outline
+    ctx.strokeStyle = '#999'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(cx, bulbY, bulbR, 0, Math.PI * 2); ctx.stroke();
   } else {
     // Fighter: sword icon
     ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
@@ -1033,6 +1315,8 @@ function populateFighterScreen() {
     const f = getFighter(fid);
     // Hide admin-only fighters entirely unless unlocked
     if (f.adminOnly && !isFighterUnlocked(fid)) return;
+    // Hide explicitly hidden fighters
+    if (f.hidden) return;
     const locked = !isFighterUnlocked(fid);
     const mpOnly = f.multiplayerOnly && (flowTarget === 'fight' || flowTarget === 'fight-hard' || flowTarget === 'training');
     const btn = document.createElement('button');
@@ -1094,13 +1378,29 @@ function showFighterStats(fid) {
   f.abilities.forEach((a) => {
     const li = document.createElement('li');
     li.className = 'ability-item';
+    let displayName = escapeHtml(a.name);
+    if (a.key === 'SPACE' && typeof isMove4Unlocked === 'function' && isMove4Unlocked(f.id)) {
+      displayName += ' <span style="color:#ffd700">(+)</span>';
+    }
     li.innerHTML =
       `<span class="ability-key">${escapeHtml(a.key)}</span>` +
-      `<div><strong>${escapeHtml(a.name)}</strong>` +
+      `<div><strong>${displayName}</strong>` +
       `<br><small>${escapeHtml(a.description)}</small>` +
       `<br><small>DMG: ${a.damage || '—'}  CD: ${a.cooldown || '—'}s</small></div>`;
     list.appendChild(li);
   });
+
+  // Trait display
+  const traitEl = el('#fc-trait');
+  if (traitEl) {
+    if (f.trait) {
+      traitEl.classList.remove('hidden');
+      traitEl.className = 'trait-note';
+      traitEl.textContent = '\u2728 Trait: ' + f.trait.name + ' \u2014 ' + f.trait.description;
+    } else {
+      traitEl.classList.add('hidden');
+    }
+  }
 }
 
 $('#btn-select-fighter').addEventListener('click', () => {
@@ -1135,6 +1435,8 @@ function populateLobbyFighters() {
     const f = getFighter(fid);
     // Hide admin-only fighters entirely unless unlocked
     if (f.adminOnly && !isFighterUnlocked(fid)) return;
+    // Hide explicitly hidden fighters
+    if (f.hidden) return;
     const locked = !isFighterUnlocked(fid);
     const btn = document.createElement('button');
     btn.className = 'lobby-fighter-btn' + (fid === selectedFighterId ? ' active' : '') + (locked ? ' locked' : '');
@@ -1185,13 +1487,29 @@ function showLobbyFighterStats(fid) {
   f.abilities.forEach((a) => {
     const li = document.createElement('li');
     li.className = 'ability-item';
+    let displayName = escapeHtml(a.name);
+    if (a.key === 'SPACE' && typeof isMove4Unlocked === 'function' && isMove4Unlocked(f.id)) {
+      displayName += ' <span style="color:#ffd700">(+)</span>';
+    }
     li.innerHTML =
       `<span class="ability-key">${escapeHtml(a.key)}</span>` +
-      `<div><strong>${escapeHtml(a.name)}</strong>` +
+      `<div><strong>${displayName}</strong>` +
       `<br><small>${escapeHtml(a.description)}</small>` +
       `<br><small>DMG: ${a.damage || '—'}  CD: ${a.cooldown || '—'}s</small></div>`;
     list.appendChild(li);
   });
+
+  // Trait display
+  const traitEl = el('#lfc-trait');
+  if (traitEl) {
+    if (f.trait) {
+      traitEl.classList.remove('hidden');
+      traitEl.className = 'trait-note';
+      traitEl.textContent = '\u2728 Trait: ' + f.trait.name + ' \u2014 ' + f.trait.description;
+    } else {
+      traitEl.classList.add('hidden');
+    }
+  }
 }
 
 // ── Util ─────────────────────────────────────────────────────
@@ -1260,6 +1578,10 @@ const _PROGRESS_KEYS = [
   'teamWinsCricket', 'teamWinsDeer', 'teamWinsNoli', 'teamWinsCat',
   'teamWinsNapoleon', 'teamWinsModerator', 'teamWinsDragon', 'teamWinsDnd',
   'teamWinsIllusion', 'teamWinsDogtooth',
+  // Card game wins
+  'ekWinsSP', 'ekWinsMP', 'mantisWinsSP', 'mantisWinsMP',
+  // Adventure progress
+  'adventureLevel',
 ];
 
 function _defaultProgress() {
@@ -1700,6 +2022,24 @@ function trackTeamWin(fighterId) {
   saveAchievements();
 }
 
+// ── Card game tracking ──
+function trackEKWinSP() {
+  achProgress.ekWinsSP = Math.min(255, (achProgress.ekWinsSP || 0) + 1);
+  saveAchievements();
+}
+function trackEKWinMP() {
+  achProgress.ekWinsMP = Math.min(255, (achProgress.ekWinsMP || 0) + 1);
+  saveAchievements();
+}
+function trackMantisWinSP() {
+  achProgress.mantisWinsSP = Math.min(255, (achProgress.mantisWinsSP || 0) + 1);
+  saveAchievements();
+}
+function trackMantisWinMP() {
+  achProgress.mantisWinsMP = Math.min(255, (achProgress.mantisWinsMP || 0) + 1);
+  saveAchievements();
+}
+
 function trackSummonKillMP() {
   achProgress.summonKillMP = 1;
   checkAndUnlockAchievements();
@@ -1889,7 +2229,7 @@ $('#btn-achievements').addEventListener('click', () => {
   renderAchievementsScreen();
   showScreen('screen-achievements');
 });
-$('#btn-achv-back').addEventListener('click', () => showScreen('screen-start'));
+$('#btn-achv-back').addEventListener('click', () => showScreen('screen-games'));
 $('#btn-achv-logout').addEventListener('click', () => {
   try { localStorage.removeItem(_ACH_KEY); } catch (e) { /* ignore */ }
   completedAchievements = new Set();
@@ -1975,6 +2315,10 @@ function renderAchievementsScreen() {
   list.innerHTML = '';
   Object.values(ACHIEVEMENTS).forEach((ach) => {
     const done = completedAchievements.has(ach.id);
+    // Hide achievements for hidden fighters
+    if (ach.hidden) return;
+    if (ach.unlocks && FIGHTERS[ach.unlocks] && FIGHTERS[ach.unlocks].hidden) return;
+    if (ach.forFighter && FIGHTERS[ach.forFighter] && FIGHTERS[ach.forFighter].hidden) return;
     // Move 4 achievements are completely hidden until completed (surprise reward)
     if (ach.unlocksMove4 && !done) return;
     const available = isAchievementAvailable(ach.id);
@@ -2032,6 +2376,17 @@ function renderAchievementsScreen() {
     chip.appendChild(name);
     grid.appendChild(chip);
   });
+
+  // Card game & adventure stats
+  const statsEl = document.getElementById('achv-game-stats');
+  if (statsEl) {
+    statsEl.innerHTML =
+      `<div class="achv-stat-row"><span>Exploding Kittens SP wins:</span><span>${achProgress.ekWinsSP || 0}</span></div>` +
+      `<div class="achv-stat-row"><span>Exploding Kittens MP wins:</span><span>${achProgress.ekWinsMP || 0}</span></div>` +
+      `<div class="achv-stat-row"><span>Mantis SP wins:</span><span>${achProgress.mantisWinsSP || 0}</span></div>` +
+      `<div class="achv-stat-row"><span>Mantis MP wins:</span><span>${achProgress.mantisWinsMP || 0}</span></div>` +
+      `<div class="achv-stat-row"><span>Adventure level:</span><span>${achProgress.adventureLevel || 0}</span></div>`;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
