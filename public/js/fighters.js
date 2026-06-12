@@ -287,7 +287,7 @@ const FIGHTERS = {
         description: 'Horizontal split attack. Green shockwave: 300 damage + poison (50 dps for 3s). Very wide, slower.',
         damage: 300,
         cooldown: 30,
-        range: 4,
+        range: 6,
         type: 'melee',
         bind: 'r',
         poisonDPS: 50,

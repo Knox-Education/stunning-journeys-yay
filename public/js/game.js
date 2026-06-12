@@ -68,6 +68,7 @@ let respawnTeam2Kills = 0;
 // Extreme difficulty event system
 let _extremeEventTimer = 40;   // seconds until next event
 let _extremeEvents = [];        // active event entities: { type, ... }
+let _extremeGameTimer = 0;      // elapsed seconds in extreme mode
 
 // Animation frame ID for cancellation
 let _gameLoopFrameId = null;
@@ -374,6 +375,8 @@ function startGame(mapIndex, players, myId, mode) {
   // Extreme difficulty: init event system
   _extremeEventTimer = 40;
   _extremeEvents = [];
+  _extremeGameTimer = 0;
+  _extremeGameTimer = 0;
 
   // Hide play-again overlay from any previous game
   const _paOverlay = document.querySelector('#play-again-overlay');
@@ -877,8 +880,8 @@ function gameLoop(now) {
       }
     }
     if (isHostAuthority) {
-      // HOST: broadcast full game state snapshot every ~33ms (30 Hz) to reduce bandwidth
-      if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 33) {
+      // HOST: broadcast full game state snapshot every ~50ms (20 Hz) to reduce bandwidth
+      if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 50) {
         gameLoop._lastBroadcast = now;
         const snapshot = buildGameStateSnapshot();
         socket.emit('game-state', snapshot);
@@ -2635,6 +2638,7 @@ function updateGame(dt) {
 
   // ── Extreme difficulty: event system ──────────────────────
   if (gameMode === 'fight-extreme' && localPlayer && localPlayer.alive) {
+    _extremeGameTimer += dt;
     _extremeEventTimer -= dt;
     if (_extremeEventTimer <= 0) {
       _extremeEventTimer = 40;
@@ -19832,8 +19836,22 @@ function onRemoteProjectiles(ownerId, projs) {
 // ── HOST-AUTHORITATIVE MULTIPLAYER ────────────────────────────
 
 // Build a serialisable snapshot of the full game state for broadcast
+// Strip fields that are false/0/null/[] from player snapshots to reduce JSON payload
+function _stripFalsyPlayerFields(obj) {
+  const out = {};
+  for (const k in obj) {
+    const v = obj[k];
+    // Always keep core position/combat fields
+    if (k === 'id' || k === 'x' || k === 'y' || k === 'hp' || k === 'maxHp' || k === 'alive' || k === 'name' || k === 'color' || k === 'fighterId') { out[k] = v; continue; }
+    // Skip falsy values that are just defaults
+    if (v === false || v === null || v === 0 || v === '' || (Array.isArray(v) && v.length === 0)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 function buildGameStateSnapshot() {
-  const players = gamePlayers.map(p => ({
+  const players = gamePlayers.map(p => _stripFalsyPlayerFields({
     id: p.id,
     name: p.name, color: p.color,
     x: p.x, y: p.y,
