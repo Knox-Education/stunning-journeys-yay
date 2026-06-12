@@ -1585,7 +1585,7 @@ const FIGHTERS = {
         requiresAchievement: 'hitmanAch',
       },
     ],
-    trait: { name: 'Professional', description: 'Deals 1.3× damage when attacking from beyond 6 tiles.' },
+    trait: { name: 'Bounty', description: 'One enemy is always marked as your bounty target (highlighted in red). Deal 2× damage to them. Re-assigned if they die.' },
   },
 };
 

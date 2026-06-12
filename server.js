@@ -20,9 +20,23 @@ const io = new Server(server, {
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
   maxAge: 0,
-  setHeaders: (res) => {
+  setHeaders: (res, filePath) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
+    // Ensure correct MIME type for all file types (critical for Safari)
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeType = {
+      '.html': 'text/html',
+      '.js':   'application/javascript',
+      '.css':  'text/css',
+      '.json': 'application/json',
+      '.png':  'image/png',
+      '.jpg':  'image/jpeg',
+      '.gif':  'image/gif',
+      '.svg':  'image/svg+xml',
+      '.ico':  'image/x-icon',
+    }[ext];
+    if (mimeType) res.setHeader('Content-Type', mimeType);
   }
 }));
 
