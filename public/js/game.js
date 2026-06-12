@@ -758,7 +758,6 @@ function createPlayerState(p, spawn, fighter) {
     hitmanLockingIn: false,       // Locking In active
     hitmanLockingInTimer: 0,      // seconds remaining for Locking In
     hitmanLockingFireTimer: 0,    // fire rate timer for locking in auto-fire
-    hitmanBountyTargetId: null,   // Bounty trait: id of current bounty target
   };
 }
 
@@ -11097,4 +11096,9291 @@ function useAbility(key) {
           lp.dogtoothSpecialChoice = 'puppet';
           lp.dogtoothPuppetGod = true;
           combatLog.push({ text: '💀 Kill The Puppet God', timer: 4, color: '#aaa' });
-          combatLog.push({ text: '(On death → revive half HP, take 1.5× damage)', t
+          combatLog.push({ text: '(On death → revive half HP, take 1.5× damage)', timer: 4, color: '#888' });
+          // Power: recharge special so next use is forced Moon
+          if (dogHasPower) {
+            lp.specialUsed = false;
+            lp.specialUnlocked = false;
+            lp.totalDamageTaken = 0;
+            lp.dogtoothForceMoon = true;
+            combatLog.push({ text: '🌙 Special recharging... The Moon awaits!', timer: 4, color: '#ffeeaa' });
+          }
+        } else {
+          // The Moon Woke Up
+          lp.dogtoothSpecialChoice = 'moon';
+          lp.dogtoothMoonUsed = true;
+          const moonAbil = lp.fighter.abilities[4];
+          const moonRadius = (moonAbil.moonRadius || 10) * GAME_TILE;
+          const moonDelay = moonAbil.moonDelay || 3;
+          lp.dogtoothMoonX = lp.x;
+          lp.dogtoothMoonY = lp.y;
+          lp.dogtoothMoonTimer = moonDelay;
+          lp.dogtoothMoonRadius = moonRadius;
+          lp.dogtoothMoonDmg = moonAbil.damage || 1200;
+          lp.effects.push({ type: 'moon-shadow', timer: moonDelay + 1 });
+          combatLog.push({ text: '🌙 The Moon Woke Up! Impact in 3s!', timer: 4, color: '#ffeeaa' });
+        }
+      }
+    } else if (isOmori) {
+      // Omori SPACE: Release Energy — stun closest enemy, spawn all 3 friends to attack them
+      lp.specialUsed = true;
+      const sAbil = fighter.abilities[4];
+      const stunRange = (sAbil.range || 6) * GAME_TILE;
+      // Find closest enemy in range
+      let closestEnemy = null; let closestDist = Infinity;
+      for (const t of gamePlayers) {
+        if (t.id === lp.id || !t.alive || t.isSummon) continue;
+        if (gameMode === 'teams' && lp.team && t.team === lp.team) continue;
+        const d = Math.sqrt((t.x - lp.x) ** 2 + (t.y - lp.y) ** 2);
+        if (d < stunRange && d < closestDist) { closestDist = d; closestEnemy = t; }
+      }
+      if (!closestEnemy) {
+        combatLog.push({ text: '❌ No enemy in range!', timer: 2, color: '#888' });
+        lp.specialUsed = false;
+        return;
+      }
+      closestEnemy.stunned = sAbil.stunDuration || 5;
+      closestEnemy.effects.push({ type: 'stun', timer: sAbil.stunDuration || 5 });
+      // Kill existing party friend
+      if (lp.omoriPartyIds) {
+        for (const pid of lp.omoriPartyIds) {
+          const old = gamePlayers.find(p => p.id === pid);
+          if (old && old.alive) { old.alive = false; old.hp = 0; old.effects.push({ type: 'death', timer: 2 }); }
+        }
+      }
+      lp.omoriPartyIds = [];
+      lp.omoriSpecialPartyIds = [];
+      // Spawn all 3 friends targeting only the stunned enemy
+      const friendDefs = [
+        { type: 'omori-kel', name: 'Kel', hp: sAbil.kelHp || 1000, color: '#f39c12', dmg: 200, cd: 1, projSpd: 30 },
+        { type: 'omori-aubrey', name: 'Aubrey', hp: sAbil.aubreyHp || 1300, color: '#e84393', dmg: 200, cd: 0.5 },
+        { type: 'omori-hero', name: 'Hero', hp: sAbil.heroHp || 1000, color: '#00b894', dmg: 100, cd: 0.5 },
+      ];
+      for (const fd of friendDefs) {
+        const fid = fd.type + '-special-' + lp.id + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5);
+        const ff = { id: fd.type, name: fd.name, hp: fd.hp, healAmount: 0, healDelay: 999, healTick: 999, speed: 3.4, abilities: [] };
+        // Spawn around the stunned enemy (evenly spaced in a circle)
+        const ang = (friendDefs.indexOf(fd) / friendDefs.length) * Math.PI * 2 - Math.PI / 2;
+        const spawnDist = GAME_TILE * 2.5;
+        const spX = closestEnemy.x + Math.cos(ang) * spawnDist;
+        const spY = closestEnemy.y + Math.sin(ang) * spawnDist;
+        const fr = createPlayerState({ id: fid, name: fd.name, color: fd.color }, { r: Math.floor(spY / GAME_TILE), c: Math.floor(spX / GAME_TILE) }, ff);
+        fr.x = spX; fr.y = spY;
+        const fR = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(fr.x, fr.y, fR)) { const s = getRandomSafePosition(); fr.x = s.x; fr.y = s.y; }
+        fr.hp = fd.hp; fr.maxHp = fd.hp;
+        fr.isSummon = true; fr.summonOwner = lp.id;
+        fr.summonType = fd.type;
+        fr.summonSpeed = 3.4;
+        fr.summonDamage = fd.dmg;
+        fr.summonAttackCD = fd.cd;
+        fr.summonAttackTimer = 0;
+        fr.summonTargetId = closestEnemy.id;
+        fr.omoriSpecialDespawnTimer = sAbil.partyDuration || 5;
+        if (fd.projSpd) fr.summonProjectileSpeed = fd.projSpd;
+        fr.isCPU = true;
+        gamePlayers.push(fr);
+        lp.omoriSpecialPartyIds.push(fid);
+      }
+      lp.omoriSpecialTimer = sAbil.partyDuration || 5;
+      lp.cdE = 0; // Reset Party Friend CD
+      lp.effects.push({ type: 'omori-release', timer: 2.0 });
+      showPopup('⚡ RELEASE ENERGY!');
+      combatLog.push({ text: '⚡ Release Energy! All friends attack ' + closestEnemy.name + '!', timer: 4, color: '#6c5ce7' });
+    } else if (isPyro) {
+      // Pyromaniac SPACE: roar charge (1s) → map-wide fire rain
+      lp.pyroRoarTimer = abil.roarDuration || 1;
+      lp.pyroSpecialRoarCharging = true;
+      lp.stunned = abil.roarDuration || 1; // locked in place during roar
+      lp.pyroBurnImmuneTimer = (abil.rainDuration || 5) + (abil.roarDuration || 1) + 5; // immune during rain + buffer
+      // Apply fear to nearby enemies (exempt noli, napoleon, 1x, fighter, dragon)
+      const fearDur = abil.fearDuration || 3;
+      const fearRange = CAMERA_RANGE * GAME_TILE * 2;
+      const fearImmune = ['noli', 'napoleon', 'onexonexonex', 'fighter', 'dragon'];
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive || target.isSummon) continue;
+        if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        if (Math.sqrt(dx * dx + dy * dy) > fearRange) continue;
+        if (fearImmune.includes(target.fighter.id)) continue;
+        target.modFearTimer = Math.max(target.modFearTimer || 0, fearDur);
+        target.modFearSourceId = lp.id;
+        target.effects.push({ type: 'fear', timer: fearDur });
+      }
+      // Screen shake effect
+      if (typeof screenShakeTimer !== 'undefined') screenShakeTimer = 1.5;
+      lp.effects.push({ type: 'pyro-roar', timer: 1.5 });
+      combatLog.push({ text: '🔥 fire Fire FIre FIRe FIRE! Map-wide rain incoming!', timer: 5, color: '#ff2200' });
+    } else if (isHeavyRope) {
+      // Heavy Rope: ROPE POWER — spin rope in circle for 5s, knockback + damage
+      const abil = fighter.abilities[4];
+      lp.specialUsed = true;
+      lp.ropePowerTimer = abil.duration || 5;
+      lp.ropePowerHit = {};
+      lp.effects.push({ type: 'rope-power', timer: (abil.duration || 5) + 0.5 });
+      combatLog.push({ text: '🪢 ROPE POWER! Spinning for 5s!', timer: 3, color: '#8b4513' });
+    } else {
+      // Fighter: Special jump
+      lp.specialJumping = true;
+      lp.specialAiming = true;
+      lp.specialAimX = lp.x;
+      lp.specialAimY = lp.y;
+      const aimTime = lp.fighter.abilities[4].aimTime || 5;
+      lp.specialAimTimer = aimTime;
+      lp.effects.push({ type: 'jump', timer: aimTime + 2 });
+    }
+  }
+
+  // ── Move 4 (F) — achievement-unlocked abilities ───────────
+  else if (key === 'F') {
+    if (lp.fighter.abilities.length <= 5) return; // no F ability
+    const fAbil = lp.fighter.abilities[5];
+    // Check if unlocked via achievement (skip for CPUs — always unlocked)
+    if (!lp.isCPU && typeof isMove4Unlocked === 'function' && !isMove4Unlocked(lp.fighter.id)) return;
+    // Max uses per game (default 3)
+    const _fMaxUses = fAbil.maxUses || 3;
+    if (lp.move4Uses >= _fMaxUses) return;
+    if (lp.cdF > 0) return;
+
+    if (isPoker) {
+      // Full House: next move guaranteed best option
+      lp.move4Uses++;
+      lp.pokerFullHouseActive = true;
+      lp.cdF = fAbil.cooldown;
+      lp.effects.push({ type: 'full-house', timer: 2.0 });
+      combatLog.push({ text: '🃏 Full House! Next move = best option.', timer: 3, color: '#f5a623' });
+    } else if (isFilbus) {
+      // Analogus: randomly pick Backrooms, Alternate, or Boisvert
+      // Block if only 2 alive non-summon players remain
+      const aliveNonSummon = gamePlayers.filter(p => p.alive && !p.isSummon);
+      if (aliveNonSummon.length <= 2) {
+        combatLog.push({ text: '❌ Cannot use Analogus with only 2 players left!', timer: 2, color: '#999' });
+        return;
+      }
+      // With exactly 3 players: the third player (not Filbus, not the target) must have >50% HP
+      if (aliveNonSummon.length === 3) {
+        // Find closest enemy first to determine who the target would be
+        let checkClosestDist = Infinity, checkClosestTarget = null;
+        for (const t of gamePlayers) {
+          if (t.id === lp.id || !t.alive || t.isSummon) continue;
+          const d = Math.sqrt((t.x - lp.x) ** 2 + (t.y - lp.y) ** 2);
+          if (d < checkClosestDist) { checkClosestDist = d; checkClosestTarget = t; }
+        }
+        if (checkClosestTarget) {
+          const thirdPlayer = aliveNonSummon.find(p => p.id !== lp.id && p.id !== checkClosestTarget.id);
+          if (thirdPlayer && thirdPlayer.hp <= thirdPlayer.maxHp * 0.5) {
+            combatLog.push({ text: '❌ Cannot use Analogus — remaining player is too weak!', timer: 2, color: '#999' });
+            return;
+          }
+        }
+      }
+      // Find closest enemy
+      let closestDist = Infinity, closestTarget = null;
+      for (const t of gamePlayers) {
+        if (t.id === lp.id || !t.alive || t.isSummon) continue;
+        const d = Math.sqrt((t.x - lp.x) ** 2 + (t.y - lp.y) ** 2);
+        if (d < closestDist) { closestDist = d; closestTarget = t; }
+      }
+      if (!closestTarget) {
+        combatLog.push({ text: '❌ No targets for Analogus!', timer: 2, color: '#999' });
+        return;
+      }
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+
+      // Cleanup: if target already in backrooms, exit them first
+      if (closestTarget.inBackrooms) {
+        _exitBackrooms(closestTarget, 'new-analogus');
+      }
+      // Cleanup: if target already has an alternate, kill it
+      if (closestTarget.hasAlternate && closestTarget.alternateId) {
+        const oldAlt = gamePlayers.find(a => a.id === closestTarget.alternateId);
+        if (oldAlt && oldAlt.alive) { oldAlt.alive = false; oldAlt.hp = 0; oldAlt.effects.push({ type: 'death', timer: 2 }); }
+        closestTarget.hasAlternate = false;
+        closestTarget.alternateId = null;
+      }
+
+      const roll = Math.random();
+      if (roll < 0.33) {
+        // ── BACKROOMS ──
+        // Place door at a random walkable tile far from the target
+        const mapW = gameMap.cols, mapH = gameMap.rows;
+        let bestDoorR = -1, bestDoorC = -1, bestDoorDist = 0;
+        for (let attempt = 0; attempt < 40; attempt++) {
+          const rr = Math.floor(Math.random() * mapH);
+          const cc = Math.floor(Math.random() * mapW);
+          if (gameMap.tiles[rr] && gameMap.tiles[rr][cc] !== undefined
+              && gameMap.tiles[rr][cc] !== TILE.WATER && gameMap.tiles[rr][cc] !== TILE.ROCK) {
+            const dd = Math.sqrt((rr - Math.floor(closestTarget.y / GAME_TILE)) ** 2 +
+                                 (cc - Math.floor(closestTarget.x / GAME_TILE)) ** 2);
+            if (dd > bestDoorDist) { bestDoorDist = dd; bestDoorR = rr; bestDoorC = cc; }
+          }
+        }
+        if (bestDoorR < 0) { bestDoorR = 1; bestDoorC = 1; }
+        closestTarget.inBackrooms = true;
+        closestTarget.backroomsDoorX = (bestDoorC + 0.5) * GAME_TILE;
+        closestTarget.backroomsDoorY = (bestDoorR + 0.5) * GAME_TILE;
+        closestTarget.backroomsTimer = 30; // 30s max
+        // Spawn chaser entity
+        const chaserId = 'br-chaser-' + closestTarget.id + '-' + Date.now();
+        const chaserFighter = getFighter('fighter'); // use basic fighter stats
+        const chaser = createPlayerState(
+          { id: chaserId, name: '???', color: '#8b8000', fighterId: 'fighter' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+          chaserFighter
+        );
+        // Place chaser at Filbus position — verify it's walkable, otherwise use safe position
+        const chaserRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (canMoveTo(lp.x, lp.y, chaserRadius)) {
+          chaser.x = lp.x;
+          chaser.y = lp.y;
+        } else {
+          const safeChaserPos = getRandomSafePosition();
+          chaser.x = safeChaserPos.x;
+          chaser.y = safeChaserPos.y;
+        }
+        chaser.hp = 999999;
+        chaser.maxHp = 999999;
+        chaser.isSummon = true;
+        chaser.summonOwner = lp.id;
+        chaser.summonType = 'backrooms-chaser';
+        chaser.summonSpeed = closestTarget.fighter.speed * 0.7; // noticeably slower than the player
+        chaser.summonDamage = 999999; // instant kill on touch
+        chaser.summonAttackCD = 0.5;
+        chaser.summonAttackTimer = 0;
+        chaser.summonTargetId = closestTarget.id; // only chases this player
+        chaser.isCPU = true;
+        chaser.noCloneHeal = true;
+        gamePlayers.push(chaser);
+        closestTarget.backroomsChaserId = chaserId;
+        closestTarget.effects.push({ type: 'backrooms-enter', timer: 2.0 });
+        lp.effects.push({ type: 'analogus-cast', timer: 1.5 });
+        combatLog.push({ text: '🚪 Analogus: ' + closestTarget.name + ' sent to the Backrooms!', timer: 4, color: '#8b8000' });
+        if (closestTarget.id === localPlayerId) {
+          combatLog.push({ text: '⚠️ You are in the Backrooms! Find the door to escape! (10 DPS, no healing)', timer: 5, color: '#ff4444' });
+        }
+      } else if (roll < 0.66) {
+        // ── ALTERNATE ──
+        const altId = 'alternate-' + closestTarget.id + '-' + Date.now();
+        const altFighter = closestTarget.fighter;
+        const alt = createPlayerState(
+          { id: altId, name: closestTarget.name, color: closestTarget.color, fighterId: altFighter.id },
+          { r: Math.floor(closestTarget.y / GAME_TILE), c: Math.floor(closestTarget.x / GAME_TILE) },
+          altFighter
+        );
+        // Spawn alternate 6-8 tiles away in a random direction, ensuring safe position
+        const altRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+        let altPlaced = false;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = GAME_TILE * (6 + Math.random() * 2); // 6-8 tiles away
+          const tryX = closestTarget.x + Math.cos(angle) * dist;
+          const tryY = closestTarget.y + Math.sin(angle) * dist;
+          if (canMoveTo(tryX, tryY, altRadius)) {
+            alt.x = tryX; alt.y = tryY; altPlaced = true; break;
+          }
+        }
+        if (!altPlaced) {
+          const safeAltPos = getRandomSafePosition();
+          alt.x = safeAltPos.x; alt.y = safeAltPos.y;
+        }
+        alt.hp = 500;
+        alt.maxHp = 500;
+        alt.isSummon = true;
+        alt.summonOwner = lp.id;
+        alt.summonType = 'alternate';
+        alt.summonSpeed = closestTarget.fighter.speed * 0.9; // slightly slower
+        alt.summonDamage = 999999; // instant kill on touch
+        alt.summonAttackCD = 0.5;
+        alt.summonAttackTimer = 0;
+        alt.summonTargetId = closestTarget.id; // only chases the original
+        alt.isCPU = true;
+        alt.noCloneHeal = true;
+        gamePlayers.push(alt);
+        closestTarget.hasAlternate = true;
+        closestTarget.alternateId = altId;
+        closestTarget.effects.push({ type: 'alternate-spawn', timer: 2.0 });
+        lp.effects.push({ type: 'analogus-cast', timer: 1.5 });
+        combatLog.push({ text: '👤 Analogus: ' + closestTarget.name + '\'s Alternate has appeared!', timer: 4, color: '#6a0dad' });
+        if (closestTarget.id === localPlayerId) {
+          combatLog.push({ text: '⚠️ Your Alternate is hunting you! You can\'t see others or heal! (10 DPS)', timer: 5, color: '#ff4444' });
+        }
+      } else {
+        // ── BOISVERT ──
+        // Spawn a "Room" entity for each non-Filbus alive player
+        lp.effects.push({ type: 'analogus-cast', timer: 1.5 });
+        let roomCount = 0;
+        for (const target of gamePlayers) {
+          if (target.id === lp.id || !target.alive || target.isSummon) continue;
+          const roomId = 'room-' + target.id + '-' + Date.now();
+          const roomFighter = getFighter('fighter');
+          const room = createPlayerState(
+            { id: roomId, name: 'Room', color: '#000', fighterId: 'fighter' },
+            { r: Math.floor(target.y / GAME_TILE), c: Math.floor(target.x / GAME_TILE) },
+            roomFighter
+          );
+          // Spawn near the target — ensure safe position
+          const roomRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+          let roomPlaced = false;
+          for (let ra = 0; ra < 16; ra++) {
+            const angle = Math.random() * Math.PI * 2;
+            const dist = GAME_TILE * (2 + Math.random() * 2);
+            const tryX = target.x + Math.cos(angle) * dist;
+            const tryY = target.y + Math.sin(angle) * dist;
+            if (canMoveTo(tryX, tryY, roomRadius)) {
+              room.x = tryX; room.y = tryY; roomPlaced = true; break;
+            }
+          }
+          if (!roomPlaced) {
+            const safeRoomPos = getRandomSafePosition();
+            room.x = safeRoomPos.x; room.y = safeRoomPos.y;
+          }
+          room.hp = 500;
+          room.maxHp = 500;
+          room.isSummon = true;
+          room.summonOwner = lp.id;
+          room.summonType = 'room';
+          room.summonSpeed = 2.5;
+          room.summonDamage = 0; // damage via DPS aura, not touch
+          room.summonAttackCD = 1;
+          room.summonAttackTimer = 0;
+          room.summonTargetId = target.id; // only targets this player
+          room.roomDPS = 50; // constant 50 DPS regardless of distance
+          room.isCPU = true;
+          room.noCloneHeal = true;
+          gamePlayers.push(room);
+          roomCount++;
+          if (target.id === localPlayerId) {
+            combatLog.push({ text: '⚠️ A Room has appeared! It deals 50 DPS until killed!', timer: 5, color: '#333' });
+          }
+        }
+        combatLog.push({ text: '🏚️ Boisvert: ' + roomCount + ' Room(s) spawned!', timer: 4, color: '#333' });
+      }
+    } else if (is1x) {
+      // Forsaken Help: spawn c00lkidd
+      if (lp.coolkiddId) {
+        // Dismiss existing
+        const sIdx = gamePlayers.findIndex(p => p.id === lp.coolkiddId);
+        if (sIdx >= 0) {
+          gamePlayers[sIdx].alive = false;
+          gamePlayers[sIdx].hp = 0;
+          gamePlayers[sIdx].effects.push({ type: 'death', timer: 2 });
+        }
+        lp.coolkiddId = null;
+        lp.cdF = 5;
+        combatLog.push({ text: '👋 c00lkidd dismissed', timer: 2, color: '#999' });
+      } else {
+        const summonId = 'coolkidd-' + lp.id + '-' + Date.now();
+        lp.move4Uses++;
+        const summon = createPlayerState(
+          { id: summonId, name: 'c00lkidd', color: '#ff0000', fighterId: 'onexonexonex' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+          fighter
+        );
+        summon.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 2;
+        summon.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 2;
+        summon.hp = fAbil.summonHp || 500;
+        summon.maxHp = fAbil.summonHp || 500;
+        summon.isSummon = true;
+        summon.summonOwner = lp.id;
+        summon.summonType = 'coolkidd';
+        summon.summonSpeed = 0;
+        summon.summonDamage = 0;
+        summon.summonAttackCD = fAbil.summonFireCD || 4;
+        summon.summonAttackTimer = 0;
+        summon.summonProjectileSpeed = fAbil.projectileSpeed || 30;
+        gamePlayers.push(summon);
+        lp.coolkiddId = summonId;
+        lp.cdF = fAbil.cooldown;
+        lp.effects.push({ type: 'coolkidd-spawn', timer: 1.5 });
+        combatLog.push({ text: '🔴 c00lkidd summoned!', timer: 3, color: '#ff0000' });
+      }
+    } else if (isCricket) {
+      // Bowler: spawn a bowler
+      if (lp.bowlerId) {
+        const sIdx = gamePlayers.findIndex(p => p.id === lp.bowlerId);
+        if (sIdx >= 0) {
+          gamePlayers[sIdx].alive = false;
+          gamePlayers[sIdx].hp = 0;
+          gamePlayers[sIdx].effects.push({ type: 'death', timer: 2 });
+        }
+        lp.bowlerId = null;
+        lp.cdF = 5;
+        combatLog.push({ text: '👋 Bowler dismissed', timer: 2, color: '#999' });
+      } else {
+        const summonId = 'bowler-' + lp.id + '-' + Date.now();
+        lp.move4Uses++;
+        const summon = createPlayerState(
+          { id: summonId, name: 'Bowler', color: '#228b22', fighterId: 'cricket' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+          fighter
+        );
+        summon.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 2;
+        summon.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 2;
+        summon.hp = fAbil.summonHp || 300;
+        summon.maxHp = fAbil.summonHp || 300;
+        summon.isSummon = true;
+        summon.summonOwner = lp.id;
+        summon.summonType = 'bowler';
+        summon.summonSpeed = 0;
+        summon.summonDamage = fAbil.damage || 200;
+        summon.summonAttackCD = fAbil.summonFireCD || 5;
+        summon.summonAttackTimer = 0;
+        gamePlayers.push(summon);
+        lp.bowlerId = summonId;
+        lp.cdF = fAbil.cooldown;
+        lp.effects.push({ type: 'bowler-spawn', timer: 1.5 });
+        combatLog.push({ text: '🏏 Bowler summoned!', timer: 3, color: '#228b22' });
+      }
+    } else if (isDeer) {
+      // YOU HAVE CRABS: spawn 5 crabs
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      const count = fAbil.crabCount || 5;
+      if (!lp.crabIds) lp.crabIds = [];
+      for (let i = 0; i < count; i++) {
+        const crabId = 'crab-' + lp.id + '-' + i + '-' + Date.now();
+        const crab = createPlayerState(
+          { id: crabId, name: 'Crab', color: '#ff6347', fighterId: 'deer' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+          fighter
+        );
+        crab.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 3;
+        crab.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 3;
+        const crabRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(crab.x, crab.y, crabRadius)) { crab.x = lp.x; crab.y = lp.y; }
+        crab.hp = fAbil.crabHp || 400;
+        crab.maxHp = fAbil.crabHp || 400;
+        crab.isSummon = true;
+        crab.summonOwner = lp.id;
+        crab.summonType = 'crab';
+        crab.summonSpeed = fAbil.crabSpeed || 2.0;
+        crab.summonDamage = fAbil.damage || 200;
+        crab.summonAttackCD = fAbil.crabAttackCD || 1;
+        crab.summonAttackTimer = 0;
+        gamePlayers.push(crab);
+        lp.crabIds.push(crabId);
+      }
+      lp.effects.push({ type: 'crab-spawn', timer: 2.0 });
+      combatLog.push({ text: '🦀 YOU HAVE CRABS!', timer: 3, color: '#ff6347' });
+    } else if (isNoli) {
+      // Forsaken Help: spawn John Doe on map edge
+      lp.move4Uses++;
+      // Remove existing John Doe if any
+      if (lp.johnDoeId) {
+        const oldIdx = gamePlayers.findIndex(x => x.id === lp.johnDoeId);
+        if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers[oldIdx].hp = 0; gamePlayers[oldIdx].effects.push({ type: 'death', timer: 2 }); }
+        lp.johnDoeId = null;
+      }
+      // Pick a random walkable edge tile
+      const edgeTiles = [];
+      for (let c = 0; c < gameMap.cols; c++) {
+        if (gameMap.tiles[0] && gameMap.tiles[0][c] !== TILE.WATER && gameMap.tiles[0][c] !== TILE.ROCK) edgeTiles.push({ r: 0, c });
+        if (gameMap.tiles[gameMap.rows - 1] && gameMap.tiles[gameMap.rows - 1][c] !== TILE.WATER && gameMap.tiles[gameMap.rows - 1][c] !== TILE.ROCK) edgeTiles.push({ r: gameMap.rows - 1, c });
+      }
+      for (let r = 1; r < gameMap.rows - 1; r++) {
+        if (gameMap.tiles[r] && gameMap.tiles[r][0] !== TILE.WATER && gameMap.tiles[r][0] !== TILE.ROCK) edgeTiles.push({ r, c: 0 });
+        if (gameMap.tiles[r] && gameMap.tiles[r][gameMap.cols - 1] !== TILE.WATER && gameMap.tiles[r][gameMap.cols - 1] !== TILE.ROCK) edgeTiles.push({ r, c: gameMap.cols - 1 });
+      }
+      const edgeSpawn = edgeTiles.length > 0 ? edgeTiles[Math.floor(Math.random() * edgeTiles.length)] : { r: 0, c: 0 };
+      const summonId = 'johndoe-' + lp.id + '-' + Date.now();
+      const summon = createPlayerState(
+        { id: summonId, name: 'John Doe', color: '#8b0000', fighterId: 'noli' },
+        edgeSpawn,
+        fighter
+      );
+      summon.hp = fAbil.summonHp || 500;
+      summon.maxHp = fAbil.summonHp || 500;
+      summon.isSummon = true;
+      summon.summonOwner = lp.id;
+      summon.summonType = 'johndoe';
+      summon.summonSpeed = 0;
+      summon.summonDamage = fAbil.damage || 500;
+      summon.summonAttackCD = fAbil.summonFireCD || 10;
+      summon.summonAttackTimer = fAbil.summonFireCD || 10; // starts on cooldown
+      summon.spikeDuration = fAbil.spikeDuration || 5;
+      summon.touchDPS = 0;
+      gamePlayers.push(summon);
+      lp.johnDoeId = summonId;
+      lp.cdF = fAbil.cooldown;
+      lp.effects.push({ type: 'johndoe-spawn', timer: 1.5 });
+      combatLog.push({ text: '🗡️ John Doe summoned on the edge!', timer: 3, color: '#8b0000' });
+    } else if (isHitman) {
+      // Hitman F: Conceal — invisible for 10s, cannot use any abilities while concealed
+      if (lp.hitmanConcealUses >= (lp.fighter.abilities[5] ? lp.fighter.abilities[5].maxUses || 3 : 3)) {
+        combatLog.push({ text: '❌ No Conceal charges left!', timer: 2, color: '#666' });
+        lp.cdF = 0;
+        return;
+      }
+      lp.hitmanConcealUses++;
+      const concealDur = lp.fighter.abilities[5] ? (lp.fighter.abilities[5].duration || 10) : 10;
+      lp.hitmanConcealTimer = concealDur;
+      lp.effects.push({ type: 'hitman-conceal', timer: concealDur });
+      const usesLeft = (lp.fighter.abilities[5] ? lp.fighter.abilities[5].maxUses || 3 : 3) - lp.hitmanConcealUses;
+      combatLog.push({ text: '🫥 Concealed! Invisible for ' + concealDur + 's! (' + usesLeft + ' left)', timer: 3, color: '#88aacc' });
+    } else if (isCat) {
+      // Unstable Unicorns: summon a random unicorn
+      // Remove existing unicorn if any
+      if (lp.catUnicornId) {
+        const oldIdx = gamePlayers.findIndex(x => x.id === lp.catUnicornId);
+        if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+        lp.catUnicornId = null;
+      }
+      // Pick random unicorn type (1/3 each)
+      const uniRoll = Math.random();
+      let uniType, uniName, uniColor, uniLog;
+      if (uniRoll < 0.33) {
+        uniType = 'destructive-unicorn';
+        uniName = 'Extremely Destructive Unicorn';
+        uniColor = '#ff2200';
+        uniLog = '💥 Extremely Destructive Unicorn summoned! It will explode on contact for 999 damage!';
+      } else if (uniRoll < 0.66) {
+        uniType = 'queenbee-unicorn';
+        uniName = 'Queen Bee Unicorn';
+        uniColor = '#ffd700';
+        uniLog = '👑 Queen Bee Unicorn summoned! Enemies cannot use M1 until it\'s killed!';
+      } else {
+        uniType = 'seductive-unicorn';
+        uniName = 'Seductive Unicorn';
+        uniColor = '#ff69b4';
+        uniLog = '💖 Seductive Unicorn summoned! You are invulnerable until it dies!';
+      }
+      const uniId = 'unicorn-' + lp.id + '-' + Date.now();
+      const uniFighter = getFighter('fighter');
+      const uni = createPlayerState(
+        { id: uniId, name: uniName, color: uniColor, fighterId: 'fighter' },
+        { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+        uniFighter
+      );
+      uni.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 3;
+      uni.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 3;
+      uni.hp = 500;
+      uni.maxHp = 500;
+      uni.isSummon = true;
+      uni.summonOwner = lp.id;
+      uni.summonType = uniType;
+      uni.summonSpeed = 3.0;
+      uni.summonDamage = uniType === 'destructive-unicorn' ? 999 : 0;
+      uni.summonAttackCD = 0.5;
+      uni.summonAttackTimer = 0;
+      uni.isCPU = true;
+      uni.noCloneHeal = true;
+      gamePlayers.push(uni);
+      lp.catUnicornId = uniId;
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      lp.effects.push({ type: 'unicorn-spawn', timer: 1.5 });
+      combatLog.push({ text: uniLog, timer: 4, color: uniColor });
+    } else if (isNapoleon) {
+      // Napoleon F: Light Infantry — spawn 3 infantrymen
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      const count = fAbil.infantryCount || 3;
+      if (!lp.napoleonInfantryIds) lp.napoleonInfantryIds = [];
+      for (let i = 0; i < count; i++) {
+        const infId = 'infantry-' + lp.id + '-f-' + i + '-' + Date.now();
+        const inf = createPlayerState(
+          { id: infId, name: 'Infantryman', color: '#2c3e50', fighterId: 'napoleon' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+          fighter
+        );
+        inf.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 3;
+        inf.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 3;
+        const infRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(inf.x, inf.y, infRadius)) { inf.x = lp.x; inf.y = lp.y; }
+        inf.hp = fAbil.infantryHp || 50;
+        inf.maxHp = fAbil.infantryHp || 50;
+        inf.isSummon = true;
+        inf.summonOwner = lp.id;
+        inf.summonType = 'napoleon-infantry';
+        inf.summonSpeed = fAbil.infantrySpeed || 2.0;
+        inf.summonDamage = fAbil.damage || 100;
+        inf.summonAttackCD = fAbil.infantryFireCD || 1;
+        inf.summonAttackTimer = 0;
+        inf.summonProjectileSpeed = fAbil.infantryProjectileSpeed || 38;
+        inf.summonProjectileRange = fAbil.infantryRange || 0.8;
+        gamePlayers.push(inf);
+        lp.napoleonInfantryIds.push(infId);
+      }
+      lp.effects.push({ type: 'infantry-spawn', timer: 1.5 });
+      combatLog.push({ text: '🎖 Light Infantry deployed!', timer: 3, color: '#2c3e50' });
+    } else if (isModerator) {
+      // Moderator F: Firewall — invincible + invisible for 5s
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      lp.modFirewallTimer = fAbil.duration || 5;
+      lp.effects.push({ type: 'firewall', timer: (fAbil.duration || 5) + 0.5 });
+      combatLog.push({ text: '🛡 Firewall active! Invincible + invisible for 5s!', timer: 3, color: '#e74c3c' });
+    } else if (isDnd) {
+      // D&D F: Sidekick — spawn a clone of yourself with half max HP
+      // Kill old sidekick if exists
+      if (lp.dndSidekickId) {
+        const oldSk = gamePlayers.find(p => p.id === lp.dndSidekickId);
+        if (oldSk && oldSk.alive) { oldSk.alive = false; oldSk.hp = 0; oldSk.effects.push({ type: 'death', timer: 2 }); }
+      }
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      const skId = 'dnd-sidekick-' + lp.id + '-' + Date.now();
+      const skFighter = lp.fighter;
+      const sk = createPlayerState(
+        { id: skId, name: lp.name + "'s Sidekick", color: lp.color || '#daa520', fighterId: 'dnd' },
+        { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) }, skFighter
+      );
+      const skRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+      const angle = Math.random() * Math.PI * 2;
+      sk.x = lp.x + Math.cos(angle) * GAME_TILE * 2;
+      sk.y = lp.y + Math.sin(angle) * GAME_TILE * 2;
+      if (!canMoveTo(sk.x, sk.y, skRadius)) { const safe = getRandomSafePosition(); sk.x = safe.x; sk.y = safe.y; }
+      sk.hp = Math.floor(lp.maxHp / 2); sk.maxHp = Math.floor(lp.maxHp / 2);
+      sk.isSummon = true; sk.summonOwner = lp.id;
+      sk.summonType = 'dnd-sidekick';
+      sk.dndRace = lp.dndRace || 'human';
+      sk.summonSpeed = 3.0; sk.summonDamage = 100 + (lp.dndWeaponBonus || 0);
+      sk.summonAttackCD = sk.dndRace === 'dwarf' ? 2 : 0.5;
+      sk.summonAttackTimer = 0;
+      sk.isCPU = true;
+      gamePlayers.push(sk);
+      lp.dndSidekickId = skId;
+      lp.effects.push({ type: 'dnd-sidekick-spawn', timer: 1.5 });
+      combatLog.push({ text: '🛡 Sidekick summoned!', timer: 3, color: '#daa520' });
+    } else if (isIllusion) {
+      // Illusion F: The Disillusion Of Environment — see through grass for 5s (self + allies)
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      const dur = fAbil.duration || 5;
+      lp.illusionSeeGrassTimer = dur;
+      // Apply to allies in team mode
+      if (gameMode === 'teams' && lp.team) {
+        for (const ally of gamePlayers) {
+          if (ally.id === lp.id || !ally.alive || ally.isSummon || ally.team !== lp.team) continue;
+          ally.illusionSeeGrassTimer = dur;
+        }
+      }
+      lp.effects.push({ type: 'illusion-see-grass', timer: dur + 0.5 });
+      combatLog.push({ text: '👁 Disillusion! See through grass for 5s!', timer: 3, color: '#7f8fa6' });
+    } else if (isDogTooth) {
+      // Dog Tooth F: The Final Battle — teleport to The Complex, fight 3000HP Room
+      if (lp.dogtoothFUsed) {
+        combatLog.push({ text: '⚔️ The Final Battle can only be used once!', timer: 2, color: '#888' });
+        return;
+      }
+      lp.dogtoothFUsed = true;
+      lp.move4Uses++;
+      lp.dogtoothInComplex = true;
+      // Kill old complex room if any
+      if (lp.dogtoothComplexRoomId) {
+        const oldR = gamePlayers.find(p => p.id === lp.dogtoothComplexRoomId);
+        if (oldR && oldR.alive) { oldR.alive = false; oldR.hp = 0; }
+      }
+      // Kill Ouriel (don't let it transform into a room)
+      if (lp.dogtoothOurielId) {
+        const ouriel = gamePlayers.find(p => p.id === lp.dogtoothOurielId);
+        if (ouriel && ouriel.alive) { ouriel.alive = false; ouriel.hp = 0; ouriel.effects.push({ type: 'death', timer: 2 }); }
+        lp.dogtoothOurielId = null;
+        lp.dogtoothOurielHp = null;
+        lp.dogtoothOurielHitsLeft = null;
+      }
+      // Spawn a 3000HP Room entity near player
+      const roomId = 'complex-room-' + lp.id + '-' + Date.now();
+      const roomFighter = { id: 'complex-room', name: 'Room', hp: 1300, healAmount: 0, healDelay: 999, healTick: 999, speed: 1.8, abilities: [] };
+      const roomSpawnX = lp.x + (Math.random() < 0.5 ? 1 : -1) * GAME_TILE * 4;
+      const roomSpawnY = lp.y + (Math.random() < 0.5 ? 1 : -1) * GAME_TILE * 4;
+      const room = createPlayerState(
+        { id: roomId, name: 'Room', color: '#000' },
+        { r: Math.floor(roomSpawnY / GAME_TILE), c: Math.floor(roomSpawnX / GAME_TILE) },
+        roomFighter
+      );
+      room.x = roomSpawnX; room.y = roomSpawnY;
+      const rR = GAME_TILE * PLAYER_RADIUS_RATIO;
+      if (!canMoveTo(room.x, room.y, rR)) { const s = getRandomSafePosition(); room.x = s.x; room.y = s.y; }
+      room.hp = 1300; room.maxHp = 1300;
+      room.isSummon = true; room.summonOwner = 'none'; // hostile to everyone
+      room.summonType = 'complex-room';
+      room.summonTargetId = lp.id; // hunts Dog Tooth
+      room.summonSpeed = 1.8;
+      room.summonDamage = 0;
+      room.summonAttackCD = 999;
+      room.summonAttackTimer = 0;
+      room.complexDPS = 30; // 30 DPS aura
+      room.isCPU = true;
+      gamePlayers.push(room);
+      lp.dogtoothComplexRoomId = roomId;
+      lp.effects.push({ type: 'complex-enter', timer: 2.0 });
+      combatLog.push({ text: '⚔️ THE FINAL BATTLE! Fight the 1300HP Room!', timer: 5, color: '#fff' });
+    } else if (isOmori) {
+      // Omori F: Headspace — toggle FARAWAY TOWN (50% more dmg, 25% more taken)
+      lp.omoriHeadspaceActive = !lp.omoriHeadspaceActive;
+      // Apply to party members too
+      for (const pid of (lp.omoriPartyIds || [])) {
+        const pm = gamePlayers.find(p => p.id === pid && p.alive);
+        if (pm) pm.omoriHeadspaceActive = lp.omoriHeadspaceActive;
+      }
+      for (const pid of (lp.omoriSpecialPartyIds || [])) {
+        const pm = gamePlayers.find(p => p.id === pid && p.alive);
+        if (pm) pm.omoriHeadspaceActive = lp.omoriHeadspaceActive;
+      }
+      if (lp.omoriHeadspaceActive) {
+        lp.effects.push({ type: 'omori-headspace-on', timer: 1.5 });
+        combatLog.push({ text: '🌸 FARAWAY TOWN! +50% dmg, +25% taken!', timer: 4, color: '#fd79a8' });
+      } else {
+        lp.effects.push({ type: 'omori-headspace-off', timer: 1.5 });
+        combatLog.push({ text: '🌸 Left FARAWAY TOWN.', timer: 3, color: '#636e72' });
+      }
+    } else if (isPyro) {
+      // Pyromaniac F: Wildfire — set all grass tiles on fire for 10s
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      if (!lp.pyroFireZones) lp.pyroFireZones = [];
+      // Create fire zones on every grass tile
+      for (let r = 0; r < gameMap.rows; r++) {
+        for (let c = 0; c < gameMap.cols; c++) {
+          if (gameMap.tiles[r][c] === TILE.GRASS) {
+            const fx = c * GAME_TILE + GAME_TILE / 2;
+            const fy = r * GAME_TILE + GAME_TILE / 2;
+            lp.pyroFireZones.push({ x: fx, y: fy, timer: fAbil.grassFireDuration || 10, radius: 0.6, isGrassFire: true, burnDelay: fAbil.burnDelay || 3, burnDuration: fAbil.burnDuration || 5 });
+          }
+        }
+      }
+      lp.effects.push({ type: 'pyro-wildfire', timer: 2 });
+      combatLog.push({ text: '🔥 WILDFIRE! All grass is burning!', timer: 4, color: '#ff4400' });
+    } else if (isHeavyRope) {
+      // Heavy Rope: Second Grip — M1 has 0.5s CD, Rope Swing shields front + both sides
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      lp.ropeSecondGripTimer = fAbil.duration || 10;
+      lp.effects.push({ type: 'rope-second-grip', timer: (fAbil.duration || 10) + 0.5 });
+      combatLog.push({ text: '🪢 Second Grip! Faster M1 + wider shield for 10s!', timer: 3, color: '#8b4513' });
+    } else {
+      // Fighter: Potion — heal 300 over 3s
+      lp.move4Uses++;
+      lp.cdF = fAbil.cooldown;
+      lp.potionHealPool = fAbil.healAmount || 300;
+      lp.potionHealTimer = fAbil.healDuration || 3;
+      lp.effects.push({ type: 'potion', timer: (fAbil.healDuration || 3) + 0.5 });
+      combatLog.push({ text: '🧪 Potion! Healing ' + (fAbil.healAmount || 300) + ' HP...', timer: 3, color: '#2ecc71' });
+    }
+  }
+}
+
+function executeSpecialLanding() {
+  const lp = localPlayer;
+  const abil = lp.fighter.abilities[4]; // Special
+  const isCricketSpecial = lp.fighter.id === 'cricket';
+  const isDeerSpecial = lp.fighter.id === 'deer';
+  const hasPower = typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id);
+  lp.specialAiming = false;
+  lp.specialJumping = false;
+  lp.specialUsed = true;
+  lp.effects = lp.effects.filter((fx) => fx.type !== 'jump' && fx.type !== 'sixer-aim' && fx.type !== 'igloo-aim');
+
+  const landX = lp.specialAimX;
+  const landY = lp.specialAimY;
+
+  if (isDeerSpecial) {
+    if (hasPower) {
+      // Power Special: YOU ARE THE IGLOO — teleport all enemies to igloo location
+      lp.iglooX = landX;
+      lp.iglooY = landY;
+      lp.iglooTimer = abil.duration || 20;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive || target.isSummon) continue;
+        if (gameMode === 'teams' && lp.team && target.team === lp.team) continue;
+        // Teleport enemy into the igloo zone
+        const angle = Math.random() * Math.PI * 2;
+        const dist = Math.random() * 2 * GAME_TILE;
+        target.x = landX + Math.cos(angle) * dist;
+        target.y = landY + Math.sin(angle) * dist;
+        target.effects.push({ type: 'igloo-teleport', timer: 1.5 });
+      }
+      lp.effects.push({ type: 'igloo', timer: (abil.duration || 20) + 1 });
+      showPopup('🏔 YOU ARE THE IGLOO!');
+      combatLog.push({ text: '🏔 YOU ARE THE IGLOO! All enemies teleported!', timer: 4, color: '#87ceeb' });
+    } else {
+      // Normal Igloo
+      lp.iglooX = landX;
+      lp.iglooY = landY;
+      lp.iglooTimer = abil.duration || 5;
+      lp.effects.push({ type: 'igloo', timer: (abil.duration || 5) + 1 });
+      combatLog.push({ text: '🏔 Igloo built!', timer: 3, color: '#87ceeb' });
+    }
+    return;
+  }
+
+  if (isCricketSpecial && hasPower) {
+    // Power Special: Winning the Finals — spawn trophy at map center (near tree)
+    const centerX = (Math.floor(gameMap.cols / 2) + 0.5) * GAME_TILE;
+    const centerY = (Math.floor(gameMap.rows / 2) + 0.5) * GAME_TILE;
+    const trophyId = 'trophy-' + lp.id + '-' + Date.now();
+    // Remove old trophy if any
+    if (lp.cricketTrophyId) {
+      const oldIdx = gamePlayers.findIndex(p => p.id === lp.cricketTrophyId);
+      if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+    }
+    const trophyFighter = getFighter('cricket');
+    const trophy = createPlayerState(
+      { id: trophyId, name: 'Trophy', color: '#ffd700', fighterId: 'cricket' },
+      { r: Math.floor(centerY / GAME_TILE), c: Math.floor(centerX / GAME_TILE) }, trophyFighter
+    );
+    trophy.x = centerX; trophy.y = centerY;
+    trophy.hp = 1500; trophy.maxHp = 1500;
+    trophy.isSummon = true; trophy.summonOwner = lp.id; trophy.summonType = 'cricket-trophy';
+    trophy.fighter = trophyFighter;
+    gamePlayers.push(trophy);
+    lp.cricketTrophyId = trophyId;
+    lp.cricketTrophyShield = true; // untouchable while trophy alive
+    lp.effects.push({ type: 'trophy-spawn', timer: 2.0 });
+    showPopup('🏆 WINNING THE FINALS!');
+    combatLog.push({ text: '🏆 Trophy spawned at center! Cricket is untouchable!', timer: 5, color: '#ffd700' });
+    return;
+  }
+
+  // Check if hit any enemy within 1 tile of landing
+  const hitRange = GAME_TILE * 1.2;
+  let hitSomeone = false;
+
+  for (const target of gamePlayers) {
+    if (target.id === lp.id || !target.alive) continue;
+    const dist = Math.sqrt((target.x - landX) ** 2 + (target.y - landY) ** 2);
+    if (dist <= hitRange) {
+      const wasAlive = target.alive;
+      dealDamage(lp, target, abil.damage);
+      // Power Special: With Extra Power — apply bleeding and 10s stun
+      if (hasPower && lp.fighter.id === 'fighter') {
+        if (target.alive) {
+          if (!target.bleedTimers) target.bleedTimers = [];
+          target.bleedTimers.push({ dps: 50, remaining: 10 });
+          target.stunned = 10;
+          target.effects.push({ type: 'stun', timer: 10 });
+          target.effects.push({ type: 'power-bleed', timer: 10 });
+        }
+      }
+      // Achievement: Fighter special kills (not team mode)
+      if (wasAlive && !target.alive && lp.id === localPlayerId && lp.fighter.id === 'fighter' && !target.isSummon && gameMode !== 'teams') {
+        _fighterSpecialKillsThisGame++;
+        if (_fighterSpecialKillsThisGame >= 2 && typeof trackFighterSpecialAch === 'function') {
+          trackFighterSpecialAch();
+        }
+      }
+      hitSomeone = true;
+    }
+  }
+
+  // Move player to landing position (Cricket stays in place — ball lands there instead)
+  if (!isCricketSpecial) {
+    lp.x = landX;
+    lp.y = landY;
+  }
+
+  if (!hitSomeone) {
+    // Miss: stun self + self damage
+    lp.stunned = abil.missStun;
+    lp.hp = Math.max(0, lp.hp - abil.missDamage);
+    if (lp.hp <= 0) {
+      lp.alive = false; lp.hp = 0;
+      lp.effects.push({ type: 'death', timer: 2 });
+      freeCamX = lp.x; freeCamY = lp.y; spectateIndex = -1;
+    }
+    lp.effects.push({ type: 'stun', timer: abil.missStun });
+  }
+
+  lp.effects.push({ type: 'land', timer: 0.5 });
+}
+
+function _exitBackrooms(p, reason) {
+  p.inBackrooms = false;
+  p.backroomsTimer = 0;
+  // Kill chaser
+  if (p.backroomsChaserId) {
+    const chaser = gamePlayers.find(c => c.id === p.backroomsChaserId);
+    if (chaser) {
+      chaser.alive = false;
+      chaser.hp = 0;
+      chaser.effects.push({ type: 'death', timer: 2 });
+    }
+    p.backroomsChaserId = null;
+  }
+  p.effects.push({ type: 'backrooms-exit', timer: 1.5 });
+  if (p.id === localPlayerId) {
+    if (reason === 'escaped') {
+      combatLog.push({ text: '🚪 You escaped the Backrooms!', timer: 4, color: '#2ecc71' });
+    } else {
+      combatLog.push({ text: '🚪 Backrooms timed out — you\'re free!', timer: 4, color: '#f5a623' });
+    }
+  }
+}
+
+// Shared revive check for all death paths (poison, bleed, self-damage, Room DPS, etc.)
+// Returns true if the player was revived and should NOT die.
+function _tryReviveOnDeath(p) {
+  if (p.isSummon) return false;
+  // 1. Dogtooth Puppet God
+  if (p.dogtoothPuppetGod && !p.dogtoothPuppetUsed) {
+    p.dogtoothPuppetUsed = true;
+    p.hp = Math.floor(p.maxHp * 0.5);
+    p.dogtoothReviveDmgMult = 1.5;
+    if (p.id === localPlayerId) combatLog.push({ text: '💀 Kill The Puppet God! Revived with half HP! (1.5× dmg taken)', timer: 5, color: '#ff4444' });
+    return true;
+  }
+  // 2. Dogtooth Self CPR trait
+  if (p.traitActive && p.fighter && p.fighter.id === 'dogtooth' && !p.dogtoothCPRUsed) {
+    p.dogtoothCPRUsed = true;
+    p.hp = Math.floor(p.maxHp * 0.5);
+    p.effects.push({ type: 'self-cpr', timer: 2 });
+    if (p.id === localPlayerId) combatLog.push({ text: '💓 Self CPR! Revived with half HP!', timer: 5, color: '#ff6b81' });
+    return true;
+  }
+  // 3. Poker Dice With The Devil trait (10% chance)
+  if (p.traitActive && p.fighter && p.fighter.id === 'poker' && !p.pokerDiceUsed) {
+    if (Math.random() < 0.1) {
+      p.pokerDiceUsed = true;
+      p.hp = p.maxHp;
+      p.cdM1 = 0; p.cdE = 0; p.cdR = 0; p.cdT = 0; p.cdF = 0;
+      p.noDamageTimer = 0; p.isHealing = false;
+      p.effects.push({ type: 'poker-dice-revive', timer: 2 });
+      if (p.id === localPlayerId) combatLog.push({ text: '🎲 Dice With The Devil! Full revive + CDs reset!', timer: 5, color: '#ffd700' });
+      return true;
+    }
+  }
+  // 4. Omori Plot Armour trait
+  if (p.traitActive && p.fighter && p.fighter.id === 'omori' && p.omoriPlotArmourAvailable) {
+    p.omoriPlotArmourAvailable = false;
+    p.hp = 1;
+    p.omoriPlotArmourImmunity = 5;
+    p.omoriPlotArmourCooldown = 30;
+    // Begin autohealing immediately (skip no-damage timer)
+    p.noDamageTimer = p.fighter.healDelay || 10;
+    p.effects.push({ type: 'omori-plot-armour', timer: 5 });
+    if (p.id === localPlayerId) combatLog.push({ text: '🛡 Plot Armour! Revived with 1 HP! 5s immunity! Survive 30s to recharge.', timer: 5, color: '#00cec9' });
+    return true;
+  }
+  return false;
+}
+
+// Apply / refresh Pyromaniac burn on a target
+function _applyPyroBurn(target, dps, duration, sourceIsRain) {
+  if (!target.alive) return;
+  // Dragon is immune to fire/burn
+  if (target.fighter && target.fighter.id === 'dragon') return;
+  // Burn immunity: Pyro's T blocks all burn; Exploding Cat defuse blocks all burn
+  if (target.pyroBurnImmuneTimer > 0 && target.fighter && (target.fighter.id === 'explodingcat' || target.fighter.id === 'pyromaniac')) return;
+  if (!target.pyroBurnTimers) target.pyroBurnTimers = [];
+  // Refresh: if burn at this dps already exists, reset its duration
+  const existing = target.pyroBurnTimers.find(b => b.dps === dps);
+  if (existing) { existing.remaining = Math.max(existing.remaining, duration); return; }
+  target.pyroBurnTimers.push({ dps, remaining: duration });
+}
+
+// Shared death handler: try revive, otherwise die properly
+function _handleDeath(p, attacker) {
+  if (p.hp > 0 || !p.alive) return;
+  if (_tryReviveOnDeath(p)) return;
+  p.hp = 0; p.alive = false;
+  p.effects.push({ type: 'death', timer: 2 });
+  if (p.id === localPlayerId) { freeCamX = p.x; freeCamY = p.y; spectateIndex = -1; deathOverlayTimer = 0; }
+  // Training dummy respawn
+  if (p.id === 'dummy' && gameMode === 'training') {
+    dummyRespawnTimer = 3;
+  }
+  // Emit death to server and handle respawn (same as dealDamage death path)
+  if (!p.isSummon) {
+    _emitDeathAndQueueRespawn(p, attacker);
+  }
+}
+
+// Centralized death notification + respawn queueing
+function _emitDeathAndQueueRespawn(target, attacker) {
+  // Tell server this player died
+  if (typeof socket !== 'undefined' && socket.emit) {
+    if (isHostAuthority || (gameMode !== undefined && gameMode !== 'teams')) {
+      const killId = attacker && !attacker.isSummon ? attacker.id : (attacker && attacker.summonOwner ? attacker.summonOwner : null);
+      socket.emit('player-died', { playerId: target.id, killerId: killId });
+    }
+  }
+  // Host directly handles respawn + kill tracking (no server round-trip dependency)
+  if (respawnMode && isHostAuthority) {
+    // Track kills
+    if (attacker && attacker.id !== target.id) {
+      const killerTeam = attacker.isSummon
+        ? (gamePlayers.find(o => o.id === attacker.summonOwner) || {}).team
+        : attacker.team;
+      if (killerTeam && killerTeam !== target.team) {
+        if (killerTeam === 1) respawnTeam1Kills++;
+        else if (killerTeam === 2) respawnTeam2Kills++;
+      }
+    }
+    // Queue respawn
+    _respawnQueue.push({ playerId: target.id, timer: 3 });
+  }
+}
+
+function dealDamage(attacker, target, amount, viaSummon, allowFF) {
+  if (!target.alive) return;
+  // Team friendly fire prevention: same-team players/summons can't hurt each other
+  if (!allowFF && attacker && attacker !== target && gameMode === 'teams') {
+    const attackerTeam = attacker.isSummon
+      ? (gamePlayers.find(o => o.id === attacker.summonOwner) || {}).team
+      : attacker.team;
+    const targetTeam = target.isSummon
+      ? (gamePlayers.find(o => o.id === target.summonOwner) || {}).team
+      : target.team;
+    if (attackerTeam && targetTeam && attackerTeam === targetTeam) return;
+  }
+  // Obelisk and backrooms chaser are invincible
+  if (target.isSummon && (target.summonType === 'obelisk' || target.summonType === 'backrooms-chaser')) return;
+  // Exploding kittens can't damage players trapped in the black hole (imploding kitten)
+  if (attacker && attacker.isSummon && attacker.summonType === 'exploding-kitten') {
+    const bh = gamePlayers.find(p => p.alive && p.isSummon && p.summonType === 'imploding-kitten' && p.summonOwner === attacker.summonOwner && p.blackHoleActive);
+    if (bh) {
+      const tdx = target.x - bh.x; const tdy = target.y - bh.y;
+      const tdist = Math.sqrt(tdx * tdx + tdy * tdy);
+      if (tdist <= (bh.blackHoleRadius || 8 * GAME_TILE)) return; // trapped in black hole — immune to kittens
+    }
+  }
+  // Backrooms: players in backrooms can't be damaged by normal attacks (only the chaser)
+  if (target.inBackrooms && attacker && attacker.summonType !== 'backrooms-chaser') return;
+  // Backrooms: players outside backrooms can't be hit by backrooms entities
+  if (!target.inBackrooms && attacker && attacker.summonType === 'backrooms-chaser') return;
+  // Backrooms: player IN backrooms cannot attack players in the normal dimension
+  if (attacker && attacker.inBackrooms && !target.inBackrooms && target.summonType !== 'backrooms-chaser') return;
+  // Final Battle (Complex): isolated like backrooms — only Complex Room can interact
+  if (target.dogtoothInComplex && attacker && attacker.id !== target.dogtoothComplexRoomId) return;
+  if (attacker && attacker.dogtoothInComplex && !target.dogtoothInComplex && target.id !== attacker.dogtoothComplexRoomId) return;
+  // Alternate: player being hunted by an alternate can only attack the alternate, not other players
+  if (attacker && attacker.hasAlternate && !target.isSummon) return;
+  if (attacker && attacker.hasAlternate && target.isSummon && target.summonType !== 'alternate') return;
+  // Cricket Trophy Shield: cricket is untouchable while their trophy is alive
+  if (!target.isSummon && target.cricketTrophyShield && target.cricketTrophyId) {
+    const trophy = gamePlayers.find(p => p.alive && p.id === target.cricketTrophyId);
+    if (trophy) return; // cricket is untouchable — destroy trophy first
+  }
+  // Poker Debt: players in debt to a poker can't damage that poker
+  if (attacker && attacker.pokerDebtTarget && target.id === attacker.pokerDebtTarget) {
+    return; // debtor can't damage the poker they owe
+  }
+  // Seductive Unicorn: owner is invulnerable while their seductive unicorn is alive
+  if (!target.isSummon) {
+    const seductiveUnicorn = gamePlayers.find(p => p.alive && p.isSummon && p.summonType === 'seductive-unicorn' && p.summonOwner === target.id);
+    if (seductiveUnicorn) return;
+  }
+  // Moderator Firewall: invincible
+  if (target.modFirewallTimer > 0) return;
+  // Heavy Rope Swing shield: blocks ranged/ability attacks from the shielded direction (melee goes through)
+  if (target.ropeSwingActive && attacker && attacker.alive) {
+    const dx = attacker.x - target.x; const dy = attacker.y - target.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 1;
+    const meleeRange = 2.5 * GAME_TILE; // attacks closer than this are melee — go through shield
+    if (d > meleeRange) {
+      const atkNx = dx / d; const atkNy = dy / d;
+      const dot = atkNx * target.ropeSwingNx + atkNy * target.ropeSwingNy;
+      if (target.ropeSecondGripTimer > 0) {
+        // Second Grip: block front + both sides (not back) — dot > -0.3
+        if (dot > -0.3) {
+          target.effects.push({ type: 'rope-block', timer: 0.3 });
+          return;
+        }
+      } else {
+        // Normal: block one side — dot > 0.5 (frontal cone)
+        if (dot > 0.5) {
+          target.effects.push({ type: 'rope-block', timer: 0.3 });
+          return;
+        }
+      }
+    }
+  }
+  // Moderator Server Update: 50% damage reduction (defense buff)
+  if (target.modServerUpdateTimer > 0) amount = Math.round(amount * 0.5);
+  // Moderator Server Update: 50% damage increase (attack buff)
+  if (attacker && attacker.modServerUpdateTimer > 0) amount = Math.round(amount * 1.5);
+  // Deer Seer: dodge by jumping to the side
+  if (target.deerSeerTimer > 0 && target.fighter && target.fighter.id === 'deer') {
+    const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+    // Jump perpendicular to attacker direction
+    let jx = 0, jy = 0;
+    if (attacker && attacker.alive) {
+      const adx = target.x - attacker.x; const ady = target.y - attacker.y;
+      const ad = Math.sqrt(adx * adx + ady * ady) || 1;
+      // Perpendicular (randomly left or right)
+      const side = Math.random() < 0.5 ? 1 : -1;
+      jx = (-ady / ad) * side; jy = (adx / ad) * side;
+    } else {
+      const angle = Math.random() * Math.PI * 2;
+      jx = Math.cos(angle); jy = Math.sin(angle);
+    }
+    const jumpDist = GAME_TILE * 2;
+    for (let s = 10; s >= 1; s--) {
+      const tryX = target.x + jx * jumpDist * (s / 10);
+      const tryY = target.y + jy * jumpDist * (s / 10);
+      if (canMoveTo(tryX, tryY, r)) { target.x = tryX; target.y = tryY; break; }
+    }
+    target.effects.push({ type: 'deer-dodge', timer: 0.4 });
+    return; // damage fully dodged
+  }
+  // Cat Seer (Reveal the Future): dodge by jumping, same as deer
+  if (target.catSeerTimer > 0 && target.fighter && target.fighter.id === 'explodingcat') {
+    const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+    let jx = 0, jy = 0;
+    if (attacker && attacker.alive) {
+      const adx = target.x - attacker.x; const ady = target.y - attacker.y;
+      const ad = Math.sqrt(adx * adx + ady * ady) || 1;
+      const side = Math.random() < 0.5 ? 1 : -1;
+      jx = (-ady / ad) * side; jy = (adx / ad) * side;
+    } else {
+      const angle = Math.random() * Math.PI * 2;
+      jx = Math.cos(angle); jy = Math.sin(angle);
+    }
+    const jumpDist = GAME_TILE * 2;
+    for (let s = 10; s >= 1; s--) {
+      const tryX = target.x + jx * jumpDist * (s / 10);
+      const tryY = target.y + jy * jumpDist * (s / 10);
+      if (canMoveTo(tryX, tryY, r)) { target.x = tryX; target.y = tryY; break; }
+    }
+    target.effects.push({ type: 'cat-dodge', timer: 0.4 });
+    return; // damage fully dodged
+  }
+  // Illusion Teleattack dodge: dodge attacks from the specific player hit by M1
+  if (target.illusionDodgeTimer > 0 && attacker && attacker.id === target.illusionDodgeTargetId) {
+    const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+    let jx = 0, jy = 0;
+    if (attacker.alive) {
+      const adx = target.x - attacker.x; const ady = target.y - attacker.y;
+      const ad = Math.sqrt(adx * adx + ady * ady) || 1;
+      const side = Math.random() < 0.5 ? 1 : -1;
+      jx = (-ady / ad) * side; jy = (adx / ad) * side;
+    } else {
+      const angle = Math.random() * Math.PI * 2;
+      jx = Math.cos(angle); jy = Math.sin(angle);
+    }
+    const jumpDist = GAME_TILE * 2;
+    for (let s = 10; s >= 1; s--) {
+      const tryX = target.x + jx * jumpDist * (s / 10);
+      const tryY = target.y + jy * jumpDist * (s / 10);
+      if (canMoveTo(tryX, tryY, r)) { target.x = tryX; target.y = tryY; break; }
+    }
+    target.effects.push({ type: 'illusion-dodge', timer: 0.4 });
+    return; // damage fully dodged
+  }
+  // Blinds modifier (Poker)
+  if (target.blindBuff === 'small') amount = Math.round(amount * 0.5);
+  else if (target.blindBuff === 'big') amount = Math.round(amount * 1.5);
+  // Napoleon Cavalry: 2x damage received while mounted
+  if (target.napoleonCavalry) amount = Math.round(amount * 2);
+  // D&D Dwarf: 0.8x damage taken
+  if (target.dndRace === 'dwarf') amount = Math.round(amount * 0.8);
+  // D&D Elf attacker: +50 damage bonus
+  if (attacker && attacker.dndRace === 'elf') amount += 50;
+  // Napoleon Defensive Tactics wall: invincible — absorbs no damage itself
+  if (target.isSummon && target.summonType === 'napoleon-wall') return;
+  // Napoleon Defensive Tactics: anyone inside a wall area takes half damage
+  if (!target.isSummon) {
+    const walls = gamePlayers.filter(w => w.alive && w.summonType === 'napoleon-wall');
+    for (const wall of walls) {
+      const ws = (wall.wallSize || 2) * GAME_TILE / 2;
+      if (Math.abs(target.x - wall.x) < ws && Math.abs(target.y - wall.y) < ws) {
+        amount = Math.round(amount * 0.5);
+        break;
+      }
+    }
+  }
+  // Cricket Gear Up: 80% damage reduction
+  if (target.gearUpTimer > 0) {
+    const originalAmount = amount;
+    amount = Math.round(amount * 0.2);
+    // Achievement: Gear Up absorption tracking (Cricket in SP)
+    if (target.id === localPlayerId && target.fighter && target.fighter.id === 'cricket' && (gameMode === 'fight' || gameMode === 'fight-hard')) {
+      const absorbed = originalAmount - amount;
+      _gearDmgAbsorbedRemainder += absorbed;
+      if (_gearDmgAbsorbedRemainder >= 10 && typeof trackGearDmgAbsorbed === 'function') {
+        trackGearDmgAbsorbed(_gearDmgAbsorbedRemainder);
+        _gearDmgAbsorbedRemainder = _gearDmgAbsorbedRemainder % 10;
+      }
+    }
+  }
+  // Dog Tooth Smile Tapes: 1.3x damage resistance
+  if (target.dogtoothSmileTimer > 0) amount = Math.round(amount / 1.3);
+  // Dog Tooth Puppet God: revive damage multiplier
+  if (target.dogtoothReviveDmgMult > 1) amount = Math.round(amount * target.dogtoothReviveDmgMult);
+  // ── Trait damage modifiers ──
+  // Moderator: Trusted and Authorized — 10% dodge
+  if (target.traitActive && target.fighter && target.fighter.id === 'moderator' && !target.isSummon) {
+    if (Math.random() < 0.1) {
+      target.effects.push({ type: 'dodge', timer: 0.4 });
+      if (target.id === localPlayerId) combatLog.push({ text: '🛡 Trusted and Authorized! Dodged!', timer: 2, color: '#54a0ff' });
+      return;
+    }
+  }
+  // Cricket: Toughened Up — 0.9x damage taken
+  if (target.traitActive && target.fighter && target.fighter.id === 'cricket') amount = Math.round(amount * 0.9);
+  // Dragon: Dragon Hide — 0.8x damage taken (negated by D&D Dragon Slayer trait)
+  if (target.traitActive && target.fighter && target.fighter.id === 'dragon' && !target.isSummon) {
+    const attackerIsDnD = attacker && attacker.traitActive && attacker.fighter && attacker.fighter.id === 'dnd';
+    if (!attackerIsDnD) amount = Math.round(amount * 0.8);
+  }
+  // 1X: Shedlesky — 1.5x damage to sword users (Fighter, Napoleon, DnD all races)
+  if (attacker && attacker.traitActive && attacker.fighter && attacker.fighter.id === 'onexonexonex' && target.fighter) {
+    const tid = target.fighter.id;
+    if (tid === 'fighter' || tid === 'napoleon' || tid === 'dnd') amount = Math.round(amount * 1.5);
+  }
+  // Deer: Deer Not Like Evil — bonus damage to specific fighters
+  if (attacker && attacker.traitActive && attacker.fighter && attacker.fighter.id === 'deer' && target.fighter) {
+    const tid = target.fighter.id;
+    if (tid === 'filbus' || tid === 'onexonexonex' || tid === 'noli' || tid === 'dragon') amount = Math.round(amount * 1.5);
+    else if (tid === 'dogtooth' || tid === 'napoleon') amount = Math.round(amount * 1.2);
+  }
+  // Noli: 007n7 — 2x damage to Moderator and Illusion
+  if (attacker && attacker.traitActive && attacker.fighter && attacker.fighter.id === 'noli' && target.fighter) {
+    const tid = target.fighter.id;
+    if (tid === 'moderator' || tid === 'illusion') amount = Math.round(amount * 2);
+  }
+  // Exploding Cat: Cat No Like Evil — bonus damage to specific fighters
+  if (attacker && attacker.traitActive && attacker.fighter && attacker.fighter.id === 'explodingcat' && target.fighter) {
+    const tid = target.fighter.id;
+    if (tid === 'filbus' || tid === 'onexonexonex' || tid === 'noli' || tid === 'dragon') amount = Math.round(amount * 1.5);
+    else if (tid === 'dogtooth' || tid === 'napoleon') amount = Math.round(amount * 1.2);
+  }
+  // D&D: Dragon Slayer — 3x damage to Dragon
+  if (attacker && attacker.traitActive && attacker.fighter && attacker.fighter.id === 'dnd' && target.fighter && target.fighter.id === 'dragon') {
+    amount = Math.round(amount * 3);
+  }
+  // Omori Plot Armour: immunity during 5s window
+  if (target.omoriPlotArmourImmunity > 0) return;
+  // Omori Headspace: attacker deals 50% more, target takes 25% more
+  if (attacker && attacker.omoriHeadspaceActive) amount = Math.round(amount * 1.5);
+  if (target.omoriHeadspaceActive) amount = Math.round(amount * 1.25);
+  // Omori Sad Poem: target deals ¼ dmg (on attacker side) and takes ½ dmg (on target side)
+  if (attacker && attacker.omoriSadTimer > 0) amount = Math.round(amount * 0.25);
+  if (target.omoriSadTimer > 0) amount = Math.round(amount * 0.5);
+  // Ouriel: only enemies can damage Ouriel (not the owner)
+  if (target.isSummon && target.summonType === 'ouriel') {
+    if (attacker && attacker.id === target.summonOwner) return; // owner can't hit own Ouriel
+    target.ourielHitsLeft = (target.ourielHitsLeft || 1) - 1;
+    target.effects.push({ type: 'hit', timer: 0.3 });
+    target.noDamageTimer = 0;
+    if (target.ourielHitsLeft <= 0) {
+      // Convert Ouriel to Room — hostile to owner
+      target.summonType = 'ouriel-room';
+      target.hp = 400;
+      target.maxHp = 400;
+      target.ourielRoomDPS = 20;
+      target.summonSpeed = 1.5;
+      target.effects.push({ type: 'ouriel-transform', timer: 1.5 });
+      const owner = gamePlayers.find(o => o.id === target.summonOwner);
+      if (owner && owner.id === localPlayerId) {
+        combatLog.push({ text: '✝️ Ouriel transformed into Room! (400HP, 20 DPS to you)', timer: 4, color: '#ddd' });
+      }
+    }
+    return; // Ouriel absorbs the hit completely
+  }
+  // Ouriel-Room: only the Dogtooth owner can kill it
+  if (target.isSummon && target.summonType === 'ouriel-room') {
+    if (!attacker || attacker.id !== target.summonOwner) return;
+  }
+  target.hp -= amount;
+  // Reset heal state on damage
+  target.noDamageTimer = 0;
+  target.isHealing = false;
+  target.healTickTimer = 0;
+  target.effects.push({ type: 'hit', timer: 0.3 });
+
+  // Poker debt: attacker landing a hit reduces their debt counter
+  if (attacker && attacker.pokerDebtTarget && attacker.pokerDebtHits > 0) {
+    attacker.pokerDebtHits--;
+    if (attacker.pokerDebtHits <= 0) {
+      attacker.pokerDebtTarget = null;
+      attacker.pokerDebtHits = 0;
+      attacker.effects.push({ type: 'debt-cleared', timer: 1.5 });
+      if (attacker.id === localPlayerId) {
+        combatLog.push({ text: '💰 Debt cleared! You can damage Poker again!', timer: 3, color: '#00ff88' });
+      }
+    }
+  }
+
+  // Filbus: interrupt channeling on damage
+  if (target.isCraftingChair) {
+    target.isCraftingChair = false;
+    target.craftTimer = 0;
+    if (target.id === localPlayerId) {
+      combatLog.push({ text: '🪑 Chair crafting interrupted!', timer: 2, color: '#e94560' });
+    }
+  }
+  if (target.isEatingChair) {
+    target.isEatingChair = false;
+    target.eatTimer = 0;
+    target.eatHealPool = 0;
+    if (target.id === localPlayerId) {
+      combatLog.push({ text: '🪑 Chair eating interrupted!', timer: 2, color: '#e94560' });
+    }
+  }
+
+  // Track damage taken for special unlock (target's counter)
+  target.totalDamageTaken += amount;
+  if (!target.specialUnlocked && !target.specialUsed && target.totalDamageTaken >= getSpecialThreshold(target)) {
+    target.specialUnlocked = true;
+    target.specialGraceTimer = 3;  // 3s grace before decay starts
+    target.specialDecayTimer = 0;
+    if (target.id === localPlayerId) {
+      showPopup('⚡ SPECIAL UNLOCKED! [SPACE] (8s to use!)');
+    }
+  }
+
+  // Track damage dealt for attacker's special unlock too
+  if (attacker && attacker.alive) {
+    attacker.totalDamageTaken += amount;
+    if (!attacker.specialUnlocked && !attacker.specialUsed && attacker.totalDamageTaken >= getSpecialThreshold(attacker)) {
+      attacker.specialUnlocked = true;
+      attacker.specialGraceTimer = 3;
+      attacker.specialDecayTimer = 0;
+      if (attacker.id === localPlayerId) {
+        showPopup('⚡ SPECIAL UNLOCKED! [SPACE] (8s to use!)');
+      }
+    }
+  }
+
+  // Broadcast damage to other clients (skip in host-authoritative — snapshot handles it)
+  if (typeof socket !== 'undefined' && socket.emit && attacker && attacker.id === localPlayerId && !isHostAuthority) {
+    socket.emit('player-damage', { targetId: target.id, amount, attackerId: attacker.id });
+  }
+
+  if (target.hp <= 0) {
+    // Dog Tooth Puppet God: revive on death with half HP (no signal to opponents)
+    if (target.dogtoothPuppetGod && !target.dogtoothPuppetUsed && !target.isSummon) {
+      target.dogtoothPuppetUsed = true;
+      target.hp = Math.floor(target.maxHp * 0.5);
+      target.dogtoothReviveDmgMult = 1.5;
+      // No visible effect to other players — silent revive
+      if (target.id === localPlayerId) {
+        combatLog.push({ text: '💀 Kill The Puppet God! Revived with half HP! (1.5× dmg taken)', timer: 5, color: '#ff4444' });
+      }
+      return; // don't die
+    }
+    // Dogtooth: Self CPR trait — once per game revive with half HP
+    if (target.traitActive && target.fighter && target.fighter.id === 'dogtooth' && !target.isSummon && !target.dogtoothCPRUsed) {
+      target.dogtoothCPRUsed = true;
+      target.hp = Math.floor(target.maxHp * 0.5);
+      target.effects.push({ type: 'self-cpr', timer: 2 });
+      if (target.id === localPlayerId) {
+        combatLog.push({ text: '💓 Self CPR! Revived with half HP!', timer: 5, color: '#ff6b81' });
+      }
+      return; // don't die
+    }
+    // Poker: Dice With The Devil — 10% chance to revive with full HP
+    if (target.traitActive && target.fighter && target.fighter.id === 'poker' && !target.isSummon && !target.pokerDiceUsed) {
+      if (Math.random() < 0.1) {
+        target.pokerDiceUsed = true;
+        target.hp = target.maxHp;
+        target.cdM1 = 0; target.cdE = 0; target.cdR = 0; target.cdT = 0; target.cdF = 0;
+        target.noDamageTimer = 0; target.isHealing = false;
+        target.effects.push({ type: 'poker-dice-revive', timer: 2 });
+        if (target.id === localPlayerId) {
+          combatLog.push({ text: '🎲 Dice With The Devil! Full revive + CDs reset!', timer: 5, color: '#ffd700' });
+        }
+        return; // don't die
+      }
+    }
+    target.hp = 0;
+    target.alive = false;
+    target.effects.push({ type: 'death', timer: 2 });
+    // Filbus: GUBY trait — leave behind a killer TV in team mode
+    if (target.traitActive && target.fighter && target.fighter.id === 'filbus' && !target.isSummon && gameMode === 'teams') {
+      const tvId = 'guby-tv-' + target.id + '-' + Date.now();
+      gamePlayers.push({
+        id: tvId, name: 'GUBY TV', color: '#333',
+        x: target.x, y: target.y, spawnX: target.x, spawnY: target.y,
+        team: target.team, hp: 1, maxHp: 1,
+        fighter: target.fighter, alive: true,
+        isSummon: true, summonOwner: target.id, summonType: 'guby-tv',
+        summonSpeed: 2.5, gubyTimer: 8,
+        cdM1: 0, cdE: 0, cdR: 0, cdT: 0, cdF: 0, move4Uses: 0,
+        totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+        specialGraceTimer: 0, specialDecayTimer: 0,
+        supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+        noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+        specialJumping: false, specialAiming: false,
+        effects: [{ type: 'guby-spawn', timer: 1.5 }],
+        poisonTimers: [], traitActive: false,
+        aiState: { thinkTimer: 0, attackTarget: null, retreating: false },
+      });
+      if (target.id === localPlayerId) {
+        combatLog.push({ text: '📺 GUBY TV deployed!', timer: 3, color: '#a29bfe' });
+      }
+    }
+    // Achievement: summon kill in multiplayer (not team mode)
+    if (viaSummon && attacker && attacker.id === localPlayerId && !target.isSummon && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard' && gameMode !== 'teams') {
+      if (typeof trackSummonKillMP === 'function') trackSummonKillMP();
+      // Filbus oddity kill in MP
+      if (attacker.fighter && attacker.fighter.id === 'filbus' && typeof trackFilbusOddityKill === 'function') {
+        trackFilbusOddityKill();
+      }
+    }
+    // Achievement: 1X kill tracking (not team mode)
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'onexonexonex' && !target.isSummon && target.fighter && gameMode !== 'teams') {
+      // Kill Noli in MP
+      if (target.fighter.id === 'noli' && gameMode !== 'training' && gameMode !== 'fight' && gameMode !== 'fight-hard' && gameMode !== 'teams') {
+        if (typeof trackOnexKilledNoliMP === 'function') trackOnexKilledNoliMP();
+      }
+      // Kill Cat in SP
+      if (target.fighter.id === 'explodingcat' && (gameMode === 'fight' || gameMode === 'fight-hard')) {
+        if (typeof trackOnexKilledCatSP === 'function') trackOnexKilledCatSP();
+      }
+    }
+    // Achievement: Deer water kill (not team mode)
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'deer' && !target.isSummon && gameMode !== 'teams') {
+      const aTileR = Math.floor(attacker.y / GAME_TILE);
+      const aTileC = Math.floor(attacker.x / GAME_TILE);
+      let nearWater = false;
+      for (let dr = -1; dr <= 1 && !nearWater; dr++) {
+        for (let dc = -1; dc <= 1 && !nearWater; dc++) {
+          const r = aTileR + dr, c = aTileC + dc;
+          if (r >= 0 && r < gameMap.rows && c >= 0 && c < gameMap.cols && gameMap.tiles[r][c] === TILE.WATER) {
+            nearWater = true;
+          }
+        }
+      }
+      if (nearWater && typeof trackDeerWaterKill === 'function') trackDeerWaterKill();
+    }
+    // Achievement: Napoleon unlock — M1 kills (not team mode)
+    if (attacker && attacker.id === localPlayerId && !target.isSummon && _lastDealDamageWasM1 && gameMode !== 'teams') {
+      if (typeof trackNapoleonM1Kill === 'function') trackNapoleonM1Kill();
+    }
+    // Achievement: Napoleon unlock — track summon kills for win-with-summon (not team mode)
+    if (viaSummon && attacker && attacker.id === localPlayerId && !target.isSummon && gameMode !== 'teams') {
+      _hadSummonKillThisGame = true;
+    }
+    // Achievement: Filbus boiled one kills (not team mode)
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'filbus' && attacker.boiledOneActive && !target.isSummon && gameMode !== 'teams') {
+      _filbusBoiledKillsThisGame++;
+      if (_filbusBoiledKillsThisGame >= 2 && typeof trackFilbusBoiledKill === 'function') {
+        trackFilbusBoiledKill();
+      }
+    }
+    // Achievement: Dragon Beam kills in a single game (not team mode)
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'dragon' && attacker.dragonBeamFiring && !target.isSummon && gameMode !== 'teams') {
+      _dragonBeamKillsThisGame++;
+      if (_dragonBeamKillsThisGame >= 2 && typeof trackDragonBeamAch === 'function') {
+        trackDragonBeamAch();
+      }
+    }
+    // Achievement: Illusion invisible kills (not team mode)
+    if (attacker && attacker.id === localPlayerId && attacker.fighter && attacker.fighter.id === 'illusion' && !target.isSummon && gameMode !== 'teams'
+        && (attacker.illusionInvisTimer > 0 || attacker.illusionSpecialInvis)) {
+      if (typeof trackIllusionInvisKill === 'function') trackIllusionInvisKill();
+    }
+    // Init spectator camera if local player died
+    if (target.id === localPlayerId) {
+      freeCamX = target.x;
+      freeCamY = target.y;
+      spectateIndex = -1;
+      deathOverlayTimer = 0;
+    }
+    // Clean up backrooms if target was in backrooms
+    if (target.inBackrooms) {
+      _exitBackrooms(target, 'died');
+    }
+    // Clean up alternate if target had one
+    if (target.hasAlternate && target.alternateId) {
+      const alt = gamePlayers.find(a => a.id === target.alternateId);
+      if (alt && alt.alive) {
+        alt.alive = false; alt.hp = 0;
+        alt.effects.push({ type: 'death', timer: 2 });
+      }
+      target.hasAlternate = false;
+      target.alternateId = null;
+    }
+    // Training dummy respawn after 3 seconds
+    if (target.id === 'dummy' && gameMode === 'training') {
+      dummyRespawnTimer = 3;
+    }
+    // Summon death: clear owner's summonId
+    if (target.isSummon) {
+      const owner = gamePlayers.find(p => p.id === target.summonOwner);
+      if (owner && owner.summonId === target.id) {
+        owner.summonId = null;
+      }
+      // Deer robot death: clear reference, apply 30s M1 cooldown
+      if (target.summonType === 'deer-robot' && owner) {
+        if (owner.deerRobotId === target.id) owner.deerRobotId = null;
+        owner.cdM1 = 30;
+        combatLog.push({ text: '🤖 Robot died!', timer: 3, color: '#ff4444' });
+      }
+      // Coolkidd death: clear reference
+      if (target.summonType === 'coolkidd' && owner) {
+        if (owner.coolkiddId === target.id) owner.coolkiddId = null;
+      }
+      // Bowler death: clear reference
+      if (target.summonType === 'bowler' && owner) {
+        if (owner.bowlerId === target.id) owner.bowlerId = null;
+      }
+      // Crab death: clear from owner's crabIds array
+      if (target.summonType === 'crab' && owner && owner.crabIds) {
+        const cidx = owner.crabIds.indexOf(target.id);
+        if (cidx >= 0) owner.crabIds.splice(cidx, 1);
+      }
+      // John Doe death: clear reference
+      if (target.summonType === 'johndoe' && owner) {
+        if (owner.johnDoeId === target.id) owner.johnDoeId = null;
+      }
+      // Unicorn death: clear catUnicornId
+      if ((target.summonType === 'destructive-unicorn' || target.summonType === 'queenbee-unicorn' || target.summonType === 'seductive-unicorn') && owner) {
+        if (owner.catUnicornId === target.id) owner.catUnicornId = null;
+      }
+      // Cricket Trophy death: remove cricket's shield
+      if (target.summonType === 'cricket-trophy' && owner) {
+        if (owner.cricketTrophyId === target.id) {
+          owner.cricketTrophyId = null;
+          owner.cricketTrophyShield = false;
+          owner.effects.push({ type: 'trophy-destroyed', timer: 2.0 });
+          if (owner.id === localPlayerId) {
+            combatLog.push({ text: '🏆 Trophy destroyed! Shield lost!', timer: 4, color: '#ff4444' });
+          }
+        }
+      }
+      // Filbus dinosaur death: remove from owner's filbusDinoIds
+      if (target.summonType === 'filbus-dino' && owner && owner.filbusDinoIds) {
+        const didx = owner.filbusDinoIds.indexOf(target.id);
+        if (didx >= 0) owner.filbusDinoIds.splice(didx, 1);
+      }
+      // 1X Slasher death: clear reference
+      if (target.summonType === 'slasher' && owner) {
+        if (owner.onexSlasherId === target.id) owner.onexSlasherId = null;
+      }
+      // Guest666 death: clear reference
+      if (target.summonType === 'guest666' && owner) {
+        if (owner.noliGuest666Id === target.id) owner.noliGuest666Id = null;
+      }
+      // Imploding Kitten death: clear reference
+      if (target.summonType === 'imploding-kitten' && owner) {
+        if (owner.catImplodingKittenId === target.id) owner.catImplodingKittenId = null;
+      }
+      // Napoleon power cannon death
+      if (target.summonType === 'napoleon-power-cannon' && owner && owner.napoleonPowerCannonIds) {
+        const idx = owner.napoleonPowerCannonIds.indexOf(target.id);
+        if (idx >= 0) owner.napoleonPowerCannonIds.splice(idx, 1);
+      }
+      // Napoleon cavalry death
+      if (target.summonType === 'napoleon-cavalry' && owner && owner.napoleonCavalryIds) {
+        const idx = owner.napoleonCavalryIds.indexOf(target.id);
+        if (idx >= 0) owner.napoleonCavalryIds.splice(idx, 1);
+      }
+      // Dragon summon2 death (Double Trouble)
+      if ((target.summonType === 'dragon-ochre' || target.summonType === 'dragon-lich') && owner && owner.dragonSummonId2 === target.id) {
+        owner.dragonSummonId2 = null;
+      }
+      // Alternate death: free the original player
+      if (target.summonType === 'alternate') {
+        const prey = target.summonTargetId ? gamePlayers.find(t => t.id === target.summonTargetId) : null;
+        if (prey) {
+          prey.hasAlternate = false;
+          prey.alternateId = null;
+          prey.effects.push({ type: 'alternate-end', timer: 1.5 });
+          if (prey.id === localPlayerId) {
+            combatLog.push({ text: '✅ Your Alternate was destroyed! You are visible again.', timer: 4, color: '#2ecc71' });
+          }
+        }
+      }
+      // Backrooms chaser death: shouldn't normally happen (invincible) but clean up
+      if (target.summonType === 'backrooms-chaser') {
+        const prey = target.summonTargetId ? gamePlayers.find(t => t.id === target.summonTargetId) : null;
+        if (prey && prey.inBackrooms) {
+          _exitBackrooms(prey, 'escaped');
+        }
+      }
+      // D&D Orc death: GP only if killed by the owner; stolen if another campaigner kills it
+      if (target.summonType === 'dnd-orc' && owner) {
+        if (owner.dndOrcIds) {
+          const idx = owner.dndOrcIds.indexOf(target.id);
+          if (idx >= 0) owner.dndOrcIds.splice(idx, 1);
+        }
+        if (attacker && attacker.id === owner.id) {
+          // Owner killed their own orc — award GP
+          owner.dndGP = (owner.dndGP || 0) + 1;
+          if (owner.id === localPlayerId) {
+            combatLog.push({ text: '🪙 +1 GP! (Total: ' + owner.dndGP + ')', timer: 3, color: '#ffd700' });
+          }
+        } else if (attacker && !attacker.isSummon && attacker.fighter && attacker.fighter.id === 'dnd') {
+          // Another D&D Campaigner killed the orc — they steal the GP
+          attacker.dndGP = (attacker.dndGP || 0) + 1;
+          if (attacker.id === localPlayerId) {
+            combatLog.push({ text: '🪙 Quest stolen from ' + (owner.name || 'enemy') + '! +1 GP! (Total: ' + attacker.dndGP + ')', timer: 4, color: '#ffd700' });
+          }
+          if (owner.id === localPlayerId) {
+            combatLog.push({ text: '⚠️ Quest was stolen by ' + (attacker.name || 'enemy') + '!', timer: 4, color: '#ff4444' });
+          }
+        } else {
+          // Someone else (not a campaigner) killed the orc — no GP
+          if (owner.id === localPlayerId) {
+            combatLog.push({ text: "⚠️ You couldn't finish the quest!", timer: 4, color: '#ff4444' });
+          }
+        }
+      }
+      // D&D Zombie death: clear from gamePlayers (no GP reward)
+      if (target.summonType === 'dnd-zombie') {
+        // No special cleanup needed — just dies
+      }
+    }
+    // Owner death: clear summon reference (summon cleanup in updateSummons)
+    if (target.summonId) {
+      const summon = gamePlayers.find(p => p.id === target.summonId);
+      if (summon && summon.alive) {
+        summon.alive = false;
+        summon.hp = 0;
+        summon.effects.push({ type: 'death', timer: 2 });
+      }
+      target.summonId = null;
+    }
+    // Napoleon death: immediately kill all Napoleon summons
+    if (target.napoleonCannonId) {
+      const c = gamePlayers.find(p => p.id === target.napoleonCannonId);
+      if (c && c.alive) { c.alive = false; c.hp = 0; c.effects.push({ type: 'death', timer: 2 }); }
+      target.napoleonCannonId = null;
+    }
+    if (target.napoleonWallId) {
+      const w = gamePlayers.find(p => p.id === target.napoleonWallId);
+      if (w && w.alive) { w.alive = false; w.hp = 0; w.effects.push({ type: 'death', timer: 2 }); }
+      target.napoleonWallId = null;
+    }
+    if (target.napoleonInfantryIds && target.napoleonInfantryIds.length > 0) {
+      for (const iid of target.napoleonInfantryIds) {
+        const inf = gamePlayers.find(p => p.id === iid);
+        if (inf && inf.alive) { inf.alive = false; inf.hp = 0; inf.effects.push({ type: 'death', timer: 2 }); }
+      }
+      target.napoleonInfantryIds = [];
+    }
+    // D&D death: kill orcs/zombies/sidekick owned by the dead player
+    if (target.dndOrcIds && target.dndOrcIds.length > 0) {
+      for (const oid of target.dndOrcIds) {
+        const orc = gamePlayers.find(p => p.id === oid);
+        if (orc && orc.alive) { orc.alive = false; orc.hp = 0; orc.effects.push({ type: 'death', timer: 2 }); }
+      }
+      target.dndOrcIds = [];
+    }
+    if (target.dndSidekickId) {
+      const sk = gamePlayers.find(p => p.id === target.dndSidekickId);
+      if (sk && sk.alive) { sk.alive = false; sk.hp = 0; sk.effects.push({ type: 'death', timer: 2 }); }
+      target.dndSidekickId = null;
+    }
+    // Dragon death: kill summon
+    if (target.dragonSummonId) {
+      const ds = gamePlayers.find(p => p.id === target.dragonSummonId);
+      if (ds && ds.alive) { ds.alive = false; ds.hp = 0; ds.effects.push({ type: 'death', timer: 2 }); }
+      target.dragonSummonId = null;
+    }
+    // Dragon/Draconic Roar: ANY death clears roar buffs for ALL players
+    for (const dp of gamePlayers) {
+      if (dp.dragonRoarActive) {
+        dp.dragonRoarActive = false;
+        if (dp.id === localPlayerId) {
+          combatLog.push({ text: '🐉 Roar buff ended — someone died!', timer: 3, color: '#5b8fa8' });
+        }
+      }
+    }
+    // D&D D20: ANY death clears the D20 buff for ALL players (unless Super Lucky deaths remaining)
+    for (const dp of gamePlayers) {
+      if (dp.dndD20Active) {
+        if (dp.dndD20DeathsRemaining > 0) {
+          dp.dndD20DeathsRemaining--;
+          if (dp.id === localPlayerId) {
+            combatLog.push({ text: '🎲 Super Lucky! D20 buff survives (' + dp.dndD20DeathsRemaining + ' deaths left)!', timer: 3, color: '#ffd700' });
+          }
+        } else {
+          dp.dndD20Active = false;
+          if (dp.id === localPlayerId) {
+            combatLog.push({ text: '🎲 D20 buff ended — someone died!', timer: 3, color: '#ff6600' });
+          }
+        }
+      }
+    }
+    // Moderator Bug Fixing: clear disabled abilities on all players when someone dies
+    for (const p of gamePlayers) {
+      if (p.modDisabledAbilities && p.modDisabledAbilities.length > 0) {
+        p.modDisabledAbilities = [];
+        if (p.id === localPlayerId) {
+          combatLog.push({ text: '🔧 Bug fixes cleared — someone died!', timer: 3, color: '#2ecc71' });
+        }
+      }
+    }
+    // Tell server this player died + queue respawn (centralized handler)
+    if (!target.isSummon) {
+      _emitDeathAndQueueRespawn(target, attacker);
+    }
+
+    // ── Unstable trait: on ANY death, all Unstable players swap to a random character ──
+    // Their special is replaced with "Unstablism" (switch back to Unstable)
+    const _unstableSwapFighters = getAllFighterIds().filter(f => f !== 'unstable' && f !== 'moderator' && f !== 'omori');
+    for (const up of gamePlayers) {
+      if (!up.alive || up.isSummon) continue;
+      if (!up.unstableOriginalFighter) continue; // not an Unstable player
+      // Pick a random fighter to become
+      const newFid = _unstableSwapFighters[Math.floor(Math.random() * _unstableSwapFighters.length)];
+      const newFighter = getFighter(newFid);
+      up.fighter = newFighter;
+      // Keep HP as-is but cap to new maxHp
+      up.maxHp = newFighter.hp;
+      if (up.hp > up.maxHp) up.hp = up.maxHp;
+      // Reset cooldowns for new character
+      up.cdE = 0; up.cdR = 0; up.cdT = 0;
+      // Reset special: give them a new special unlock chance but mark it as "unstablism"
+      up.specialUnlocked = true;
+      up.specialUsed = false;
+      up.specialGraceTimer = 999; // no decay — they keep it
+      up.specialDecayTimer = 0;
+      up.unstableSwapped = true; // flag: special = switch back to Unstable
+      up.effects.push({ type: 'unstable-swap', timer: 2.0 });
+      if (up.id === localPlayerId) {
+        combatLog.push({ text: '⚡ UNSTABLE! Swapped to ' + newFighter.name + '! [SPACE] to switch back.', timer: 5, color: '#ff00ff' });
+      }
+    }
+  }
+}
+
+// Apply damage received from another client
+function onRemoteDamage(targetId, amount) {
+  const target = gamePlayers.find((p) => p.id === targetId);
+  if (!target || !target.alive) return;
+  target.hp -= amount;
+  target.noDamageTimer = 0;
+  target.isHealing = false;
+  target.healTickTimer = 0;
+  target.effects.push({ type: 'hit', timer: 0.3 });
+  // Interrupt channels on the local player when hit by remote attacker
+  if (target.id === localPlayerId) {
+    if (target.isCraftingChair) {
+      target.isCraftingChair = false;
+      target.craftTimer = 0;
+      combatLog.push({ text: '🪑 Chair crafting interrupted!', timer: 2, color: '#e94560' });
+    }
+    if (target.isEatingChair) {
+      target.isEatingChair = false;
+      target.eatTimer = 0;
+      target.eatHealPool = 0;
+      combatLog.push({ text: '🪑 Chair eating interrupted!', timer: 2, color: '#e94560' });
+    }
+  }
+  target.totalDamageTaken += amount;
+  if (!target.specialUnlocked && target.totalDamageTaken >= getSpecialThreshold(target)) {
+    target.specialUnlocked = true;
+    if (target.id === localPlayerId) {
+      showPopup('⚡ SPECIAL UNLOCKED! [SPACE]');
+    }
+  }
+  if (target.hp <= 0) {
+    target.hp = 0;
+    target.alive = false;
+    target.effects.push({ type: 'death', timer: 2 });
+    // Init spectator camera if local player died
+    if (target.id === localPlayerId) {
+      freeCamX = target.x;
+      freeCamY = target.y;
+      spectateIndex = -1;
+      deathOverlayTimer = 0;
+    }
+  }
+}
+
+function onRemoteKnockback(targetId, x, y) {
+  const target = gamePlayers.find((p) => p.id === targetId);
+  if (target) {
+    target.x = x; target.y = y;
+    // Also snap the interpolation target so it doesn't lerp back to old position
+    target._targetX = x; target._targetY = y;
+  }
+}
+
+function onZoneSync(newInset, newTimer) {
+  zoneInset = newInset;
+  zoneTimer = newTimer;
+  // Back-calculate what zonePhaseStart would be for this timer value
+  zonePhaseStart = Date.now() - (ZONE_INTERVAL - newTimer) * 1000;
+}
+
+function onGameOver(winnerId, winnerName, winningTeam, isRespawnMode, t1Kills, t2Kills) {
+  gameRunning = false;
+  _gameEnded = true;
+  const cw = gameCanvas.width;
+  const ch = gameCanvas.height;
+  gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+  gameCtx.fillRect(0, 0, cw, ch);
+
+  // Respawn mode: show kill scores
+  if (isRespawnMode && winningTeam) {
+    const myTeam = localPlayer ? localPlayer.team : null;
+    const isMyTeam = myTeam === winningTeam;
+    gameCtx.fillStyle = isMyTeam ? '#2ecc71' : '#e94560';
+    gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText(isMyTeam ? 'TEAM VICTORY!' : 'TEAM DEFEATED', cw / 2, ch / 2 - 80);
+    gameCtx.fillStyle = '#fff';
+    gameCtx.font = 'bold 16px "Press Start 2P", monospace';
+    gameCtx.fillText('Team 1: ' + (t1Kills || 0) + ' kills  |  Team 2: ' + (t2Kills || 0) + ' kills', cw / 2, ch / 2 - 35);
+    gameCtx.fillText('Team ' + winningTeam + ' wins!', cw / 2, ch / 2);
+    if (isMyTeam && typeof trackTeamWin === 'function') {
+      trackTeamWin(localPlayer ? localPlayer.fighter.id : selectedFighterId);
+    }
+    _showPlayAgainOverlay();
+    return;
+  }
+  if (isRespawnMode && !winningTeam) {
+    gameCtx.fillStyle = '#f5a623';
+    gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText('DRAW!', cw / 2, ch / 2 - 80);
+    gameCtx.fillStyle = '#fff';
+    gameCtx.font = 'bold 16px "Press Start 2P", monospace';
+    gameCtx.fillText('Team 1: ' + (t1Kills || 0) + ' kills  |  Team 2: ' + (t2Kills || 0) + ' kills', cw / 2, ch / 2 - 35);
+    _showPlayAgainOverlay();
+    return;
+  }
+
+  // Team mode win
+  if (winningTeam) {
+    const myTeam = localPlayer ? localPlayer.team : null;
+    const isMyTeam = myTeam === winningTeam;
+    gameCtx.fillStyle = isMyTeam ? '#2ecc71' : '#e94560';
+    gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText(isMyTeam ? 'TEAM VICTORY!' : 'TEAM DEFEATED', cw / 2, ch / 2 - 80);
+    gameCtx.fillStyle = '#fff';
+    gameCtx.font = 'bold 16px "Press Start 2P", monospace';
+    gameCtx.fillText('Team ' + winningTeam + ' wins!', cw / 2, ch / 2 - 35);
+    if (isMyTeam && typeof trackTeamWin === 'function') {
+      trackTeamWin(localPlayer ? localPlayer.fighter.id : selectedFighterId);
+    }
+    _showPlayAgainOverlay();
+    return;
+  }
+
+  if (winnerId) {
+    const isMe = winnerId === localPlayerId;
+    gameCtx.fillStyle = isMe ? '#2ecc71' : '#e94560';
+    gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText(isMe ? 'VICTORY!' : 'DEFEATED', cw / 2, ch / 2 - 80);
+    gameCtx.fillStyle = '#fff';
+    gameCtx.font = 'bold 16px "Press Start 2P", monospace';
+    gameCtx.fillText((winnerName || 'Someone') + ' wins!', cw / 2, ch / 2 - 35);
+    // Achievement tracking: multiplayer win
+    if (isMe && typeof trackMPWin === 'function') {
+      trackMPWin(localPlayer ? localPlayer.fighter.id : selectedFighterId);
+      // Check deer restricted win (only M1, T/Spear, SPACE/IGLOO used)
+      if (localPlayer && localPlayer.fighter.id === 'deer' && typeof trackDeerRestrictedWin === 'function') {
+        const forbidden = new Set(['E', 'R']);
+        let usedForbidden = false;
+        for (const k of usedAbilityKeys) {
+          if (forbidden.has(k)) { usedForbidden = true; break; }
+        }
+        if (!usedForbidden) trackDeerRestrictedWin();
+      }
+      // Poker: win without using special
+      if (localPlayer && localPlayer.fighter.id === 'poker' && !localPlayer.specialUsed && typeof trackPokerNoSpecialWin === 'function') {
+        trackPokerNoSpecialWin();
+      }
+      // Napoleon unlock: win a battle with a summon
+      if (_hadSummonKillThisGame && typeof trackNapoleonSummonWin === 'function') {
+        trackNapoleonSummonWin();
+      }
+      // Moderator achievement: win one game as moderator
+      if (localPlayer && localPlayer.fighter.id === 'moderator' && typeof trackModWin === 'function') {
+        trackModWin();
+      }
+      // D&D achievement: track race win
+      if (localPlayer && localPlayer.fighter.id === 'dnd' && typeof trackDndRaceWin === 'function') {
+        trackDndRaceWin(localPlayer.dndRace || 'human');
+      }
+    }
+  } else {
+    gameCtx.fillStyle = '#f5a623';
+    gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText('DRAW', cw / 2, ch / 2 - 60);
+  }
+  _showPlayAgainOverlay();
+}
+
+function onRemoteDeath(playerId) {
+  const p = gamePlayers.find((pl) => pl.id === playerId);
+  if (p) {
+    p.alive = false;
+    p.hp = 0;
+    p.effects.push({ type: 'death', timer: 2 });
+  }
+}
+
+// Respawn mode: schedule a player to respawn after a delay
+let _respawnQueue = []; // [{playerId, timer}]
+function onPlayerRespawn(playerId, delay) {
+  // Host queues respawns directly in _emitDeathAndQueueRespawn; skip server echo
+  if (isHostAuthority) return;
+  _respawnQueue.push({ playerId, timer: delay || 3 });
+}
+
+function processRespawnQueue(dt) {
+  if (!respawnMode) return;
+  for (let i = _respawnQueue.length - 1; i >= 0; i--) {
+    _respawnQueue[i].timer -= dt;
+    if (_respawnQueue[i].timer <= 0) {
+      const pid = _respawnQueue[i].playerId;
+      _respawnQueue.splice(i, 1);
+      // Find player and respawn them
+      const p = gamePlayers.find(pl => pl.id === pid);
+      if (!p) continue;
+      // Find a random walkable spawn position
+      const walkable = [];
+      for (let r = 0; r < gameMap.rows; r++) {
+        for (let c = 0; c < gameMap.cols; c++) {
+          if (gameMap.tiles[r][c] === 0) walkable.push({ r, c });
+        }
+      }
+      if (walkable.length === 0) continue;
+      const sp = walkable[Math.floor(Math.random() * walkable.length)];
+      p.x = sp.c * GAME_TILE + GAME_TILE / 2;
+      p.y = sp.r * GAME_TILE + GAME_TILE / 2;
+      p.alive = true;
+      p.hp = p.maxHp;
+      p.stunTimer = 0;
+      p.stunned = 0;
+      p.effects = [];
+      p.specialUsed = false;
+      p.specialUnlocked = false;
+      p.totalDamageTaken = 0;
+      p.totalDamageDealt = 0;
+      p.bleedTimers = [];
+      // Reset limited-use abilities
+      p.move4Uses = 0;
+      p.dogtoothFUsed = false;
+      p.dogtoothPuppetUsed = false;
+      p.dogtoothMoonUsed = false;
+      p.dogtoothForceMoon = false;
+      p.dogtoothPuppetGod = false;
+      p.dogtoothSpecialChoice = null;
+      p.dogtoothChoiceTimer = 0;
+      p.noliObservantUses = 0;
+      p.modServerResetUses = 0;
+      p.dndD20Active = false;
+      p.dndGP = 0;
+      p.dndWeaponBonus = 0;
+      p.dndCharm = false;
+      p.pokerDebtTarget = null;
+      p.pokerDebtHits = 0;
+      p.pokerFullHouseActive = false;
+      p.catCards = 0;
+      p.catStolenAbil = null;
+      p.catStolenReady = false;
+      p.catAttackBuff = 0;
+      p.catNopeTimer = 0;
+      p.catNopeAbility = null;
+      // Reset cooldowns
+      p.cdM1 = 0; p.cdE = 0; p.cdR = 0; p.cdT = 0; p.cdF = 0;
+      // Clear summon references
+      p.onexSlasherId = null;
+      p.noliGuest666Id = null;
+      p.catImplodingKittenId = null;
+      p.napoleonPowerCannonIds = [];
+      p.napoleonCavalryIds = [];
+      p.dragonSummonId2 = null;
+      p.catKittenIds = [];
+      p.catUnicornId = null;
+      p.dndOrcIds = [];
+      p.dndSidekickId = null;
+      p.napoleonCannonId = null;
+      p.napoleonWallId = null;
+      p.napoleonInfantryIds = [];
+      p.dragonSummonId = null;
+      p.dogtoothOurielId = null;
+      p.dogtoothOurielHp = null;
+      p.dogtoothOurielHitsLeft = null;
+      // Reset active states
+      p.napoleonCavalry = false;
+      p.dragonFlying = false;
+      p.dragonBreathActive = false;
+      p.dragonBeamCharging = false;
+      p.dragonBeamFiring = false;
+      p.dragonRoarActive = false;
+      p.noliVoidRushActive = false;
+      // Heavy Rope state reset
+      p.ropeSwingActive = false;
+      p.ropeGripActive = false;
+      p.ropeGrabActive = false;
+      p.ropePowerTimer = 0;
+      p.ropePowerHit = {};
+      p.ropeSwingNx = 0;
+      p.ropeSwingNy = 0;
+      p.ropeGrabNx = 0;
+      p.ropeGrabNy = 0;
+      p.ropeSecondGripTimer = 0;
+      p.inBackrooms = false;
+      p.hasAlternate = false;
+      p.dogtoothInComplex = false;
+      p.isCraftingChair = false;
+      p.isEatingChair = false;
+      p.bhTrapped = false;
+      p.bhZone = null;
+      p.bhSlow = 0;
+      if (p.id === localPlayerId) {
+        combatLog.push({ text: '💫 Respawned!', timer: 3, color: '#2ecc71' });
+      }
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RENDER
+// ═══════════════════════════════════════════════════════════════
+function renderGame() {
+  const cw = gameCanvas.width;
+  const ch = gameCanvas.height;
+  gameCtx.clearRect(0, 0, cw, ch);
+
+  if (!localPlayer) return;
+
+  // Camera: follow alive player, or spectator target, or free cam
+  let camX, camY;
+  if (localPlayer.alive) {
+    camX = localPlayer.x - cw / 2;
+    camY = localPlayer.y - ch / 2;
+  } else if (spectateIndex >= 0 && gamePlayers[spectateIndex] && gamePlayers[spectateIndex].alive) {
+    camX = gamePlayers[spectateIndex].x - cw / 2;
+    camY = gamePlayers[spectateIndex].y - ch / 2;
+  } else {
+    camX = freeCamX - cw / 2;
+    camY = freeCamY - ch / 2;
+  }
+
+  // Screen shake
+  if (screenShakeTimer > 0) {
+    screenShakeTimer -= wallDt;
+    const shakeIntensity = Math.min(screenShakeTimer, 1) * 6;
+    camX += (Math.random() - 0.5) * shakeIntensity;
+    camY += (Math.random() - 0.5) * shakeIntensity;
+  }
+
+  // Tiles
+  const startCol = Math.floor(camX / GAME_TILE) - 1;
+  const endCol   = Math.ceil((camX + cw) / GAME_TILE) + 1;
+  const startRow = Math.floor(camY / GAME_TILE) - 1;
+  const endRow   = Math.ceil((camY + ch) / GAME_TILE) + 1;
+
+  const _dtInComplex = localPlayer && localPlayer.dogtoothInComplex;
+  for (let r = startRow; r <= endRow; r++) {
+    for (let c = startCol; c <= endCol; c++) {
+      const screenX = c * GAME_TILE - camX;
+      const screenY = r * GAME_TILE - camY;
+
+      if (_dtInComplex) {
+        // Final Battle: all tiles plain white
+        gameCtx.fillStyle = '#fff';
+        gameCtx.fillRect(screenX, screenY, GAME_TILE, GAME_TILE);
+        // Background black stripes on tiles (static pattern based on column)
+        const stripeHash = ((c * 7919 + r * 104729) & 0xFFFFFF);
+        if ((stripeHash & 3) === 0) { // ~25% of tiles get a stripe
+          const stripeW = 2 + (stripeHash >> 4) % 4;
+          const stripeOff = (stripeHash >> 8) % Math.max(1, (GAME_TILE - stripeW));
+          gameCtx.fillStyle = 'rgba(0, 0, 0, 0.12)';
+          gameCtx.fillRect(screenX + stripeOff, screenY, stripeW, GAME_TILE);
+        }
+      } else if (r < 0 || r >= gameMap.rows || c < 0 || c >= gameMap.cols) {
+        drawWater(gameCtx, screenX, screenY, GAME_TILE, Math.abs(r), Math.abs(c));
+      } else {
+        const tile = gameMap.tiles[r][c];
+        drawGround(gameCtx, screenX, screenY, GAME_TILE);
+        if (tile === TILE.GRASS) {
+          if (localPlayer && localPlayer.illusionSeeGrassTimer > 0) gameCtx.globalAlpha = 0.3;
+          drawGrass(gameCtx, screenX, screenY, GAME_TILE, r, c);
+          if (localPlayer && localPlayer.illusionSeeGrassTimer > 0) gameCtx.globalAlpha = 1.0;
+        }
+        else if (tile === TILE.ROCK) drawRock(gameCtx, screenX, screenY, GAME_TILE);
+        else if (tile === TILE.WATER) drawWater(gameCtx, screenX, screenY, GAME_TILE, r, c);
+      }
+    }
+  }
+
+  // ── Apple Tree rendering ──────────────────────────────────
+  if (appleTree) {
+    const treeScreenX = appleTree.col * GAME_TILE - camX;
+    const treeScreenY = appleTree.row * GAME_TILE - camY;
+    const ts = GAME_TILE; // tile size
+    const tw = ts * 2;    // tree width (2 tiles)
+    const th = ts * 2;    // tree height (2 tiles)
+
+    if (appleTree.alive) {
+      // ── Trunk ──
+      const trunkW = tw * 0.22;
+      const trunkH = th * 0.45;
+      const trunkX = treeScreenX + tw / 2 - trunkW / 2;
+      const trunkY = treeScreenY + th - trunkH;
+
+      // Trunk shadow
+      gameCtx.fillStyle = 'rgba(0,0,0,0.18)';
+      gameCtx.beginPath();
+      gameCtx.ellipse(treeScreenX + tw / 2, treeScreenY + th - 2, tw * 0.35, th * 0.08, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+
+      // Trunk body
+      gameCtx.fillStyle = '#6b3e26';
+      gameCtx.fillRect(trunkX, trunkY, trunkW, trunkH);
+      // Bark texture lines
+      gameCtx.strokeStyle = '#4a2a18';
+      gameCtx.lineWidth = 1;
+      for (let i = 0; i < 4; i++) {
+        const bx = trunkX + trunkW * (0.2 + Math.random() * 0.6);
+        gameCtx.beginPath();
+        gameCtx.moveTo(bx, trunkY + trunkH * 0.1 + i * trunkH * 0.2);
+        gameCtx.lineTo(bx + (Math.random() - 0.5) * 3, trunkY + trunkH * 0.3 + i * trunkH * 0.2);
+        gameCtx.stroke();
+      }
+      // Trunk highlight
+      gameCtx.fillStyle = '#8b5a3a';
+      gameCtx.fillRect(trunkX + trunkW * 0.6, trunkY, trunkW * 0.15, trunkH);
+
+      // ── Canopy (multiple layered circles for a full, bushy look) ──
+      const cx = treeScreenX + tw / 2;
+      const cy = treeScreenY + th * 0.35;
+      const canopyR = tw * 0.42;
+
+      // Dark shadow layer
+      gameCtx.fillStyle = '#1e6b1e';
+      gameCtx.beginPath();
+      gameCtx.arc(cx, cy + canopyR * 0.15, canopyR * 1.05, 0, Math.PI * 2);
+      gameCtx.fill();
+
+      // Main canopy
+      gameCtx.fillStyle = '#2d8c2d';
+      gameCtx.beginPath();
+      gameCtx.arc(cx, cy, canopyR, 0, Math.PI * 2);
+      gameCtx.fill();
+
+      // Leaf clusters (overlapping arcs for depth)
+      gameCtx.fillStyle = '#3aad3a';
+      const clusters = [
+        { dx: -canopyR * 0.45, dy: -canopyR * 0.2, r: canopyR * 0.55 },
+        { dx: canopyR * 0.4, dy: -canopyR * 0.15, r: canopyR * 0.5 },
+        { dx: -canopyR * 0.2, dy: -canopyR * 0.5, r: canopyR * 0.45 },
+        { dx: canopyR * 0.15, dy: -canopyR * 0.45, r: canopyR * 0.4 },
+        { dx: 0, dy: canopyR * 0.25, r: canopyR * 0.5 },
+      ];
+      for (const cl of clusters) {
+        gameCtx.beginPath();
+        gameCtx.arc(cx + cl.dx, cy + cl.dy, cl.r, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+
+      // Bright highlights (top)
+      gameCtx.fillStyle = '#4fc44f';
+      gameCtx.beginPath();
+      gameCtx.arc(cx - canopyR * 0.15, cy - canopyR * 0.45, canopyR * 0.3, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.arc(cx + canopyR * 0.25, cy - canopyR * 0.35, canopyR * 0.22, 0, Math.PI * 2);
+      gameCtx.fill();
+
+      // Canopy outline
+      gameCtx.strokeStyle = 'rgba(0,0,0,0.2)';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.arc(cx, cy, canopyR * 1.02, 0, Math.PI * 2);
+      gameCtx.stroke();
+
+      // ── Tree HP bar ──
+      if (appleTree.hp < appleTree.maxHp) {
+        const barW = tw * 0.7;
+        const barH = 5;
+        const barX = treeScreenX + tw / 2 - barW / 2;
+        const barY = treeScreenY - 10;
+        gameCtx.fillStyle = 'rgba(0,0,0,0.5)';
+        gameCtx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+        gameCtx.fillStyle = '#555';
+        gameCtx.fillRect(barX, barY, barW, barH);
+        const hpFrac = appleTree.hp / appleTree.maxHp;
+        gameCtx.fillStyle = hpFrac > 0.5 ? '#2ecc71' : hpFrac > 0.25 ? '#f1c40f' : '#e74c3c';
+        gameCtx.fillRect(barX, barY, barW * hpFrac, barH);
+      }
+    } else {
+      // ── Dead tree: stump (centered in the 2x2 area) ──
+      const centerX = treeScreenX + tw / 2;
+      const centerY = treeScreenY + th / 2;
+      const stumpW = tw * 0.3;
+      const stumpH = th * 0.25;
+      const stumpX = centerX - stumpW / 2;
+      const stumpY = centerY - stumpH / 2;
+
+      // Stump shadow
+      gameCtx.fillStyle = 'rgba(0,0,0,0.15)';
+      gameCtx.beginPath();
+      gameCtx.ellipse(centerX, stumpY + stumpH + 2, tw * 0.2, th * 0.05, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+
+      // Stump body
+      gameCtx.fillStyle = '#5a3420';
+      gameCtx.fillRect(stumpX, stumpY, stumpW, stumpH);
+      // Stump top (rings)
+      gameCtx.fillStyle = '#7a5035';
+      gameCtx.beginPath();
+      gameCtx.ellipse(centerX, stumpY, stumpW / 2, stumpH * 0.25, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#4a2a18';
+      gameCtx.lineWidth = 0.8;
+      gameCtx.beginPath();
+      gameCtx.ellipse(centerX, stumpY, stumpW * 0.3, stumpH * 0.15, 0, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.beginPath();
+      gameCtx.ellipse(centerX, stumpY, stumpW * 0.15, stumpH * 0.08, 0, 0, Math.PI * 2);
+      gameCtx.stroke();
+
+      // Regrow timer
+      if (appleTree.regrowTimer > 0) {
+        gameCtx.fillStyle = 'rgba(255,255,255,0.8)';
+        gameCtx.font = 'bold 10px "Press Start 2P", monospace';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText(Math.ceil(appleTree.regrowTimer) + 's', centerX, stumpY - 8);
+        gameCtx.textAlign = 'left';
+      }
+    }
+
+    // ── Render apples ──
+    for (const apple of appleTree.apples) {
+      const ax = (apple.col + 0.5) * GAME_TILE - camX;
+      const ay = (apple.row + 0.5) * GAME_TILE - camY;
+      const ar = GAME_TILE * 0.25;
+
+      // Apple body
+      gameCtx.fillStyle = '#e74c3c';
+      gameCtx.beginPath();
+      gameCtx.arc(ax, ay, ar, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Apple highlight
+      gameCtx.fillStyle = '#ff6b6b';
+      gameCtx.beginPath();
+      gameCtx.arc(ax - ar * 0.25, ay - ar * 0.3, ar * 0.35, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Stem
+      gameCtx.strokeStyle = '#5a3420';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(ax, ay - ar);
+      gameCtx.lineTo(ax + 1, ay - ar - 4);
+      gameCtx.stroke();
+      // Leaf on stem
+      gameCtx.fillStyle = '#2ecc71';
+      gameCtx.beginPath();
+      gameCtx.ellipse(ax + 3, ay - ar - 3, 3, 1.5, 0.5, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+  }
+
+  // ── Backrooms visual overlay (yellowed map for trapped player) ──
+  if (localPlayer.inBackrooms) {
+    // Yellow-sepia overlay on entire screen
+    gameCtx.fillStyle = 'rgba(180, 160, 60, 0.35)';
+    gameCtx.fillRect(0, 0, cw, ch);
+    // Render the door
+    const doorSX = localPlayer.backroomsDoorX - camX;
+    const doorSY = localPlayer.backroomsDoorY - camY;
+    if (doorSX > -50 && doorSX < cw + 50 && doorSY > -50 && doorSY < ch + 50) {
+      const doorW = GAME_TILE * 0.7;
+      const doorH = GAME_TILE * 1.2;
+      // Door frame
+      gameCtx.fillStyle = '#4a2800';
+      gameCtx.fillRect(doorSX - doorW / 2 - 3, doorSY - doorH / 2 - 3, doorW + 6, doorH + 6);
+      // Door body
+      gameCtx.fillStyle = '#8b5a2b';
+      gameCtx.fillRect(doorSX - doorW / 2, doorSY - doorH / 2, doorW, doorH);
+      // Door handle
+      gameCtx.fillStyle = '#ffd700';
+      gameCtx.beginPath();
+      gameCtx.arc(doorSX + doorW * 0.25, doorSY, 2.5, 0, Math.PI * 2);
+      gameCtx.fill();
+      // EXIT label above door
+      gameCtx.fillStyle = '#ffd700';
+      gameCtx.font = 'bold 9px "Press Start 2P", monospace';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('EXIT', doorSX, doorSY - doorH / 2 - 8);
+      gameCtx.textAlign = 'left';
+      // Pulsing glow around door
+      const doorPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+      gameCtx.strokeStyle = `rgba(255, 215, 0, ${0.4 + doorPulse * 0.4})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.strokeRect(doorSX - doorW / 2 - 5, doorSY - doorH / 2 - 5, doorW + 10, doorH + 10);
+    }
+    // Backrooms label
+    gameCtx.fillStyle = '#ff4444';
+    gameCtx.font = 'bold 16px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText('BACKROOMS', cw / 2, 30);
+    gameCtx.textAlign = 'left';
+  }
+
+  // Special aim reticle
+  if (localPlayer.specialAiming) {
+    const aimSX = localPlayer.specialAimX - camX;
+    const aimSY = localPlayer.specialAimY - camY;
+    gameCtx.strokeStyle = '#f5a623';
+    gameCtx.lineWidth = 3;
+    gameCtx.beginPath();
+    gameCtx.arc(aimSX, aimSY, GAME_TILE * 1.2, 0, Math.PI * 2);
+    gameCtx.stroke();
+    gameCtx.beginPath();
+    gameCtx.moveTo(aimSX - 10, aimSY);
+    gameCtx.lineTo(aimSX + 10, aimSY);
+    gameCtx.moveTo(aimSX, aimSY - 10);
+    gameCtx.lineTo(aimSX, aimSY + 10);
+    gameCtx.stroke();
+    // Aim timer text
+    gameCtx.fillStyle = '#f5a623';
+    gameCtx.font = 'bold 14px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText(Math.ceil(localPlayer.specialAimTimer) + 's', aimSX, aimSY - GAME_TILE * 1.5);
+  }
+
+  // Draw players
+  const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
+  for (const p of gamePlayers) {
+    if (!p.alive && !p.effects.some((fx) => fx.type === 'death')) continue;
+    if (p.specialJumping && p.id === localPlayerId) continue; // in the air
+
+    // ── Backrooms visibility: player in backrooms is invisible to others ──
+    if (p.inBackrooms && p.id !== localPlayerId) continue;
+    // Backrooms chaser: only visible to the trapped player
+    if (p.summonType === 'backrooms-chaser' && p.summonTargetId !== localPlayerId) continue;
+    // When local player is in backrooms, hide ALL entities except the chaser hunting them
+    if (localPlayer && localPlayer.inBackrooms && p.id !== localPlayerId
+        && !(p.summonType === 'backrooms-chaser' && p.summonTargetId === localPlayerId)) continue;
+    // ── Final Battle (Complex) visibility: isolated from normal world ──
+    // Player in Complex is invisible to others (except their Complex Room)
+    if (p.dogtoothInComplex && p.id !== localPlayerId && !p.dogtoothComplexRoomId) continue;
+    // When local player is in Complex, hide ALL entities except the Complex Room
+    if (localPlayer && localPlayer.dogtoothInComplex && p.id !== localPlayerId
+        && p.id !== localPlayer.dogtoothComplexRoomId) continue;
+
+    // ── Alternate visibility: the real player is invisible to everyone except themselves ──
+    if (p.hasAlternate && p.id !== localPlayerId) continue;
+    // Player being hunted by alternate can only see themselves and their alternate
+    if (localPlayer && localPlayer.hasAlternate && p.id !== localPlayerId
+        && p.id !== localPlayer.alternateId && !p.isSummon) continue;
+
+    // ── Room visibility: only visible to its target player ──
+    if (p.summonType === 'room' && p.summonTargetId !== localPlayerId) continue;
+
+    // ── Moderator Firewall: invisible to enemies while active ──
+    if (p.modFirewallTimer > 0 && p.id !== localPlayerId) continue;
+
+    // ── Illusion invisibility: invisible to enemies (E ability + SPACE special + bush trait) ──
+    // Still visible to the Illusion player themselves
+    if ((p.illusionInvisTimer > 0 || p.illusionSpecialInvis || p.illusionBushInvisTimer > 0) && p.id !== localPlayerId) {
+      // In team mode, allies can still see the illusion player
+      if (!(gameMode === 'teams' && localPlayer && localPlayer.team && p.team === localPlayer.team)) continue;
+    }
+
+    // ── Hitman Conceal: invisible to enemies (Heightened Senses does NOT pierce conceal) ──
+    if (p.hitmanConcealTimer > 0 && p.id !== localPlayerId) {
+      if (!(gameMode === 'teams' && localPlayer && localPlayer.team && p.team === localPlayer.team)) continue;
+    }
+
+    const sx = p.x - camX;
+    const sy = p.y - camY;
+
+    if (sx < -GAME_TILE * 2 || sx > cw + GAME_TILE * 2 || sy < -GAME_TILE * 2 || sy > ch + GAME_TILE * 2) continue;
+
+    // Dead player: dark red for 2s then hidden
+    const isDying = !p.alive && p.effects.some((fx) => fx.type === 'death');
+
+    // Grass hiding logic
+    const samplePoints = [
+      { x: p.x, y: p.y },
+      { x: p.x - radius, y: p.y }, { x: p.x + radius, y: p.y },
+      { x: p.x, y: p.y - radius }, { x: p.x, y: p.y + radius },
+      { x: p.x - radius * 0.7, y: p.y - radius * 0.7 },
+      { x: p.x + radius * 0.7, y: p.y - radius * 0.7 },
+      { x: p.x - radius * 0.7, y: p.y + radius * 0.7 },
+      { x: p.x + radius * 0.7, y: p.y + radius * 0.7 },
+    ];
+    let grassCount = 0;
+    for (const pt of samplePoints) {
+      const col = Math.floor(pt.x / GAME_TILE);
+      const row = Math.floor(pt.y / GAME_TILE);
+      if (row >= 0 && row < gameMap.rows && col >= 0 && col < gameMap.cols
+          && gameMap.tiles[row][col] === TILE.GRASS) grassCount++;
+    }
+    // In the Complex, there is no grass — ignore grass hiding
+    const grassFraction = _dtInComplex ? 0 : grassCount / samplePoints.length;
+    const isHidden = grassFraction > 0.5;
+    const isLocal = p.id === localPlayerId;
+
+    // Illusion F: see through grass — skip hiding for the viewer
+    const canSeeGrass = localPlayer && localPlayer.illusionSeeGrassTimer > 0;
+    if (isHidden && !isLocal && !canSeeGrass) continue;
+
+    const inAnyGrass = grassFraction > 0;
+    const illusionBushFade = isLocal && p.illusionBushInvisTimer > 0;
+    const dotAlpha = isDying ? 0.7 : (isLocal && inAnyGrass) ? 0.4 : illusionBushFade ? 0.4 : (p.alive ? 1.0 : 0.3);
+
+    gameCtx.save();
+    gameCtx.globalAlpha = dotAlpha;
+
+    // Stunned visual
+    if (p.stunned > 0 && !isDying) {
+      gameCtx.fillStyle = 'rgba(255,255,0,0.2)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Dot — dark red if dying or Boiled One active
+    if (p.isSummon) {
+      // ── Custom summon shapes ──
+      if (p.summonType === 'fleshbed') {
+        // Grey square
+        const sz = radius * 1.6;
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#888';
+        gameCtx.fillRect(sx - sz / 2, sy - sz / 2, sz, sz);
+        gameCtx.strokeStyle = '#555';
+        gameCtx.lineWidth = 2;
+        gameCtx.strokeRect(sx - sz / 2, sy - sz / 2, sz, sz);
+        // Dark inner lines for texture
+        gameCtx.strokeStyle = '#666';
+        gameCtx.lineWidth = 1;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - sz / 4, sy - sz / 2);
+        gameCtx.lineTo(sx - sz / 4, sy + sz / 2);
+        gameCtx.moveTo(sx + sz / 4, sy - sz / 2);
+        gameCtx.lineTo(sx + sz / 4, sy + sz / 2);
+        gameCtx.stroke();
+      } else if (p.summonType === 'macrocosms') {
+        // Grey circle
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#999';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.1, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#555';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.1, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // No head — just a dark void at top
+        gameCtx.fillStyle = '#333';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius * 0.4, radius * 0.35, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'obelisk') {
+        // Black triangle with red streaks
+        const h = radius * 2.2;
+        const base = radius * 1.6;
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy - h / 2);           // top
+        gameCtx.lineTo(sx - base / 2, sy + h / 2); // bottom-left
+        gameCtx.lineTo(sx + base / 2, sy + h / 2); // bottom-right
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Outline
+        gameCtx.strokeStyle = '#333';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        // Red streaks
+        gameCtx.strokeStyle = '#8b0000';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - 2, sy - h * 0.3);
+        gameCtx.lineTo(sx - 4, sy + h * 0.2);
+        gameCtx.moveTo(sx + 3, sy - h * 0.25);
+        gameCtx.lineTo(sx + 1, sy + h * 0.3);
+        gameCtx.moveTo(sx, sy - h * 0.1);
+        gameCtx.lineTo(sx - 2, sy + h * 0.35);
+        gameCtx.stroke();
+        // Glowing red eye near top
+        gameCtx.fillStyle = '#ff2200';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - h * 0.15, 2.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.fillStyle = 'rgba(255, 34, 0, 0.3)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - h * 0.15, 5, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'zombie') {
+        // Dark green circle for zombie
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#1a5c1a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.9, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#0a3a0a';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.9, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Zombie eyes — two small dots
+        gameCtx.fillStyle = '#88ff44';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 3, sy - 2, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 3, sy - 2, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'deer-robot') {
+        // Deer Robot: metallic gray square body
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#708090';
+        const rSize = radius * 0.8;
+        gameCtx.fillRect(sx - rSize, sy - rSize, rSize * 2, rSize * 2);
+        gameCtx.strokeStyle = '#4a5568';
+        gameCtx.lineWidth = 2;
+        gameCtx.strokeRect(sx - rSize, sy - rSize, rSize * 2, rSize * 2);
+        // Antenna
+        gameCtx.strokeStyle = '#a0aec0';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy - rSize);
+        gameCtx.lineTo(sx, sy - rSize - 5);
+        gameCtx.stroke();
+        gameCtx.fillStyle = '#f56565';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - rSize - 5, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Eyes
+        gameCtx.fillStyle = '#00ff66';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 3, sy - 2, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 3, sy - 2, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'wicket') {
+        // Wicket: three vertical stumps
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#c8a96e';
+        const stumpW = 2, stumpH = radius * 1.5;
+        for (let wi = -1; wi <= 1; wi++) {
+          gameCtx.fillRect(sx + wi * 4 - stumpW / 2, sy - stumpH / 2, stumpW, stumpH);
+        }
+        // Bails on top
+        gameCtx.fillStyle = '#a0522d';
+        gameCtx.fillRect(sx - 5, sy - stumpH / 2 - 2, 4, 2);
+        gameCtx.fillRect(sx + 1, sy - stumpH / 2 - 2, 4, 2);
+      } else if (p.summonType === 'illusion-copy' || p.summonType === 'illusion-special-copy') {
+        // Illusion copy: silvery-blue dot with wizard hat + pulsing ghost outline
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#7f8fa6';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Translucent silvery overlay
+        gameCtx.fillStyle = 'rgba(200, 220, 255, 0.15)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Pulsing shimmer ring
+        const illuPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+        gameCtx.strokeStyle = `rgba(200, 220, 255, ${0.3 + illuPulse * 0.4})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // ── Wizard hat on copy ──
+        if (!isDying) {
+          const hatBase = sy - radius * 0.5;
+          const hatW = radius * 1.0;
+          const hatH = radius * 1.4;
+          // Hat brim
+          gameCtx.fillStyle = 'rgba(58, 58, 94, 0.7)';
+          gameCtx.beginPath();
+          gameCtx.ellipse(sx, hatBase + 2, hatW, radius * 0.18, 0, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Hat cone
+          gameCtx.fillStyle = 'rgba(42, 42, 78, 0.7)';
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx - hatW * 0.65, hatBase);
+          gameCtx.lineTo(sx + radius * 0.1, hatBase - hatH);
+          gameCtx.lineTo(sx + hatW * 0.65, hatBase);
+          gameCtx.closePath();
+          gameCtx.fill();
+          gameCtx.strokeStyle = 'rgba(127, 143, 166, 0.5)';
+          gameCtx.lineWidth = 0.8;
+          gameCtx.stroke();
+          // Hat band
+          gameCtx.strokeStyle = 'rgba(200, 220, 255, 0.5)';
+          gameCtx.lineWidth = 1.5;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx - hatW * 0.55, hatBase - 1);
+          gameCtx.lineTo(sx + hatW * 0.55, hatBase - 1);
+          gameCtx.stroke();
+        }
+        // Ghost indicator
+        gameCtx.fillStyle = 'rgba(200, 220, 255, 0.6)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius - 5, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'noli-clone') {
+        // Noli Hallucination clone: colored dot with ghostly purple overlay
+        gameCtx.fillStyle = isDying ? '#8b0000' : p.color;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Purple translucent overlay
+        gameCtx.fillStyle = 'rgba(160, 32, 240, 0.25)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Pulsing purple outline
+        const clonePulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.006);
+        gameCtx.strokeStyle = `rgba(160, 32, 240, ${0.5 + clonePulse * 0.4})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 1, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Ghost icon — small "👻" indicator
+        gameCtx.fillStyle = 'rgba(160, 32, 240, 0.7)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius - 5, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'exploding-kitten') {
+        // Exploding Kitten: black dot with cat ears and orange danger glow
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Pulsing orange danger glow
+        const kittenPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.008);
+        gameCtx.strokeStyle = `rgba(255, 120, 0, ${0.5 + kittenPulse * 0.5})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 1, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Cat ears (two triangles on top)
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.7, sy - radius * 0.3);
+        gameCtx.lineTo(sx - radius * 0.3, sy - radius * 1.3);
+        gameCtx.lineTo(sx - radius * 0.0, sy - radius * 0.5);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.7, sy - radius * 0.3);
+        gameCtx.lineTo(sx + radius * 0.3, sy - radius * 1.3);
+        gameCtx.lineTo(sx + radius * 0.0, sy - radius * 0.5);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Inner ear pink
+        gameCtx.fillStyle = '#ff6600';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.55, sy - radius * 0.4);
+        gameCtx.lineTo(sx - radius * 0.35, sy - radius * 1.0);
+        gameCtx.lineTo(sx - radius * 0.1, sy - radius * 0.55);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.55, sy - radius * 0.4);
+        gameCtx.lineTo(sx + radius * 0.35, sy - radius * 1.0);
+        gameCtx.lineTo(sx + radius * 0.1, sy - radius * 0.55);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Eyes — angry slits
+        gameCtx.fillStyle = '#ff4400';
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx - 3, sy - 1, 2, 1, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx + 3, sy - 1, 2, 1, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'johndoe') {
+        // John Doe: Circular Obelisk of Enlightenment — black circle with red eye
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Subtle dark outline
+        gameCtx.strokeStyle = '#222';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Pulsing red eye
+        const enPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.004);
+        gameCtx.fillStyle = `rgba(255, 0, 0, ${0.7 + enPulse * 0.3})`;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - 1, 2.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Red eye glow
+        gameCtx.fillStyle = `rgba(255, 0, 0, ${0.1 + enPulse * 0.15})`;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - 1, 5, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'coolkidd') {
+        // c00lkidd: Blood-red circle with black dot eyes and wide smile
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#cc0000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#990000';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Black dot eyes
+        gameCtx.fillStyle = '#000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 3, sy - 2, 1.8, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 3, sy - 2, 1.8, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Wide smile
+        gameCtx.strokeStyle = '#000';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy + 1, radius * 0.5, 0.15, Math.PI - 0.15);
+        gameCtx.stroke();
+      } else if (p.summonType === 'bowler') {
+        // Bowler: green circle with bowling ball look
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#228b22';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#145214';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Three bowling ball dots
+        gameCtx.fillStyle = '#0a3a0a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 2, sy - 3, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 2, sy - 3, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - 0.5, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'crab') {
+        // Crab: aqua blue circle with crab claw icons
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#00ced1';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.85, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#600' : '#008b8b';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.85, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Left crab claw
+        gameCtx.strokeStyle = isDying ? '#600' : '#008b8b';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 1.05, sy, radius * 0.35, -0.7, 0.7);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 1.05, sy - radius * 0.15, radius * 0.2, -1.2, -0.1);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 1.05, sy + radius * 0.15, radius * 0.2, 0.1, 1.2);
+        gameCtx.stroke();
+        // Right crab claw
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 1.05, sy, radius * 0.35, Math.PI - 0.7, Math.PI + 0.7);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 1.05, sy - radius * 0.15, radius * 0.2, Math.PI + 0.1, Math.PI + 1.2);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 1.05, sy + radius * 0.15, radius * 0.2, Math.PI - 1.2, Math.PI - 0.1);
+        gameCtx.stroke();
+        // Small dot eyes
+        gameCtx.fillStyle = '#000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 2, sy - radius * 0.35, 1.2, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 2, sy - radius * 0.35, 1.2, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'backrooms-chaser') {
+        // Backrooms chaser: yellow-brown menacing figure
+        const brPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.006);
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#8b8000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.1, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Distortion glow
+        gameCtx.strokeStyle = `rgba(139, 128, 0, ${0.4 + brPulse * 0.4})`;
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.3, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Dark hollow eyes
+        gameCtx.fillStyle = '#000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 3, sy - 2, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 3, sy - 2, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Distorted mouth
+        gameCtx.strokeStyle = '#000';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy + 3, 4, 0.3, Math.PI - 0.3);
+        gameCtx.stroke();
+      } else if (p.summonType === 'alternate') {
+        // Alternate: looks like the target player but with a dark glitch overlay
+        gameCtx.fillStyle = isDying ? '#8b0000' : p.color;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Dark purple distortion overlay
+        const altPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+        gameCtx.fillStyle = `rgba(50, 0, 80, ${0.2 + altPulse * 0.15})`;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Glitchy edge
+        gameCtx.strokeStyle = `rgba(106, 13, 173, ${0.5 + altPulse * 0.3})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 1, 0, Math.PI * 2);
+        gameCtx.stroke();
+      } else if (p.summonType === 'room') {
+        // Room (Boisvert): black dot with upside-down triangle — wide base at top (two horn points), apex hidden behind dot
+        const hornW = radius * 1.8; // how far horn tips extend sideways
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#000';
+        // Draw triangle first (behind dot)
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - hornW, sy - radius * 1.3);  // left horn tip (top-left)
+        gameCtx.lineTo(sx + hornW, sy - radius * 1.3);  // right horn tip (top-right)
+        gameCtx.lineTo(sx, sy + radius * 1.2);           // bottom apex (hidden behind dot)
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Body dot drawn on top — hides the bottom apex
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.8, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Subtle outline on dot
+        gameCtx.strokeStyle = '#333';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.8, 0, Math.PI * 2);
+        gameCtx.stroke();
+      } else if (p.summonType === 'destructive-unicorn') {
+        // Extremely Destructive Unicorn: red circle with horn and fire glow
+        const uniPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.008);
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#ff2200';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Pulsing danger glow
+        gameCtx.strokeStyle = `rgba(255, 100, 0, ${0.5 + uniPulse * 0.5})`;
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Horn (golden triangle on top)
+        gameCtx.fillStyle = '#ffd700';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy - radius * 2.0);
+        gameCtx.lineTo(sx - radius * 0.25, sy - radius * 0.6);
+        gameCtx.lineTo(sx + radius * 0.25, sy - radius * 0.6);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Eyes — white dots
+        gameCtx.fillStyle = '#fff';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 3, sy - 2, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 3, sy - 2, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'queenbee-unicorn') {
+        // Queen Bee Unicorn: gold circle with crown and horn
+        const qbPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#ffd700';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Royal glow
+        gameCtx.strokeStyle = `rgba(255, 215, 0, ${0.4 + qbPulse * 0.4})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Horn
+        gameCtx.fillStyle = '#fff';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy - radius * 2.0);
+        gameCtx.lineTo(sx - radius * 0.2, sy - radius * 0.6);
+        gameCtx.lineTo(sx + radius * 0.2, sy - radius * 0.6);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Crown points on top
+        gameCtx.fillStyle = '#ff8c00';
+        const crownY = sy - radius * 0.5;
+        for (let ci = -1; ci <= 1; ci++) {
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + ci * radius * 0.4, crownY - radius * 0.6);
+          gameCtx.lineTo(sx + ci * radius * 0.4 - 2, crownY);
+          gameCtx.lineTo(sx + ci * radius * 0.4 + 2, crownY);
+          gameCtx.closePath();
+          gameCtx.fill();
+        }
+        // Eyes
+        gameCtx.fillStyle = '#000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 3, sy - 1, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 3, sy - 1, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'seductive-unicorn') {
+        // Seductive Unicorn: pink circle with horn and hearts
+        const sedPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.006);
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#ff69b4';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Pink glow
+        gameCtx.strokeStyle = `rgba(255, 105, 180, ${0.4 + sedPulse * 0.4})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Horn (white)
+        gameCtx.fillStyle = '#fff';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy - radius * 2.0);
+        gameCtx.lineTo(sx - radius * 0.2, sy - radius * 0.6);
+        gameCtx.lineTo(sx + radius * 0.2, sy - radius * 0.6);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Heart shape near top
+        gameCtx.fillStyle = '#ff1493';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 2, sy - radius * 1.2, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 2, sy - radius * 1.2, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Eyes
+        gameCtx.fillStyle = '#fff';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 3, sy - 1, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 3, sy - 1, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'napoleon-cannon') {
+        // ── Napoleon Cannon: wheeled cannon render ──
+        const cW = radius * 2.2;
+        const cH = radius * 1.2;
+        // Barrel
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#444';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - cW * 0.1, sy - cH * 0.35);
+        gameCtx.lineTo(sx + cW * 0.6, sy - cH * 0.2);
+        gameCtx.lineTo(sx + cW * 0.65, sy - cH * 0.05);
+        gameCtx.lineTo(sx + cW * 0.6, sy + cH * 0.1);
+        gameCtx.lineTo(sx - cW * 0.1, sy + cH * 0.05);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Barrel muzzle ring
+        gameCtx.strokeStyle = '#888';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.arc(sx + cW * 0.62, sy - cH * 0.05, cH * 0.18, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Carriage body
+        gameCtx.fillStyle = isDying ? '#600' : '#5c3a1e';
+        gameCtx.fillRect(sx - cW * 0.3, sy - cH * 0.1, cW * 0.4, cH * 0.5);
+        // Left wheel
+        gameCtx.strokeStyle = '#333';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx - cW * 0.2, sy + cH * 0.5, cH * 0.3, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Wheel spokes
+        for (let i = 0; i < 4; i++) {
+          const a = (i / 4) * Math.PI * 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx - cW * 0.2, sy + cH * 0.5);
+          gameCtx.lineTo(sx - cW * 0.2 + Math.cos(a) * cH * 0.3, sy + cH * 0.5 + Math.sin(a) * cH * 0.3);
+          gameCtx.stroke();
+        }
+        // Right wheel
+        gameCtx.beginPath();
+        gameCtx.arc(sx + cW * 0.05, sy + cH * 0.5, cH * 0.3, 0, Math.PI * 2);
+        gameCtx.stroke();
+        for (let i = 0; i < 4; i++) {
+          const a = (i / 4) * Math.PI * 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + cW * 0.05, sy + cH * 0.5);
+          gameCtx.lineTo(sx + cW * 0.05 + Math.cos(a) * cH * 0.3, sy + cH * 0.5 + Math.sin(a) * cH * 0.3);
+          gameCtx.stroke();
+        }
+        // HP bar above
+        const cHpFrac = Math.max(0, p.hp / p.maxHp);
+        gameCtx.fillStyle = '#600';
+        gameCtx.fillRect(sx - cW * 0.4, sy - cH * 0.8, cW * 0.8, 3);
+        gameCtx.fillStyle = '#0f0';
+        gameCtx.fillRect(sx - cW * 0.4, sy - cH * 0.8, cW * 0.8 * cHpFrac, 3);
+      } else if (p.summonType === 'napoleon-infantry') {
+        // ── Napoleon Infantry: small musketeer soldier ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#1a3a6b';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.8, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Shako hat (tall cylindrical)
+        gameCtx.fillStyle = '#111';
+        gameCtx.fillRect(sx - radius * 0.45, sy - radius * 1.8, radius * 0.9, radius * 1.0);
+        // Hat plume (red)
+        gameCtx.fillStyle = '#cc0000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius * 1.85, radius * 0.25, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Musket (diagonal line)
+        gameCtx.strokeStyle = '#5c3a1e';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.3, sy - radius * 0.2);
+        gameCtx.lineTo(sx + radius * 1.5, sy - radius * 1.2);
+        gameCtx.stroke();
+        // Bayonet tip
+        gameCtx.strokeStyle = '#aaa';
+        gameCtx.lineWidth = 1;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 1.5, sy - radius * 1.2);
+        gameCtx.lineTo(sx + radius * 1.7, sy - radius * 1.5);
+        gameCtx.stroke();
+        // White cross belt
+        gameCtx.strokeStyle = '#ddd';
+        gameCtx.lineWidth = 1;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.5, sy - radius * 0.4);
+        gameCtx.lineTo(sx + radius * 0.5, sy + radius * 0.4);
+        gameCtx.moveTo(sx + radius * 0.5, sy - radius * 0.4);
+        gameCtx.lineTo(sx - radius * 0.5, sy + radius * 0.4);
+        gameCtx.stroke();
+      } else if (p.summonType === 'napoleon-wall') {
+        // ── Defensive Tactics Wall: 2x2 tile outline (gold dashed border, no fill) ──
+        const ws = (p.wallSize || 2) * GAME_TILE;
+        const wx = sx - ws / 2;
+        const wy = sy - ws / 2;
+        gameCtx.strokeStyle = isDying ? '#8b0000' : '#d4af37';
+        gameCtx.lineWidth = 2.5;
+        gameCtx.setLineDash([6, 4]);
+        gameCtx.strokeRect(wx, wy, ws, ws);
+        gameCtx.setLineDash([]);
+        // Corner decorations (fleur-de-lis style dots)
+        gameCtx.fillStyle = '#d4af37';
+        const corners = [[wx, wy], [wx + ws, wy], [wx, wy + ws], [wx + ws, wy + ws]];
+        for (const [cx, cy] of corners) {
+          gameCtx.beginPath();
+          gameCtx.arc(cx, cy, 3, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+        // "Defended" text above
+        gameCtx.fillStyle = '#d4af37';
+        gameCtx.font = 'bold 8px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('⚜', sx, wy - 4);
+        // Timer indicator (wall is invincible, shows remaining seconds)
+        if (p.wallTimer !== undefined) {
+          const tSec = Math.ceil(p.wallTimer);
+          const tFrac = Math.max(0, p.wallTimer / 30);
+          gameCtx.fillStyle = '#333';
+          gameCtx.fillRect(wx, wy - 10, ws, 3);
+          gameCtx.fillStyle = '#d4af37';
+          gameCtx.fillRect(wx, wy - 10, ws * tFrac, 3);
+          gameCtx.fillStyle = '#d4af37';
+          gameCtx.font = 'bold 7px sans-serif';
+          gameCtx.textAlign = 'center';
+          gameCtx.fillText(tSec + 's', sx, wy - 13);
+        }
+      } else if (p.summonType === 'dnd-orc') {
+        // ── D&D Orc: green-brown circle with tusks + axe ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#4a6b2a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.9, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : '#2d4a1a';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Tusks (two small white triangles at bottom)
+        gameCtx.fillStyle = '#eee';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.3, sy + radius * 0.3);
+        gameCtx.lineTo(sx - radius * 0.15, sy + radius * 0.9);
+        gameCtx.lineTo(sx - radius * 0.05, sy + radius * 0.3);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.3, sy + radius * 0.3);
+        gameCtx.lineTo(sx + radius * 0.15, sy + radius * 0.9);
+        gameCtx.lineTo(sx + radius * 0.05, sy + radius * 0.3);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Angry eyes (red dots)
+        gameCtx.fillStyle = '#ff3333';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.25, sy - radius * 0.15, radius * 0.15, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.25, sy - radius * 0.15, radius * 0.15, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Crude axe on top
+        gameCtx.strokeStyle = '#5c3a1e';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy - radius * 0.5);
+        gameCtx.lineTo(sx, sy - radius * 1.4);
+        gameCtx.stroke();
+        gameCtx.fillStyle = '#888';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.35, sy - radius * 1.4);
+        gameCtx.lineTo(sx + radius * 0.35, sy - radius * 1.4);
+        gameCtx.lineTo(sx + radius * 0.2, sy - radius * 1.05);
+        gameCtx.lineTo(sx - radius * 0.2, sy - radius * 1.05);
+        gameCtx.closePath();
+        gameCtx.fill();
+      } else if (p.summonType === 'dnd-zombie') {
+        // ── D&D Zombie: sickly green circle with stagger lines ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#3d5a1e';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.85, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : '#2a3d10';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Ragged arms (short lines out to sides)
+        gameCtx.strokeStyle = '#4a6b2a';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.7, sy);
+        gameCtx.lineTo(sx - radius * 1.3, sy + radius * 0.4);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.7, sy);
+        gameCtx.lineTo(sx + radius * 1.3, sy + radius * 0.4);
+        gameCtx.stroke();
+        // Dead eyes (X marks)
+        gameCtx.strokeStyle = '#111';
+        gameCtx.lineWidth = 1.5;
+        const eyeOff = radius * 0.25;
+        // Left eye X
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - eyeOff - 2, sy - radius * 0.15 - 2);
+        gameCtx.lineTo(sx - eyeOff + 2, sy - radius * 0.15 + 2);
+        gameCtx.moveTo(sx - eyeOff + 2, sy - radius * 0.15 - 2);
+        gameCtx.lineTo(sx - eyeOff - 2, sy - radius * 0.15 + 2);
+        gameCtx.stroke();
+        // Right eye X
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + eyeOff - 2, sy - radius * 0.15 - 2);
+        gameCtx.lineTo(sx + eyeOff + 2, sy - radius * 0.15 + 2);
+        gameCtx.moveTo(sx + eyeOff + 2, sy - radius * 0.15 - 2);
+        gameCtx.lineTo(sx + eyeOff - 2, sy - radius * 0.15 + 2);
+        gameCtx.stroke();
+      } else if (p.summonType === 'dnd-sidekick') {
+        // ── D&D Sidekick: looks like the owner's race dot but with a glow border ──
+        const skRace = p.dndRace || 'human';
+        const baseColor = isDying ? '#8b0000' : (skRace === 'elf' ? '#228b22' : skRace === 'dwarf' ? '#d2691e' : '#4169e1');
+        // Glow ring
+        gameCtx.strokeStyle = '#ffd700';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.1, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Base circle
+        gameCtx.fillStyle = baseColor;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : '#222';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Race-specific weapon (simplified)
+        if (skRace === 'elf') {
+          // Small bow
+          gameCtx.strokeStyle = '#654321';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.arc(sx + radius * 0.8, sy, radius * 0.5, -Math.PI * 0.4, Math.PI * 0.4);
+          gameCtx.stroke();
+        } else if (skRace === 'dwarf') {
+          // Small axe
+          gameCtx.strokeStyle = '#5c3a1e';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + radius * 0.4, sy - radius * 0.1);
+          gameCtx.lineTo(sx + radius * 1.1, sy - radius * 0.1);
+          gameCtx.stroke();
+          gameCtx.fillStyle = '#888';
+          gameCtx.beginPath();
+          gameCtx.arc(sx + radius * 1.1, sy - radius * 0.1, radius * 0.25, 0, Math.PI * 2);
+          gameCtx.fill();
+        } else {
+          // Small sword
+          gameCtx.strokeStyle = '#ccc';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + radius * 0.4, sy);
+          gameCtx.lineTo(sx + radius * 1.2, sy);
+          gameCtx.stroke();
+        }
+        // "SK" label
+        gameCtx.fillStyle = '#fff';
+        gameCtx.font = 'bold ' + Math.max(8, radius * 0.6) + 'px monospace';
+        gameCtx.textAlign = 'center';
+        gameCtx.textBaseline = 'middle';
+        gameCtx.fillText('SK', sx, sy);
+      } else if (p.summonType === 'dragon-ochre') {
+        // ── Yellow Ochre: 3x3 golden jelly blob ──
+        const jR = radius * 3.0; // bigger than normal (3x3)
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#c8a832';
+        gameCtx.beginPath();
+        // Blobby shape using overlapping circles
+        gameCtx.arc(sx - jR * 0.3, sy - jR * 0.2, jR * 0.7, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + jR * 0.3, sy - jR * 0.1, jR * 0.65, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy + jR * 0.3, jR * 0.6, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Glossy highlight
+        gameCtx.fillStyle = 'rgba(255, 255, 200, 0.3)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - jR * 0.15, sy - jR * 0.35, jR * 0.25, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Eyes (simple dark dots)
+        gameCtx.fillStyle = '#333';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - jR * 0.2, sy - jR * 0.1, jR * 0.08, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + jR * 0.15, sy - jR * 0.1, jR * 0.08, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'dragon-lich') {
+        // ── Lich: dark purple robed figure with green glow ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#3a0066';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.9, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Purple robe outline
+        gameCtx.strokeStyle = isDying ? '#500' : '#6a0dad';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        // Hood (darker top arc)
+        gameCtx.fillStyle = '#200040';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius * 0.2, radius * 0.6, Math.PI, 0);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Glowing green eyes
+        gameCtx.fillStyle = '#00ff44';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.2, sy - radius * 0.2, radius * 0.12, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.2, sy - radius * 0.2, radius * 0.12, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Staff
+        gameCtx.strokeStyle = '#8b6508';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.5, sy + radius * 0.5);
+        gameCtx.lineTo(sx + radius * 0.3, sy - radius * 1.2);
+        gameCtx.stroke();
+        // Staff orb
+        gameCtx.fillStyle = '#aa00ff';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.3, sy - radius * 1.2, radius * 0.15, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'ouriel') {
+        // ── Ouriel: plain white figure, small black dot eyes, innocent ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#f8f8f8';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.95, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Soft white outline
+        gameCtx.strokeStyle = isDying ? '#600' : '#ddd';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.95, 0, Math.PI * 2);
+        gameCtx.stroke();
+        if (!isDying) {
+          // Small black dot eyes (wide apart, low = innocent look)
+          gameCtx.fillStyle = '#000';
+          gameCtx.beginPath();
+          gameCtx.arc(sx - radius * 0.25, sy + radius * 0.02, radius * 0.1, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.beginPath();
+          gameCtx.arc(sx + radius * 0.25, sy + radius * 0.02, radius * 0.1, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Tiny shine dots on eyes for innocence
+          gameCtx.fillStyle = '#fff';
+          gameCtx.beginPath();
+          gameCtx.arc(sx - radius * 0.22, sy - radius * 0.02, radius * 0.035, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.beginPath();
+          gameCtx.arc(sx + radius * 0.28, sy - radius * 0.02, radius * 0.035, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+        // Hits-left indicator
+        if (p.ourielHitsLeft !== undefined) {
+          gameCtx.fillStyle = '#999';
+          gameCtx.font = 'bold 10px monospace';
+          gameCtx.textAlign = 'center';
+          gameCtx.fillText(p.ourielHitsLeft + ' hits', sx, sy + radius + 12);
+        }
+      } else if (p.summonType === 'ouriel-room') {
+        // ── Ouriel→Room: black triangle (same as Room) with white glow ──
+        const dotR = radius * 0.5;
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, dotR, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Upside-down triangle (wide base at top)
+        const triBaseY = sy - radius * 1.0;
+        const triApexY = sy + radius * 0.9;
+        const halfBase = radius * 1.2;
+        gameCtx.fillStyle = isDying ? '#600' : '#1a1a1a';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - halfBase, triBaseY);
+        gameCtx.lineTo(sx + halfBase, triBaseY);
+        gameCtx.lineTo(sx, triApexY);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // White glow
+        gameCtx.strokeStyle = 'rgba(255,255,255,0.4)';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+        gameCtx.stroke();
+      } else if (p.summonType === 'complex-room') {
+        // ── Complex Room: red-tinged black triangle ──
+        const dotR = radius * 0.6;
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#1a0000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, dotR, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Upside-down triangle
+        const triBaseY = sy - radius * 1.2;
+        const triApexY = sy + radius * 1.0;
+        const halfBase = radius * 1.3;
+        gameCtx.fillStyle = isDying ? '#600' : '#220000';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - halfBase, triBaseY);
+        gameCtx.lineTo(sx + halfBase, triBaseY);
+        gameCtx.lineTo(sx, triApexY);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Red eye
+        gameCtx.fillStyle = '#ff0000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius * 0.2, radius * 0.15, 0, Math.PI * 2);
+        gameCtx.fill();
+        // HP bar for Complex Room
+        const hpFrac = p.hp / p.maxHp;
+        const barW = radius * 2.5;
+        gameCtx.fillStyle = '#333';
+        gameCtx.fillRect(sx - barW / 2, sy + radius + 8, barW, 4);
+        gameCtx.fillStyle = hpFrac > 0.5 ? '#c00' : '#ff0000';
+        gameCtx.fillRect(sx - barW / 2, sy + radius + 8, barW * hpFrac, 4);
+      } else if (p.summonType === 'filbus-dino') {
+        // ── Filbus Dinosaur: olive green oval body with spikes, tail, and small eyes ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#556b2f';
+        // Oval body (wider than tall)
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx, sy, radius * 1.2, radius * 0.85, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#3b4a1f';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        // Back spikes (3 triangles along top)
+        if (!isDying) {
+          gameCtx.fillStyle = '#6b8e23';
+          for (let si = -1; si <= 1; si++) {
+            gameCtx.beginPath();
+            gameCtx.moveTo(sx + si * radius * 0.4 - 3, sy - radius * 0.75);
+            gameCtx.lineTo(sx + si * radius * 0.4, sy - radius * 1.3);
+            gameCtx.lineTo(sx + si * radius * 0.4 + 3, sy - radius * 0.75);
+            gameCtx.closePath();
+            gameCtx.fill();
+          }
+          // Tail (small triangle to the right)
+          gameCtx.fillStyle = '#4a6b20';
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + radius * 1.1, sy);
+          gameCtx.lineTo(sx + radius * 1.8, sy - radius * 0.2);
+          gameCtx.lineTo(sx + radius * 1.8, sy + radius * 0.2);
+          gameCtx.closePath();
+          gameCtx.fill();
+        }
+        // Eyes
+        gameCtx.fillStyle = '#ffcc00';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.4, sy - radius * 0.15, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.15, sy - radius * 0.15, 2, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'slasher') {
+        // ── 1X Slasher: fully black body with glowing cross-shaped red eye ──
+        gameCtx.fillStyle = isDying ? '#1a0000' : '#0a0a0a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Dark outline
+        gameCtx.strokeStyle = '#1a1a1a';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        // Pulsing red glow
+        const slashPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.01);
+        gameCtx.strokeStyle = `rgba(255, 0, 0, ${0.2 + slashPulse * 0.3})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+        gameCtx.stroke();
+        if (!isDying) {
+          // Glowing cross-shaped red eye (center)
+          const eyeX = sx;
+          const eyeY = sy - radius * 0.15;
+          const crossLen = radius * 0.35;
+          const crossW = 2;
+          // Outer glow
+          gameCtx.strokeStyle = `rgba(255, 0, 0, ${0.3 + slashPulse * 0.4})`;
+          gameCtx.lineWidth = crossW + 3;
+          gameCtx.beginPath();
+          gameCtx.moveTo(eyeX - crossLen, eyeY);
+          gameCtx.lineTo(eyeX + crossLen, eyeY);
+          gameCtx.stroke();
+          gameCtx.beginPath();
+          gameCtx.moveTo(eyeX, eyeY - crossLen);
+          gameCtx.lineTo(eyeX, eyeY + crossLen);
+          gameCtx.stroke();
+          // Bright cross core
+          gameCtx.strokeStyle = '#ff0000';
+          gameCtx.lineWidth = crossW;
+          gameCtx.beginPath();
+          gameCtx.moveTo(eyeX - crossLen, eyeY);
+          gameCtx.lineTo(eyeX + crossLen, eyeY);
+          gameCtx.stroke();
+          gameCtx.beginPath();
+          gameCtx.moveTo(eyeX, eyeY - crossLen);
+          gameCtx.lineTo(eyeX, eyeY + crossLen);
+          gameCtx.stroke();
+          // Bright center dot
+          gameCtx.fillStyle = '#ff4444';
+          gameCtx.beginPath();
+          gameCtx.arc(eyeX, eyeY, 2, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+      } else if (p.summonType === 'cricket-trophy') {
+        // ── Cricket Trophy: gold cup shape ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#ffd700';
+        // Cup body (trapezoid)
+        const cupW = radius * 1.2;
+        const cupH = radius * 1.4;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - cupW * 0.7, sy - cupH * 0.3);
+        gameCtx.lineTo(sx - cupW * 0.5, sy + cupH * 0.3);
+        gameCtx.lineTo(sx + cupW * 0.5, sy + cupH * 0.3);
+        gameCtx.lineTo(sx + cupW * 0.7, sy - cupH * 0.3);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#b8860b';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        // Cup base (rectangle)
+        gameCtx.fillStyle = '#daa520';
+        gameCtx.fillRect(sx - cupW * 0.3, sy + cupH * 0.3, cupW * 0.6, cupH * 0.15);
+        gameCtx.fillRect(sx - cupW * 0.45, sy + cupH * 0.45, cupW * 0.9, cupH * 0.1);
+        // Handles (two arc lines)
+        if (!isDying) {
+          gameCtx.strokeStyle = '#ffd700';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.arc(sx - cupW * 0.75, sy, cupH * 0.25, -Math.PI * 0.5, Math.PI * 0.5);
+          gameCtx.stroke();
+          gameCtx.beginPath();
+          gameCtx.arc(sx + cupW * 0.75, sy, cupH * 0.25, Math.PI * 0.5, -Math.PI * 0.5);
+          gameCtx.stroke();
+          // Star on cup
+          gameCtx.fillStyle = '#fff8dc';
+          gameCtx.font = `${radius * 0.7}px serif`;
+          gameCtx.textAlign = 'center';
+          gameCtx.textBaseline = 'middle';
+          gameCtx.fillText('★', sx, sy);
+        }
+        // Pulsing gold glow
+        const trophyPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.004);
+        gameCtx.strokeStyle = `rgba(255, 215, 0, ${0.3 + trophyPulse * 0.4})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+        gameCtx.stroke();
+      } else if (p.summonType === 'guby-tv') {
+        // ── Filbus GUBY TV: dark rectangle with static screen ──
+        const tvW = radius * 1.6;
+        const tvH = radius * 1.3;
+        // TV body
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#1a1a2e';
+        gameCtx.fillRect(sx - tvW / 2, sy - tvH / 2, tvW, tvH);
+        gameCtx.strokeStyle = '#333';
+        gameCtx.lineWidth = 2;
+        gameCtx.strokeRect(sx - tvW / 2, sy - tvH / 2, tvW, tvH);
+        if (!isDying) {
+          // Screen with static noise
+          const scrW = tvW * 0.75; const scrH = tvH * 0.65;
+          const scrX = sx - scrW / 2; const scrY = sy - tvH / 2 + tvH * 0.1;
+          const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.01);
+          gameCtx.fillStyle = `rgba(162, 155, 254, ${0.4 + pulse * 0.3})`;
+          gameCtx.fillRect(scrX, scrY, scrW, scrH);
+          // Static lines
+          gameCtx.strokeStyle = `rgba(255,255,255,${0.15 + pulse * 0.15})`;
+          gameCtx.lineWidth = 1;
+          for (let i = 0; i < 4; i++) {
+            const ly = scrY + Math.random() * scrH;
+            gameCtx.beginPath();
+            gameCtx.moveTo(scrX, ly);
+            gameCtx.lineTo(scrX + scrW, ly);
+            gameCtx.stroke();
+          }
+          // Antenna
+          gameCtx.strokeStyle = '#555';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx - 3, sy - tvH / 2);
+          gameCtx.lineTo(sx - radius * 0.6, sy - tvH / 2 - radius * 0.5);
+          gameCtx.moveTo(sx + 3, sy - tvH / 2);
+          gameCtx.lineTo(sx + radius * 0.6, sy - tvH / 2 - radius * 0.5);
+          gameCtx.stroke();
+        }
+      } else if (p.summonType === 'guest666') {
+        // ── Guest666: large 2x2 black body with red eyes and red hair ──
+        const beastRadius = radius * 2; // 2x size
+        // Black body
+        gameCtx.fillStyle = isDying ? '#1a0000' : '#0a0a0a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, beastRadius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Subtle dark outline
+        const g666Pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.007);
+        gameCtx.strokeStyle = `rgba(180, 0, 0, ${0.4 + g666Pulse * 0.3})`;
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, beastRadius, 0, Math.PI * 2);
+        gameCtx.stroke();
+        if (!isDying) {
+          // Red hair spikes on top
+          gameCtx.fillStyle = '#cc0000';
+          const hairCount = 7;
+          for (let h = 0; h < hairCount; h++) {
+            const angle = -Math.PI * 0.85 + (Math.PI * 0.7) * (h / (hairCount - 1));
+            const baseX = sx + Math.cos(angle) * beastRadius * 0.75;
+            const baseY = sy + Math.sin(angle) * beastRadius * 0.75;
+            const tipX = sx + Math.cos(angle) * beastRadius * 1.25;
+            const tipY = sy + Math.sin(angle) * beastRadius * 1.25;
+            const perpX = -Math.sin(angle) * beastRadius * 0.12;
+            const perpY = Math.cos(angle) * beastRadius * 0.12;
+            gameCtx.beginPath();
+            gameCtx.moveTo(baseX - perpX, baseY - perpY);
+            gameCtx.lineTo(tipX, tipY);
+            gameCtx.lineTo(baseX + perpX, baseY + perpY);
+            gameCtx.closePath();
+            gameCtx.fill();
+          }
+          // Red eyes (two glowing dots)
+          gameCtx.fillStyle = '#ff0000';
+          gameCtx.beginPath();
+          gameCtx.arc(sx - beastRadius * 0.25, sy - beastRadius * 0.15, 5, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.beginPath();
+          gameCtx.arc(sx + beastRadius * 0.25, sy - beastRadius * 0.15, 5, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Red glow around eyes
+          gameCtx.fillStyle = `rgba(255, 0, 0, ${0.25 + g666Pulse * 0.2})`;
+          gameCtx.beginPath();
+          gameCtx.arc(sx - beastRadius * 0.25, sy - beastRadius * 0.15, 10, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.beginPath();
+          gameCtx.arc(sx + beastRadius * 0.25, sy - beastRadius * 0.15, 10, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+      } else if (p.summonType === 'imploding-kitten') {
+        // ── Imploding Kitten: blue kitten phase → black hole phase ──
+        if (p.kittenTimer > 0 && !p.blackHoleActive) {
+          // ── Kitten phase: cute blue kitten ──
+          const kRadius = radius * 1.2;
+          // Body
+          gameCtx.fillStyle = isDying ? '#224' : '#4a9fff';
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy, kRadius, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.strokeStyle = '#3070cc';
+          gameCtx.lineWidth = 2;
+          gameCtx.stroke();
+          if (!isDying) {
+            // Ears (triangles)
+            gameCtx.fillStyle = '#4a9fff';
+            // Left ear
+            gameCtx.beginPath();
+            gameCtx.moveTo(sx - kRadius * 0.6, sy - kRadius * 0.6);
+            gameCtx.lineTo(sx - kRadius * 0.9, sy - kRadius * 1.4);
+            gameCtx.lineTo(sx - kRadius * 0.15, sy - kRadius * 0.85);
+            gameCtx.closePath();
+            gameCtx.fill();
+            gameCtx.stroke();
+            // Right ear
+            gameCtx.beginPath();
+            gameCtx.moveTo(sx + kRadius * 0.6, sy - kRadius * 0.6);
+            gameCtx.lineTo(sx + kRadius * 0.9, sy - kRadius * 1.4);
+            gameCtx.lineTo(sx + kRadius * 0.15, sy - kRadius * 0.85);
+            gameCtx.closePath();
+            gameCtx.fill();
+            gameCtx.stroke();
+            // Inner ears (pink)
+            gameCtx.fillStyle = '#ff88aa';
+            gameCtx.beginPath();
+            gameCtx.moveTo(sx - kRadius * 0.5, sy - kRadius * 0.65);
+            gameCtx.lineTo(sx - kRadius * 0.75, sy - kRadius * 1.15);
+            gameCtx.lineTo(sx - kRadius * 0.22, sy - kRadius * 0.85);
+            gameCtx.closePath();
+            gameCtx.fill();
+            gameCtx.beginPath();
+            gameCtx.moveTo(sx + kRadius * 0.5, sy - kRadius * 0.65);
+            gameCtx.lineTo(sx + kRadius * 0.75, sy - kRadius * 1.15);
+            gameCtx.lineTo(sx + kRadius * 0.22, sy - kRadius * 0.85);
+            gameCtx.closePath();
+            gameCtx.fill();
+            // Eyes (big round cute eyes)
+            gameCtx.fillStyle = '#fff';
+            gameCtx.beginPath();
+            gameCtx.arc(sx - kRadius * 0.3, sy - kRadius * 0.15, kRadius * 0.25, 0, Math.PI * 2);
+            gameCtx.fill();
+            gameCtx.beginPath();
+            gameCtx.arc(sx + kRadius * 0.3, sy - kRadius * 0.15, kRadius * 0.25, 0, Math.PI * 2);
+            gameCtx.fill();
+            // Pupils
+            gameCtx.fillStyle = '#112';
+            gameCtx.beginPath();
+            gameCtx.arc(sx - kRadius * 0.25, sy - kRadius * 0.15, kRadius * 0.12, 0, Math.PI * 2);
+            gameCtx.fill();
+            gameCtx.beginPath();
+            gameCtx.arc(sx + kRadius * 0.35, sy - kRadius * 0.15, kRadius * 0.12, 0, Math.PI * 2);
+            gameCtx.fill();
+            // Nose (tiny pink triangle)
+            gameCtx.fillStyle = '#ff88aa';
+            gameCtx.beginPath();
+            gameCtx.moveTo(sx, sy + kRadius * 0.05);
+            gameCtx.lineTo(sx - kRadius * 0.08, sy + kRadius * 0.15);
+            gameCtx.lineTo(sx + kRadius * 0.08, sy + kRadius * 0.15);
+            gameCtx.closePath();
+            gameCtx.fill();
+            // Whiskers
+            gameCtx.strokeStyle = '#fff';
+            gameCtx.lineWidth = 1;
+            for (let w = -1; w <= 1; w += 2) {
+              gameCtx.beginPath();
+              gameCtx.moveTo(sx + w * kRadius * 0.15, sy + kRadius * 0.15);
+              gameCtx.lineTo(sx + w * kRadius * 0.7, sy + kRadius * 0.05);
+              gameCtx.stroke();
+              gameCtx.beginPath();
+              gameCtx.moveTo(sx + w * kRadius * 0.15, sy + kRadius * 0.2);
+              gameCtx.lineTo(sx + w * kRadius * 0.7, sy + kRadius * 0.25);
+              gameCtx.stroke();
+            }
+            // Countdown text above
+            gameCtx.fillStyle = '#fff';
+            gameCtx.font = `bold ${kRadius * 0.7}px sans-serif`;
+            gameCtx.textAlign = 'center';
+            gameCtx.textBaseline = 'middle';
+            gameCtx.fillText(Math.ceil(p.kittenTimer) + '', sx, sy - kRadius * 2);
+          }
+        } else {
+          // ── Black hole phase ──
+          const bhRadius = radius * 2;
+          const bhProgress = p.blackHoleTimer != null ? (1 - p.blackHoleTimer / 6) : 1;
+          // Dark center
+          gameCtx.fillStyle = '#050505';
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy, bhRadius, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Accretion disk — spiraling distortion rings
+          const t = Date.now() * 0.004;
+          const ringCount = 6;
+          for (let ring = 0; ring < ringCount; ring++) {
+            const ringR = bhRadius * (0.3 + ring * 0.18);
+            const alpha = (0.15 + ring * 0.08) * (0.7 + 0.3 * Math.sin(t + ring));
+            const hue = 260 + ring * 8; // purple to deep blue range
+            gameCtx.strokeStyle = `hsla(${hue}, 80%, 40%, ${alpha})`;
+            gameCtx.lineWidth = 2 + (ringCount - ring) * 0.5;
+            gameCtx.beginPath();
+            const startAngle = t * (1.2 + ring * 0.3) + ring * Math.PI * 0.3;
+            gameCtx.arc(sx, sy, ringR, startAngle, startAngle + Math.PI * (1.0 + ring * 0.15));
+            gameCtx.stroke();
+          }
+          // Inner bright singularity glow
+          const bhPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.012);
+          const singGrad = gameCtx.createRadialGradient(sx, sy, 0, sx, sy, bhRadius * 0.5);
+          singGrad.addColorStop(0, `rgba(120, 0, 200, ${0.3 + bhPulse * 0.2})`);
+          singGrad.addColorStop(1, 'rgba(40, 0, 80, 0)');
+          gameCtx.fillStyle = singGrad;
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy, bhRadius * 0.5, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Outer aura — expanding distortion
+          const auraGrad = gameCtx.createRadialGradient(sx, sy, bhRadius * 0.8, sx, sy, bhRadius * 1.6);
+          auraGrad.addColorStop(0, `rgba(60, 0, 120, ${0.12 + bhPulse * 0.08})`);
+          auraGrad.addColorStop(1, 'rgba(30, 0, 60, 0)');
+          gameCtx.fillStyle = auraGrad;
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy, bhRadius * 1.6, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Swirling arms + zone indicators (only during active phase)
+          if (p.blackHoleActive) {
+            const outerR = (p.blackHoleRadius || 8 * GAME_TILE);
+            const midR = (p.blackHoleMidRadius || 6 * GAME_TILE);
+            const innerR = (p.blackHoleInnerRadius || 4 * GAME_TILE);
+            // ── Swirling spiral arms reaching to 8x8 ──
+            const swirlT = Date.now() * 0.003;
+            const armCount = 5;
+            const segmentCount = 40;
+            for (let arm = 0; arm < armCount; arm++) {
+              const baseAngle = (arm / armCount) * Math.PI * 2;
+              gameCtx.beginPath();
+              for (let seg = 0; seg <= segmentCount; seg++) {
+                const frac = seg / segmentCount; // 0 at center, 1 at outer edge
+                const r = bhRadius * 0.5 + (outerR - bhRadius * 0.5) * frac;
+                // Spiral tightens toward center (more rotation near core)
+                const spiralAngle = baseAngle + swirlT * (2.5 - frac * 1.5) + frac * Math.PI * 1.5;
+                const px = sx + Math.cos(spiralAngle) * r;
+                const py = sy + Math.sin(spiralAngle) * r;
+                if (seg === 0) gameCtx.moveTo(px, py);
+                else gameCtx.lineTo(px, py);
+              }
+              // Fainter with distance: bright near center, fading outwards
+              const armAlpha = 0.25 + 0.1 * Math.sin(swirlT + arm);
+              const gradient = gameCtx.createLinearGradient(
+                sx, sy,
+                sx + Math.cos(baseAngle + swirlT) * outerR,
+                sy + Math.sin(baseAngle + swirlT) * outerR
+              );
+              gradient.addColorStop(0, `rgba(140, 40, 255, ${armAlpha})`);
+              gradient.addColorStop(0.4, `rgba(100, 20, 200, ${armAlpha * 0.5})`);
+              gradient.addColorStop(0.7, `rgba(70, 10, 160, ${armAlpha * 0.25})`);
+              gradient.addColorStop(1, `rgba(50, 0, 120, ${armAlpha * 0.08})`);
+              gameCtx.strokeStyle = gradient;
+              gameCtx.lineWidth = 2.5 - 1.5 * 0.5; // thinner at edges handled by alpha
+              gameCtx.stroke();
+            }
+            // ── Scattered particles along spiral paths ──
+            const particleT = Date.now() * 0.002;
+            for (let i = 0; i < 24; i++) {
+              const pAngle = particleT * 1.5 + i * (Math.PI * 2 / 24);
+              const pFrac = (Math.sin(particleT * 0.7 + i * 2.1) + 1) * 0.5;
+              const pR = bhRadius * 0.3 + (outerR - bhRadius * 0.3) * pFrac;
+              const spiralOff = pFrac * Math.PI * 1.2;
+              const px = sx + Math.cos(pAngle + spiralOff) * pR;
+              const py = sy + Math.sin(pAngle + spiralOff) * pR;
+              // Fade with distance
+              const distFrac = (pR - bhRadius * 0.3) / (outerR - bhRadius * 0.3);
+              const pAlpha = (0.3 - distFrac * 0.25) * (0.7 + 0.3 * Math.sin(particleT * 3 + i));
+              const pSize = 2.5 - distFrac * 1.5;
+              gameCtx.fillStyle = `rgba(140, 60, 255, ${Math.max(0.02, pAlpha)})`;
+              gameCtx.beginPath();
+              gameCtx.arc(px, py, Math.max(0.5, pSize), 0, Math.PI * 2);
+              gameCtx.fill();
+            }
+            // 8x8 outer boundary (dashed, very faint)
+            gameCtx.strokeStyle = `rgba(80, 0, 160, ${0.06 + bhPulse * 0.04})`;
+            gameCtx.lineWidth = 1;
+            gameCtx.setLineDash([8, 8]);
+            gameCtx.beginPath();
+            gameCtx.arc(sx, sy, outerR, 0, Math.PI * 2);
+            gameCtx.stroke();
+            gameCtx.setLineDash([]);
+            // 6x6 mid boundary
+            gameCtx.strokeStyle = `rgba(120, 0, 200, ${0.08 + bhPulse * 0.06})`;
+            gameCtx.lineWidth = 1;
+            gameCtx.setLineDash([5, 5]);
+            gameCtx.beginPath();
+            gameCtx.arc(sx, sy, midR, 0, Math.PI * 2);
+            gameCtx.stroke();
+            gameCtx.setLineDash([]);
+            // 4x4 inner boundary (stronger)
+            gameCtx.strokeStyle = `rgba(160, 0, 255, ${0.12 + bhPulse * 0.08})`;
+            gameCtx.lineWidth = 1.5;
+            gameCtx.setLineDash([4, 4]);
+            gameCtx.beginPath();
+            gameCtx.arc(sx, sy, innerR, 0, Math.PI * 2);
+            gameCtx.stroke();
+            gameCtx.setLineDash([]);
+          }
+          // Timer countdown text
+          if (p.blackHoleTimer != null && p.blackHoleTimer > 0) {
+            gameCtx.fillStyle = '#fff';
+            gameCtx.font = `bold ${bhRadius * 0.6}px sans-serif`;
+            gameCtx.textAlign = 'center';
+            gameCtx.textBaseline = 'middle';
+            gameCtx.fillText(Math.ceil(p.blackHoleTimer) + '', sx, sy);
+          }
+        }
+      } else if (p.summonType === 'napoleon-power-cannon') {
+        // Same render as regular napoleon-cannon
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#555';
+        const cSize = radius * 0.85;
+        gameCtx.fillRect(sx - cSize, sy - cSize, cSize * 2, cSize * 2);
+        gameCtx.strokeStyle = '#333';
+        gameCtx.lineWidth = 2;
+        gameCtx.strokeRect(sx - cSize, sy - cSize, cSize * 2, cSize * 2);
+        // Barrel
+        gameCtx.fillStyle = '#444';
+        gameCtx.fillRect(sx - 2, sy - cSize - 6, 4, 6);
+        // Star badge (power)
+        gameCtx.fillStyle = '#ffd700';
+        gameCtx.font = `${radius * 0.5}px serif`;
+        gameCtx.textAlign = 'center';
+        gameCtx.textBaseline = 'middle';
+        gameCtx.fillText('★', sx, sy);
+      } else if (p.summonType === 'napoleon-cavalry') {
+        // ── Cavalry: brown horse-like oval with rider ──
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#8b4513';
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx, sy, radius * 1.1, radius * 0.75, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#5c2d0e';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        if (!isDying) {
+          // Rider (small circle on top)
+          gameCtx.fillStyle = '#2c3e50';
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy - radius * 0.5, radius * 0.35, 0, Math.PI * 2);
+          gameCtx.fill();
+          // Sword
+          gameCtx.strokeStyle = '#c0c0c0';
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + radius * 0.3, sy - radius * 0.7);
+          gameCtx.lineTo(sx + radius * 0.8, sy - radius * 1.2);
+          gameCtx.stroke();
+        }
+      } else if (p.summonType === 'hitman-backup') {
+        // ── Hitman Backup Agent: dark grey figure with balaclava + pistol ──
+        // Body (dark charcoal circle)
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#2a2a2a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.85, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#5a0000' : '#555';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        if (!isDying) {
+          // Balaclava slit (eyes, horizontal white rect)
+          gameCtx.fillStyle = '#fff';
+          gameCtx.fillRect(sx - radius * 0.35, sy - radius * 0.18, radius * 0.7, radius * 0.22);
+          // Pistol (short L-shape pointing in direction of nearest foe)
+          const aimA = Math.atan2(p.vy || 0, p.vx || 0);
+          gameCtx.save();
+          gameCtx.translate(sx, sy);
+          gameCtx.rotate(aimA);
+          gameCtx.strokeStyle = '#aaa';
+          gameCtx.lineWidth = 2.5;
+          gameCtx.beginPath();
+          gameCtx.moveTo(radius * 0.4, 0);
+          gameCtx.lineTo(radius * 1.15, 0);
+          gameCtx.stroke();
+          // Grip
+          gameCtx.lineWidth = 2;
+          gameCtx.beginPath();
+          gameCtx.moveTo(radius * 0.55, 0);
+          gameCtx.lineTo(radius * 0.55, radius * 0.45);
+          gameCtx.stroke();
+          gameCtx.restore();
+          // HP bar above
+          const hpFrac = Math.max(0, p.hp / (p.maxHp || p.hp || 1));
+          gameCtx.fillStyle = '#600';
+          gameCtx.fillRect(sx - radius * 0.8, sy - radius * 1.5, radius * 1.6, 3);
+          gameCtx.fillStyle = '#0f0';
+          gameCtx.fillRect(sx - radius * 0.8, sy - radius * 1.5, radius * 1.6 * hpFrac, 3);
+          // "BACKUP" label
+          gameCtx.fillStyle = '#f5c842';
+          gameCtx.font = `bold ${Math.max(7, radius * 0.55)}px sans-serif`;
+          gameCtx.textAlign = 'center';
+          gameCtx.fillText('BACKUP', sx, sy - radius * 1.7);
+        }
+      }
+    } else if (p.fighter && p.fighter.id === 'onexonexonex' && !p.isSummon) {
+      // ── 1X1X1X1: Fully custom dot — dark base with neon green glitches + red eye ──
+      // Base: dark circle
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Glitchy neon green edge fragments (irregular outline instead of smooth)
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 2;
+      const segments = 8;
+      for (let i = 0; i < segments; i++) {
+        const a1 = (i / segments) * Math.PI * 2;
+        const a2 = ((i + 0.6) / segments) * Math.PI * 2;
+        // Offset each segment slightly for glitch effect
+        const jitter = ((i * 7 + 3) % 5) * 0.5 - 1;
+        const r = radius + jitter;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, r, a1, a2);
+        gameCtx.stroke();
+      }
+      // Neon green glitch streaks across the dot surface
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 1.2;
+      gameCtx.globalAlpha = 0.7;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.6, sy - radius * 0.3);
+      gameCtx.lineTo(sx - radius * 0.2, sy - radius * 0.1);
+      gameCtx.moveTo(sx + radius * 0.1, sy + radius * 0.2);
+      gameCtx.lineTo(sx + radius * 0.6, sy + radius * 0.1);
+      gameCtx.moveTo(sx - radius * 0.3, sy + radius * 0.4);
+      gameCtx.lineTo(sx + radius * 0.1, sy + radius * 0.55);
+      gameCtx.moveTo(sx + radius * 0.3, sy - radius * 0.5);
+      gameCtx.lineTo(sx + radius * 0.5, sy - radius * 0.2);
+      gameCtx.stroke();
+      gameCtx.globalAlpha = 1.0;
+      // Subtle green inner glow
+      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.08)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 0.8, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Red eye — glowing, slightly above center (like obelisk but rounder)
+      // Outer glow
+      gameCtx.fillStyle = 'rgba(255, 34, 0, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 6, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Eye white (dark)
+      gameCtx.fillStyle = '#220000';
+      gameCtx.beginPath();
+      // Almond/eye shape
+      gameCtx.ellipse(sx, sy - radius * 0.15, 5, 3, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Iris
+      gameCtx.fillStyle = '#ff2200';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 2.5, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Pupil
+      gameCtx.fillStyle = '#000';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 1, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Bright red glint
+      gameCtx.fillStyle = 'rgba(255, 100, 80, 0.8)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx + 1, sy - radius * 0.15 - 1, 0.7, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Zombie indicator if zombies active
+      if (p.zombieIds && p.zombieIds.length > 0) {
+        gameCtx.fillStyle = '#1a5c1a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'noli' && !p.isSummon) {
+      // ── Noli: Purple version of 1X1X1X1 skin ──
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Glitchy neon purple edge fragments
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 2;
+      const nSegments = 8;
+      for (let i = 0; i < nSegments; i++) {
+        const a1 = (i / nSegments) * Math.PI * 2;
+        const a2 = ((i + 0.6) / nSegments) * Math.PI * 2;
+        const jitter = ((i * 7 + 3) % 5) * 0.5 - 1;
+        const rr = radius + jitter;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, rr, a1, a2);
+        gameCtx.stroke();
+      }
+      // Purple glitch streaks
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 1.2;
+      gameCtx.globalAlpha = 0.7;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.6, sy - radius * 0.3);
+      gameCtx.lineTo(sx - radius * 0.2, sy - radius * 0.1);
+      gameCtx.moveTo(sx + radius * 0.1, sy + radius * 0.2);
+      gameCtx.lineTo(sx + radius * 0.6, sy + radius * 0.1);
+      gameCtx.moveTo(sx - radius * 0.3, sy + radius * 0.4);
+      gameCtx.lineTo(sx + radius * 0.1, sy + radius * 0.55);
+      gameCtx.stroke();
+      gameCtx.globalAlpha = 1.0;
+      // Purple inner glow
+      gameCtx.fillStyle = 'rgba(160, 32, 240, 0.08)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 0.8, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Purple eye
+      gameCtx.fillStyle = 'rgba(160, 32, 240, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 6, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#1a0030';
+      gameCtx.beginPath();
+      gameCtx.ellipse(sx, sy - radius * 0.15, 5, 3, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#a020f0';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 2.5, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#000';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 1, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = 'rgba(200, 130, 255, 0.8)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx + 1, sy - radius * 0.15 - 1, 0.7, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Clone indicator
+      if (p.noliCloneId) {
+        gameCtx.fillStyle = '#a020f0';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'moderator') {
+      // Moderator: the dot IS a terminal window
+      const tw = radius * 2;
+      const th = radius * 2;
+      const txOff = sx - tw / 2;
+      const tyOff = sy - th / 2;
+      const cr = radius * 0.25;
+      // Terminal background (rounded rect)
+      gameCtx.fillStyle = isDying ? '#3a0000' : '#0c0c0c';
+      gameCtx.beginPath();
+      gameCtx.moveTo(txOff + cr, tyOff); gameCtx.lineTo(txOff + tw - cr, tyOff);
+      gameCtx.quadraticCurveTo(txOff + tw, tyOff, txOff + tw, tyOff + cr);
+      gameCtx.lineTo(txOff + tw, tyOff + th - cr);
+      gameCtx.quadraticCurveTo(txOff + tw, tyOff + th, txOff + tw - cr, tyOff + th);
+      gameCtx.lineTo(txOff + cr, tyOff + th);
+      gameCtx.quadraticCurveTo(txOff, tyOff + th, txOff, tyOff + th - cr);
+      gameCtx.lineTo(txOff, tyOff + cr);
+      gameCtx.quadraticCurveTo(txOff, tyOff, txOff + cr, tyOff);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Title bar
+      const tbH = th * 0.2;
+      gameCtx.fillStyle = isDying ? '#5a0000' : '#2d2d2d';
+      gameCtx.beginPath();
+      gameCtx.moveTo(txOff + cr, tyOff); gameCtx.lineTo(txOff + tw - cr, tyOff);
+      gameCtx.quadraticCurveTo(txOff + tw, tyOff, txOff + tw, tyOff + cr);
+      gameCtx.lineTo(txOff + tw, tyOff + tbH);
+      gameCtx.lineTo(txOff, tyOff + tbH);
+      gameCtx.lineTo(txOff, tyOff + cr);
+      gameCtx.quadraticCurveTo(txOff, tyOff, txOff + cr, tyOff);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Title bar dots (red/yellow/green)
+      const dotSz = Math.max(1.2, radius * 0.12);
+      const dotGap = dotSz * 2.8;
+      const dotYPos = tyOff + tbH * 0.5;
+      gameCtx.fillStyle = '#ff5f56'; gameCtx.beginPath(); gameCtx.arc(txOff + dotGap, dotYPos, dotSz, 0, Math.PI * 2); gameCtx.fill();
+      gameCtx.fillStyle = '#ffbd2e'; gameCtx.beginPath(); gameCtx.arc(txOff + dotGap * 2, dotYPos, dotSz, 0, Math.PI * 2); gameCtx.fill();
+      gameCtx.fillStyle = '#27c93f'; gameCtx.beginPath(); gameCtx.arc(txOff + dotGap * 3, dotYPos, dotSz, 0, Math.PI * 2); gameCtx.fill();
+      // Green terminal text
+      if (!isDying) {
+        gameCtx.fillStyle = '#00ff41';
+        const fontSize = Math.max(5, radius * 0.55);
+        gameCtx.font = 'bold ' + fontSize + 'px monospace';
+        gameCtx.textAlign = 'left';
+        gameCtx.textBaseline = 'middle';
+        gameCtx.fillText('> mod_', txOff + 2, sy + th * 0.12);
+      }
+      // Green border glow
+      gameCtx.strokeStyle = isDying ? '#8b0000' : '#00ff41';
+      gameCtx.lineWidth = 1.2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(txOff + cr, tyOff); gameCtx.lineTo(txOff + tw - cr, tyOff);
+      gameCtx.quadraticCurveTo(txOff + tw, tyOff, txOff + tw, tyOff + cr);
+      gameCtx.lineTo(txOff + tw, tyOff + th - cr);
+      gameCtx.quadraticCurveTo(txOff + tw, tyOff + th, txOff + tw - cr, tyOff + th);
+      gameCtx.lineTo(txOff + cr, tyOff + th);
+      gameCtx.quadraticCurveTo(txOff, tyOff + th, txOff, tyOff + th - cr);
+      gameCtx.lineTo(txOff, tyOff + cr);
+      gameCtx.quadraticCurveTo(txOff, tyOff, txOff + cr, tyOff);
+      gameCtx.closePath();
+      gameCtx.stroke();
+    } else if (p.fighter && p.fighter.id === 'dnd') {
+      // D&D Campaigner: race-dependent dot with weapon + shield
+      const race = p.dndRace || 'human';
+
+      if (race === 'elf') {
+        // ── Elf: green dot with pointy ears, sword + shield ──
+        const bodyCol = isDying ? '#8b0000' : '#2ecc71';
+        // Body circle
+        gameCtx.fillStyle = bodyCol;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : 'rgba(0,0,0,0.4)';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Elf ears (two pointed triangles)
+        gameCtx.fillStyle = isDying ? '#a00' : '#27ae60';
+        // Left ear
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.7, sy - radius * 0.5);
+        gameCtx.lineTo(sx - radius * 1.4, sy - radius * 1.2);
+        gameCtx.lineTo(sx - radius * 0.3, sy - radius * 0.8);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Right ear
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.7, sy - radius * 0.5);
+        gameCtx.lineTo(sx + radius * 1.4, sy - radius * 1.2);
+        gameCtx.lineTo(sx + radius * 0.3, sy - radius * 0.8);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Shield (left side)
+        const shX = sx - radius * 0.9;
+        const shY = sy + radius * 0.1;
+        const shW = radius * 0.7;
+        const shH = radius * 0.9;
+        gameCtx.fillStyle = isDying ? '#600' : '#1a7a3a';
+        gameCtx.beginPath();
+        gameCtx.moveTo(shX, shY - shH * 0.5);
+        gameCtx.lineTo(shX + shW * 0.5, shY - shH * 0.5);
+        gameCtx.lineTo(shX + shW * 0.5, shY + shH * 0.2);
+        gameCtx.lineTo(shX + shW * 0.25, shY + shH * 0.5);
+        gameCtx.lineTo(shX, shY + shH * 0.2);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#400' : '#145a2a';
+        gameCtx.lineWidth = 1;
+        gameCtx.stroke();
+        // Sword (right side, angled up-right)
+        const swX = sx + radius * 0.6;
+        const swY = sy - radius * 0.2;
+        gameCtx.strokeStyle = isDying ? '#888' : '#c0c0c0';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX, swY + radius * 0.5);
+        gameCtx.lineTo(swX + radius * 0.3, swY - radius * 0.9);
+        gameCtx.stroke();
+        // Sword tip
+        gameCtx.fillStyle = '#e0e0e0';
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX + radius * 0.3, swY - radius * 0.9);
+        gameCtx.lineTo(swX + radius * 0.35, swY - radius * 1.1);
+        gameCtx.lineTo(swX + radius * 0.2, swY - radius * 0.85);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Crossguard
+        gameCtx.strokeStyle = isDying ? '#666' : '#d4af37';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX - radius * 0.15, swY + radius * 0.1);
+        gameCtx.lineTo(swX + radius * 0.45, swY + radius * 0.1);
+        gameCtx.stroke();
+      } else if (race === 'dwarf') {
+        // ── Dwarf: orange dot with axe + shield ──
+        const bodyCol = isDying ? '#8b0000' : '#e67e22';
+        // Body circle (slightly smaller to look stocky)
+        gameCtx.fillStyle = bodyCol;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : 'rgba(0,0,0,0.4)';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Beard (brown arc below)
+        gameCtx.fillStyle = isDying ? '#600' : '#8b5e3c';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy + radius * 0.3, radius * 0.7, 0, Math.PI);
+        gameCtx.fill();
+        // Shield (left side — round/wide dwarven shield)
+        const shX = sx - radius * 0.9;
+        const shY = sy;
+        const shR = radius * 0.55;
+        gameCtx.fillStyle = isDying ? '#600' : '#b5651d';
+        gameCtx.beginPath();
+        gameCtx.arc(shX, shY, shR, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#400' : '#8b4513';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Shield boss (center dot)
+        gameCtx.fillStyle = isDying ? '#888' : '#d4af37';
+        gameCtx.beginPath();
+        gameCtx.arc(shX, shY, shR * 0.3, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Axe (right side)
+        const axX = sx + radius * 0.7;
+        const axY = sy;
+        // Axe handle
+        gameCtx.strokeStyle = isDying ? '#555' : '#8b4513';
+        gameCtx.lineWidth = 2.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(axX, axY + radius * 0.7);
+        gameCtx.lineTo(axX, axY - radius * 0.9);
+        gameCtx.stroke();
+        // Axe head (two curved blades)
+        gameCtx.fillStyle = isDying ? '#888' : '#aaa';
+        gameCtx.beginPath();
+        gameCtx.moveTo(axX, axY - radius * 0.9);
+        gameCtx.quadraticCurveTo(axX + radius * 0.7, axY - radius * 0.7, axX + radius * 0.5, axY - radius * 0.3);
+        gameCtx.lineTo(axX, axY - radius * 0.4);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#666' : '#777';
+        gameCtx.lineWidth = 1;
+        gameCtx.stroke();
+        // Second blade (left side of axe)
+        gameCtx.fillStyle = isDying ? '#888' : '#aaa';
+        gameCtx.beginPath();
+        gameCtx.moveTo(axX, axY - radius * 0.9);
+        gameCtx.quadraticCurveTo(axX - radius * 0.7, axY - radius * 0.7, axX - radius * 0.5, axY - radius * 0.3);
+        gameCtx.lineTo(axX, axY - radius * 0.4);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#666' : '#777';
+        gameCtx.lineWidth = 1;
+        gameCtx.stroke();
+      } else {
+        // ── Human: blue dot with sword + shield ──
+        const bodyCol = isDying ? '#8b0000' : '#3498db';
+        // Body circle
+        gameCtx.fillStyle = bodyCol;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#500' : 'rgba(0,0,0,0.4)';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.stroke();
+        // Shield (left side — kite shield shape)
+        const shX = sx - radius * 0.9;
+        const shY = sy + radius * 0.1;
+        const shW = radius * 0.7;
+        const shH = radius * 1.0;
+        gameCtx.fillStyle = isDying ? '#600' : '#2c3e80';
+        gameCtx.beginPath();
+        gameCtx.moveTo(shX, shY - shH * 0.5);
+        gameCtx.lineTo(shX + shW * 0.5, shY - shH * 0.5);
+        gameCtx.lineTo(shX + shW * 0.5, shY + shH * 0.15);
+        gameCtx.lineTo(shX + shW * 0.25, shY + shH * 0.5);
+        gameCtx.lineTo(shX, shY + shH * 0.15);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = isDying ? '#400' : '#1a2555';
+        gameCtx.lineWidth = 1;
+        gameCtx.stroke();
+        // Shield cross emblem
+        gameCtx.strokeStyle = isDying ? '#888' : '#d4af37';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(shX + shW * 0.25, shY - shH * 0.3);
+        gameCtx.lineTo(shX + shW * 0.25, shY + shH * 0.3);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.moveTo(shX + shW * 0.05, shY - shH * 0.1);
+        gameCtx.lineTo(shX + shW * 0.45, shY - shH * 0.1);
+        gameCtx.stroke();
+        // Sword (right side, angled up-right)
+        const swX = sx + radius * 0.6;
+        const swY = sy - radius * 0.2;
+        gameCtx.strokeStyle = isDying ? '#888' : '#c0c0c0';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX, swY + radius * 0.5);
+        gameCtx.lineTo(swX + radius * 0.3, swY - radius * 0.9);
+        gameCtx.stroke();
+        // Sword tip
+        gameCtx.fillStyle = '#e0e0e0';
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX + radius * 0.3, swY - radius * 0.9);
+        gameCtx.lineTo(swX + radius * 0.35, swY - radius * 1.1);
+        gameCtx.lineTo(swX + radius * 0.2, swY - radius * 0.85);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Crossguard
+        gameCtx.strokeStyle = isDying ? '#666' : '#d4af37';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(swX - radius * 0.15, swY + radius * 0.1);
+        gameCtx.lineTo(swX + radius * 0.45, swY + radius * 0.1);
+        gameCtx.stroke();
+      }
+      // GP indicator (gold text above)
+      if (p.dndGP > 0) {
+        gameCtx.fillStyle = '#ffd700';
+        gameCtx.font = 'bold ' + Math.max(5, radius * 0.45) + 'px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.textBaseline = 'bottom';
+        gameCtx.fillText(p.dndGP + 'GP', sx, sy - radius - 2);
+      }
+      // D20 glow when active
+      if (p.dndD20Active) {
+        gameCtx.strokeStyle = '#ffd700';
+        gameCtx.lineWidth = 2;
+        gameCtx.setLineDash([3, 3]);
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+      }
+    } else if (p.fighter && p.fighter.id === 'dragon' && !p.isSummon) {
+      // ── Dragon of Icespire: icy blue dragon dot ──
+      // Base: dark icy blue circle
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#1a3a5c';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Icy crystalline edge
+      gameCtx.strokeStyle = isDying ? '#500' : '#5bb8e8';
+      gameCtx.lineWidth = 2.5;
+      gameCtx.stroke();
+      // Dragon wing shapes (left and right)
+      if (!isDying) {
+        gameCtx.fillStyle = 'rgba(91, 184, 232, 0.4)';
+        // Left wing
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.7, sy - radius * 0.2);
+        gameCtx.lineTo(sx - radius * 1.6, sy - radius * 0.8);
+        gameCtx.lineTo(sx - radius * 1.3, sy + radius * 0.1);
+        gameCtx.lineTo(sx - radius * 0.7, sy + radius * 0.3);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Right wing
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.7, sy - radius * 0.2);
+        gameCtx.lineTo(sx + radius * 1.6, sy - radius * 0.8);
+        gameCtx.lineTo(sx + radius * 1.3, sy + radius * 0.1);
+        gameCtx.lineTo(sx + radius * 0.7, sy + radius * 0.3);
+        gameCtx.closePath();
+        gameCtx.fill();
+      }
+      // Icy eyes
+      gameCtx.fillStyle = '#00ddff';
+      gameCtx.beginPath();
+      gameCtx.arc(sx - radius * 0.25, sy - radius * 0.15, radius * 0.15, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.arc(sx + radius * 0.25, sy - radius * 0.15, radius * 0.15, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Tiny horns
+      gameCtx.strokeStyle = '#7fafc4';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.35, sy - radius * 0.7);
+      gameCtx.lineTo(sx - radius * 0.5, sy - radius * 1.2);
+      gameCtx.stroke();
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius * 0.35, sy - radius * 0.7);
+      gameCtx.lineTo(sx + radius * 0.5, sy - radius * 1.2);
+      gameCtx.stroke();
+      // Flying indicator
+      if (p.dragonFlying) {
+        gameCtx.strokeStyle = 'rgba(200, 240, 255, 0.6)';
+        gameCtx.lineWidth = 2;
+        gameCtx.setLineDash([4, 4]);
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.4, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+      }
+      // Roar glow
+      if (p.dragonRoarActive) {
+        gameCtx.strokeStyle = '#5b8fa8';
+        gameCtx.lineWidth = 3;
+        gameCtx.globalAlpha = 0.5 + Math.sin(Date.now() / 200) * 0.3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.3, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.globalAlpha = 1;
+      }
+      // Beam charging indicator (aim moves slowly)
+      if (p.dragonBeamCharging) {
+        const chargeProgress = 1 - (p.dragonBeamChargeTimer / 3);
+        gameCtx.strokeStyle = '#00ccff';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * chargeProgress);
+        gameCtx.stroke();
+        // Show beam direction — long preview so player can see where it aims
+        const bLen = GAME_TILE * 12;
+        const bW = (p.fighter.abilities[2].beamWidth || 2) * GAME_TILE;
+        gameCtx.strokeStyle = 'rgba(0, 204, 255, ' + (0.15 + 0.2 * chargeProgress) + ')';
+        gameCtx.lineWidth = bW * (0.3 + 0.7 * chargeProgress);
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy);
+        gameCtx.lineTo(sx + p.dragonBeamAimNx * bLen, sy + p.dragonBeamAimNy * bLen);
+        gameCtx.stroke();
+      }
+    } else if (p.fighter && p.fighter.id === 'illusion' && !p.isSummon) {
+      // ── Illusion: wizard hat character with silvery-blue theme ──
+      const isInvis = p.illusionInvisTimer > 0 || p.illusionSpecialInvis || p.illusionBushInvisTimer > 0;
+      const baseAlpha = isDying ? 0.7 : (isInvis && isLocal) ? 0.35 : 1.0;
+      gameCtx.globalAlpha = baseAlpha;
+      // Body — silvery-blue circle
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#7f8fa6';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Shimmer ring around body
+      gameCtx.strokeStyle = isDying ? '#500' : 'rgba(200, 220, 255, 0.6)';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // ── Wizard hat on top ──
+      if (!isDying) {
+        const hatBase = sy - radius * 0.5;
+        const hatW = radius * 1.1;
+        const hatH = radius * 1.6;
+        // Hat brim
+        gameCtx.fillStyle = '#3a3a5e';
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx, hatBase + 2, hatW, radius * 0.2, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#7f8fa6';
+        gameCtx.lineWidth = 0.8;
+        gameCtx.stroke();
+        // Hat cone
+        gameCtx.fillStyle = '#2a2a4e';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - hatW * 0.7, hatBase);
+        gameCtx.lineTo(sx + radius * 0.15, hatBase - hatH);
+        gameCtx.lineTo(sx + hatW * 0.7, hatBase);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#7f8fa6';
+        gameCtx.lineWidth = 1;
+        gameCtx.stroke();
+        // Hat band
+        gameCtx.strokeStyle = '#c8dcff';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - hatW * 0.6, hatBase - 1);
+        gameCtx.lineTo(sx + hatW * 0.6, hatBase - 1);
+        gameCtx.stroke();
+        // Star on hat
+        const starX = sx, starY = hatBase - hatH * 0.45;
+        gameCtx.fillStyle = '#c8dcff';
+        gameCtx.beginPath();
+        for (let i = 0; i < 5; i++) {
+          const a = -Math.PI / 2 + i * Math.PI * 2 / 5;
+          const ai = a + Math.PI / 5;
+          gameCtx.lineTo(starX + Math.cos(a) * radius * 0.2, starY + Math.sin(a) * radius * 0.2);
+          gameCtx.lineTo(starX + Math.cos(ai) * radius * 0.09, starY + Math.sin(ai) * radius * 0.09);
+        }
+        gameCtx.closePath();
+        gameCtx.fill();
+      }
+      // Eyes — mystical silvery
+      gameCtx.fillStyle = isDying ? '#500' : 'rgba(200, 220, 255, 0.7)';
+      gameCtx.beginPath();
+      gameCtx.ellipse(sx - radius * 0.25, sy - radius * 0.1, 3, 2.2, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.ellipse(sx + radius * 0.25, sy - radius * 0.1, 3, 2.2, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Pupils
+      gameCtx.fillStyle = '#111';
+      gameCtx.beginPath();
+      gameCtx.arc(sx - radius * 0.25, sy - radius * 0.1, 1.3, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.arc(sx + radius * 0.25, sy - radius * 0.1, 1.3, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.globalAlpha = dotAlpha;
+    } else if (p.fighter && p.fighter.id === 'dogtooth' && !p.isSummon) {
+      // ── Dog Tooth: black dot with small spikes, knife inside, angry black eyes ──
+      // Body — black circle
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Small spikes barely extending past the dot
+      if (!isDying) {
+        gameCtx.fillStyle = '#111';
+        gameCtx.strokeStyle = '#333';
+        gameCtx.lineWidth = 0.8;
+        const spikeCount = 10;
+        for (let i = 0; i < spikeCount; i++) {
+          const a = (i / spikeCount) * Math.PI * 2;
+          const baseL = radius * 0.88;
+          const tipL = radius * 1.25;
+          const spread = 0.15;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + Math.cos(a - spread) * baseL, sy + Math.sin(a - spread) * baseL);
+          gameCtx.lineTo(sx + Math.cos(a) * tipL, sy + Math.sin(a) * tipL);
+          gameCtx.lineTo(sx + Math.cos(a + spread) * baseL, sy + Math.sin(a + spread) * baseL);
+          gameCtx.closePath();
+          gameCtx.fill();
+          gameCtx.stroke();
+        }
+      }
+      // Angry black eyes
+      if (!isDying) {
+        gameCtx.fillStyle = '#fff';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.3, sy - radius * 0.1, radius * 0.2, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.fillStyle = '#000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.3, sy - radius * 0.1, radius * 0.1, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.fillStyle = '#fff';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.3, sy - radius * 0.1, radius * 0.2, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.fillStyle = '#000';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.3, sy - radius * 0.1, radius * 0.1, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Angry eyebrows
+        gameCtx.strokeStyle = '#fff';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.5, sy - radius * 0.35);
+        gameCtx.lineTo(sx - radius * 0.15, sy - radius * 0.25);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.5, sy - radius * 0.35);
+        gameCtx.lineTo(sx + radius * 0.15, sy - radius * 0.25);
+        gameCtx.stroke();
+      }
+      // Small knife inside the dot (does not poke out)
+      if (!isDying) {
+        const kAngle = -Math.PI / 4;
+        const kPerp = kAngle + Math.PI / 2;
+        const kLen = radius * 0.75; // small, fits inside
+        // Blade start inside body
+        const kBaseX = sx + Math.cos(kAngle) * radius * 0.05;
+        const kBaseY = sy + Math.sin(kAngle) * radius * 0.05;
+        const kTipX = kBaseX + Math.cos(kAngle) * kLen;
+        const kTipY = kBaseY + Math.sin(kAngle) * kLen;
+        const bladeW = 2.5;
+        // Blade shape — one straight side (spine), one curved side (edge)
+        gameCtx.fillStyle = '#c0c0c0';
+        gameCtx.beginPath();
+        // Straight spine side (flat line from base to tip)
+        gameCtx.moveTo(kBaseX - Math.cos(kPerp) * (bladeW * 0.4), kBaseY - Math.sin(kPerp) * (bladeW * 0.4));
+        gameCtx.lineTo(kTipX, kTipY);
+        // Curved edge side (belly curve back to base)
+        const curveMidX = kBaseX + Math.cos(kAngle) * kLen * 0.5 + Math.cos(kPerp) * (bladeW * 1.3);
+        const curveMidY = kBaseY + Math.sin(kAngle) * kLen * 0.5 + Math.sin(kPerp) * (bladeW * 1.3);
+        gameCtx.quadraticCurveTo(curveMidX, curveMidY,
+          kBaseX + Math.cos(kPerp) * bladeW, kBaseY + Math.sin(kPerp) * bladeW);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#888';
+        gameCtx.lineWidth = 0.5;
+        gameCtx.stroke();
+        // Handle
+        const handleLen = radius * 0.3;
+        const hEndX = kBaseX + Math.cos(kAngle + Math.PI) * handleLen;
+        const hEndY = kBaseY + Math.sin(kAngle + Math.PI) * handleLen;
+        gameCtx.strokeStyle = '#2a1a0a';
+        gameCtx.lineWidth = 3;
+        gameCtx.lineCap = 'round';
+        gameCtx.beginPath();
+        gameCtx.moveTo(kBaseX, kBaseY);
+        gameCtx.lineTo(hEndX, hEndY);
+        gameCtx.stroke();
+        gameCtx.lineCap = 'butt';
+      }
+      // Smile infection glow
+      if (p.dogtoothSmileTimer > 0) {
+        const smilePulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.01);
+        gameCtx.strokeStyle = 'rgba(255, 0, 0, ' + (0.4 + smilePulse * 0.4) + ')';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+        gameCtx.stroke();
+      }
+    } else if (p.summonType === 'omori-kel') {
+      // ── Kel: orange dot with happy eyes ──
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#f39c12';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#e67e22';
+      gameCtx.lineWidth = 2;
+      gameCtx.stroke();
+      if (!isDying) {
+        // Happy eyes (arcs curving up — ^  ^)
+        gameCtx.strokeStyle = '#000'; gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.25, sy - radius * 0.05, radius * 0.12, Math.PI, 0);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.25, sy - radius * 0.05, radius * 0.12, Math.PI, 0);
+        gameCtx.stroke();
+      }
+      const kHpFrac = Math.max(0, p.hp / p.maxHp);
+      gameCtx.fillStyle = '#600'; gameCtx.fillRect(sx - radius * 0.6, sy - radius * 1.4, radius * 1.2, 3);
+      gameCtx.fillStyle = '#0f0'; gameCtx.fillRect(sx - radius * 0.6, sy - radius * 1.4, radius * 1.2 * kHpFrac, 3);
+    } else if (p.summonType === 'omori-aubrey') {
+      // ── Aubrey: pink dot with happy eyes ──
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#e84393';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#d63384';
+      gameCtx.lineWidth = 2;
+      gameCtx.stroke();
+      if (!isDying) {
+        // Happy eyes (arcs curving up — ^  ^)
+        gameCtx.strokeStyle = '#000'; gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.25, sy - radius * 0.05, radius * 0.12, Math.PI, 0);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.25, sy - radius * 0.05, radius * 0.12, Math.PI, 0);
+        gameCtx.stroke();
+      }
+      const aHpFrac = Math.max(0, p.hp / p.maxHp);
+      gameCtx.fillStyle = '#600'; gameCtx.fillRect(sx - radius * 0.6, sy - radius * 1.4, radius * 1.2, 3);
+      gameCtx.fillStyle = '#0f0'; gameCtx.fillRect(sx - radius * 0.6, sy - radius * 1.4, radius * 1.2 * aHpFrac, 3);
+    } else if (p.summonType === 'omori-hero') {
+      // ── Hero: green dot with happy eyes ──
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#00b894';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#00a381';
+      gameCtx.lineWidth = 2;
+      gameCtx.stroke();
+      if (!isDying) {
+        // Happy eyes (arcs curving up — ^  ^)
+        gameCtx.strokeStyle = '#000'; gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx - radius * 0.25, sy - radius * 0.05, radius * 0.12, Math.PI, 0);
+        gameCtx.stroke();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius * 0.25, sy - radius * 0.05, radius * 0.12, Math.PI, 0);
+        gameCtx.stroke();
+      }
+      const hHpFrac = Math.max(0, p.hp / p.maxHp);
+      gameCtx.fillStyle = '#600'; gameCtx.fillRect(sx - radius * 0.6, sy - radius * 1.4, radius * 1.2, 3);
+      gameCtx.fillStyle = '#0f0'; gameCtx.fillRect(sx - radius * 0.6, sy - radius * 1.4, radius * 1.2 * hHpFrac, 3);
+    } else {
+      // Normal player dot
+      gameCtx.fillStyle = isDying ? '#8b0000' : (p.boiledOneActive ? '#8b0000' : p.color);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+
+    // Outline
+    gameCtx.strokeStyle = 'rgba(0,0,0,0.4)';
+    gameCtx.lineWidth = 2;
+    gameCtx.stroke();
+
+    // Omori: just two neutral dot eyes
+    if (p.fighter && p.fighter.id === 'omori' && !isDying) {
+      gameCtx.fillStyle = '#000';
+      gameCtx.beginPath();
+      gameCtx.arc(sx - radius * 0.25, sy, radius * 0.1, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.arc(sx + radius * 0.25, sy, radius * 0.1, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Fighter icon on the dot
+    if (p.fighter && p.fighter.id === 'poker') {
+      // Poker: chip icon sticking out from the dot (like the sword does for Fighter)
+      const chipR = radius * 0.5;
+      const chipAngle = -Math.PI / 4; // upper-right, same as sword
+      const chipX = sx + Math.cos(chipAngle) * (radius + chipR * 0.3);
+      const chipY = sy + Math.sin(chipAngle) * (radius + chipR * 0.3);
+      // Chip body
+      gameCtx.fillStyle = '#222';
+      gameCtx.beginPath();
+      gameCtx.arc(chipX, chipY, chipR, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Outer ring
+      gameCtx.strokeStyle = '#555';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(chipX, chipY, chipR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Inner circle
+      gameCtx.strokeStyle = '#fff';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.arc(chipX, chipY, chipR * 0.55, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Edge notches (4 dashes around the chip)
+      for (let n = 0; n < 4; n++) {
+        const a = (n * Math.PI) / 2;
+        const nx1 = chipX + Math.cos(a) * chipR * 0.7;
+        const ny1 = chipY + Math.sin(a) * chipR * 0.7;
+        const nx2 = chipX + Math.cos(a) * chipR * 0.95;
+        const ny2 = chipY + Math.sin(a) * chipR * 0.95;
+        gameCtx.strokeStyle = '#fff';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(nx1, ny1);
+        gameCtx.lineTo(nx2, ny2);
+        gameCtx.stroke();
+      }
+    } else if (p.fighter && p.fighter.id === 'filbus') {
+      // Filbus: chair icon on the dot
+      const chairAngle = -Math.PI / 4;
+      const chairX = sx + Math.cos(chairAngle) * (radius + 2);
+      const chairY = sy + Math.sin(chairAngle) * (radius + 2);
+      const chairW = radius * 0.7;
+      const chairH = radius * 0.5;
+      // Seat
+      gameCtx.fillStyle = '#a0522d';
+      gameCtx.fillRect(chairX - chairW / 2, chairY - chairH / 2, chairW, chairH);
+      // Back
+      gameCtx.fillStyle = '#8b4513';
+      gameCtx.fillRect(chairX - chairW / 2, chairY - chairH, chairW * 0.25, chairH);
+      gameCtx.fillRect(chairX + chairW / 4, chairY - chairH, chairW * 0.25, chairH);
+      // Legs
+      gameCtx.strokeStyle = '#654321';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(chairX - chairW / 2 + 1, chairY + chairH / 2);
+      gameCtx.lineTo(chairX - chairW / 2 + 1, chairY + chairH);
+      gameCtx.moveTo(chairX + chairW / 2 - 1, chairY + chairH / 2);
+      gameCtx.lineTo(chairX + chairW / 2 - 1, chairY + chairH);
+      gameCtx.stroke();
+      // Summon indicator dot if summon active
+      if (p.summonId) {
+        gameCtx.fillStyle = '#d4af37';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'cricket') {
+      // Cricket: bat icon on the dot
+      const batAngle = -Math.PI / 4;
+      const batLen = radius * 1.4;
+      const batBaseX = sx + Math.cos(batAngle) * radius * 0.3;
+      const batBaseY = sy + Math.sin(batAngle) * radius * 0.3;
+      const batTipX = batBaseX + Math.cos(batAngle) * batLen;
+      const batTipY = batBaseY + Math.sin(batAngle) * batLen;
+      // Handle
+      gameCtx.strokeStyle = '#8b4513';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.moveTo(batBaseX, batBaseY);
+      gameCtx.lineTo(batBaseX + Math.cos(batAngle) * batLen * 0.4, batBaseY + Math.sin(batAngle) * batLen * 0.4);
+      gameCtx.stroke();
+      // Blade (wider part)
+      gameCtx.strokeStyle = '#c8a96e';
+      gameCtx.lineWidth = 6;
+      gameCtx.beginPath();
+      gameCtx.moveTo(batBaseX + Math.cos(batAngle) * batLen * 0.4, batBaseY + Math.sin(batAngle) * batLen * 0.4);
+      gameCtx.lineTo(batTipX, batTipY);
+      gameCtx.stroke();
+      // Gear Up indicator
+      if (p.gearUpTimer > 0) {
+        gameCtx.fillStyle = 'rgba(52, 152, 219, 0.3)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Helmet shape on top
+        gameCtx.fillStyle = '#3498db';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius * 0.5, radius * 0.5, Math.PI, 0);
+        gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'deer') {
+      // Deer: dual antlers icon on the dot
+      const antlerLen = radius * 1.2;
+      // Left antler
+      gameCtx.strokeStyle = '#8b6914';
+      gameCtx.lineWidth = 2.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.2, sy - radius * 0.3);
+      gameCtx.lineTo(sx - radius * 0.5, sy - radius * 0.3 - antlerLen * 0.7);
+      gameCtx.lineTo(sx - radius * 0.8, sy - radius * 0.3 - antlerLen);
+      gameCtx.stroke();
+      // Left antler branch
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.5, sy - radius * 0.3 - antlerLen * 0.5);
+      gameCtx.lineTo(sx - radius * 0.9, sy - radius * 0.3 - antlerLen * 0.5);
+      gameCtx.stroke();
+      // Right antler
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius * 0.2, sy - radius * 0.3);
+      gameCtx.lineTo(sx + radius * 0.5, sy - radius * 0.3 - antlerLen * 0.7);
+      gameCtx.lineTo(sx + radius * 0.8, sy - radius * 0.3 - antlerLen);
+      gameCtx.stroke();
+      // Right antler branch
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius * 0.5, sy - radius * 0.3 - antlerLen * 0.5);
+      gameCtx.lineTo(sx + radius * 0.9, sy - radius * 0.3 - antlerLen * 0.5);
+      gameCtx.stroke();
+      // Seer glow
+      if (p.deerSeerTimer > 0) {
+        gameCtx.fillStyle = 'rgba(221, 160, 221, 0.25)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Fear speed lines
+      if (p.deerFearTimer > 0) {
+        gameCtx.strokeStyle = 'rgba(143, 188, 143, 0.6)';
+        gameCtx.lineWidth = 1.5;
+        for (let i = 0; i < 3; i++) {
+          const a = (i / 3) * Math.PI * 2 + Date.now() * 0.003;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + Math.cos(a) * (radius + 2), sy + Math.sin(a) * (radius + 2));
+          gameCtx.lineTo(sx + Math.cos(a) * (radius + 8), sy + Math.sin(a) * (radius + 8));
+          gameCtx.stroke();
+        }
+      }
+      // Robot indicator
+      if (p.deerRobotId) {
+        gameCtx.fillStyle = '#708090';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'explodingcat') {
+      // Exploding Cat: cat ears on the dot + claw marks
+      const earH = radius * 1.1;
+      // Left ear
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#222';
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.7, sy - radius * 0.2);
+      gameCtx.lineTo(sx - radius * 0.3, sy - radius * 0.2 - earH);
+      gameCtx.lineTo(sx, sy - radius * 0.4);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Right ear
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius * 0.7, sy - radius * 0.2);
+      gameCtx.lineTo(sx + radius * 0.3, sy - radius * 0.2 - earH);
+      gameCtx.lineTo(sx, sy - radius * 0.4);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Inner ear pink
+      gameCtx.fillStyle = '#ff69b4';
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.55, sy - radius * 0.3);
+      gameCtx.lineTo(sx - radius * 0.35, sy - radius * 0.3 - earH * 0.6);
+      gameCtx.lineTo(sx - radius * 0.1, sy - radius * 0.45);
+      gameCtx.closePath();
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius * 0.55, sy - radius * 0.3);
+      gameCtx.lineTo(sx + radius * 0.35, sy - radius * 0.3 - earH * 0.6);
+      gameCtx.lineTo(sx + radius * 0.1, sy - radius * 0.45);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Claw scratch marks (three diagonal lines)
+      gameCtx.strokeStyle = '#ff4444';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.globalAlpha = 0.7;
+      for (let ci = -1; ci <= 1; ci++) {
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + ci * 3 + radius * 0.6, sy - radius * 0.3);
+        gameCtx.lineTo(sx + ci * 3 + radius * 1.0, sy + radius * 0.3);
+        gameCtx.stroke();
+      }
+      gameCtx.globalAlpha = 1.0;
+      // Attack buff glow
+      if (p.catAttackBuff > 0) {
+        gameCtx.fillStyle = 'rgba(255, 68, 68, 0.25)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Seer glow (reveal the future)
+      if (p.catSeerTimer > 0) {
+        gameCtx.fillStyle = 'rgba(255, 215, 0, 0.2)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Nope indicator
+      if (p.catNopeTimer > 0) {
+        gameCtx.strokeStyle = 'rgba(255, 0, 0, 0.6)';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // X mark
+        gameCtx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - 4, sy - radius - 6);
+        gameCtx.lineTo(sx + 4, sy - radius - 14);
+        gameCtx.moveTo(sx + 4, sy - radius - 6);
+        gameCtx.lineTo(sx - 4, sy - radius - 14);
+        gameCtx.stroke();
+      }
+      // Cat card count indicator
+      if (p.catCards > 0) {
+        gameCtx.fillStyle = '#ffcc00';
+        gameCtx.font = 'bold 8px monospace';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText(p.catCards + '', sx, sy + radius + 10);
+      }
+    } else if (p.fighter && p.fighter.id === 'napoleon') {
+      // Napoleon: grand bicorne hat covering the whole head
+      const hatW = radius * 2.2;
+      const hatH = radius * 1.1;
+      const hatY = sy - radius * 0.45;
+      // Hat body (dark navy bicorne — large and grand)
+      gameCtx.fillStyle = '#0a0a1a';
+      gameCtx.beginPath();
+      // Left upswept brim — dramatic sweep
+      gameCtx.moveTo(sx - hatW * 0.55, hatY + hatH * 0.1);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.5, hatY - hatH * 0.7, sx - hatW * 0.08, hatY - hatH * 0.35);
+      // Top crest — tall peak
+      gameCtx.quadraticCurveTo(sx, hatY - hatH * 0.5, sx + hatW * 0.08, hatY - hatH * 0.35);
+      // Right upswept brim — dramatic sweep
+      gameCtx.quadraticCurveTo(sx + hatW * 0.5, hatY - hatH * 0.7, sx + hatW * 0.55, hatY + hatH * 0.1);
+      // Bottom curve wrapping around head
+      gameCtx.quadraticCurveTo(sx + hatW * 0.25, hatY + hatH * 0.35, sx, hatY + hatH * 0.25);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.25, hatY + hatH * 0.35, sx - hatW * 0.55, hatY + hatH * 0.1);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Outer edge highlight
+      gameCtx.strokeStyle = '#1a1a3a';
+      gameCtx.lineWidth = 1;
+      gameCtx.stroke();
+      // Gold trim band — thick and prominent
+      gameCtx.strokeStyle = '#d4af37';
+      gameCtx.lineWidth = 2.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - hatW * 0.48, hatY + hatH * 0.08);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.2, hatY + hatH * 0.3, sx, hatY + hatH * 0.22);
+      gameCtx.quadraticCurveTo(sx + hatW * 0.2, hatY + hatH * 0.3, sx + hatW * 0.48, hatY + hatH * 0.08);
+      gameCtx.stroke();
+      // Second gold trim line at brim tips
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - hatW * 0.52, hatY + hatH * 0.05);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.45, hatY - hatH * 0.55, sx - hatW * 0.1, hatY - hatH * 0.3);
+      gameCtx.stroke();
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + hatW * 0.52, hatY + hatH * 0.05);
+      gameCtx.quadraticCurveTo(sx + hatW * 0.45, hatY - hatH * 0.55, sx + hatW * 0.1, hatY - hatH * 0.3);
+      gameCtx.stroke();
+      // Cockade (tricolor rosette — larger)
+      gameCtx.fillStyle = '#003399';
+      gameCtx.beginPath(); gameCtx.arc(sx, hatY + hatH * 0.05, 4.5, 0, Math.PI * 2); gameCtx.fill();
+      gameCtx.fillStyle = '#fff';
+      gameCtx.beginPath(); gameCtx.arc(sx, hatY + hatH * 0.05, 3, 0, Math.PI * 2); gameCtx.fill();
+      gameCtx.fillStyle = '#cc0000';
+      gameCtx.beginPath(); gameCtx.arc(sx, hatY + hatH * 0.05, 1.8, 0, Math.PI * 2); gameCtx.fill();
+      // Gold button center
+      gameCtx.fillStyle = '#d4af37';
+      gameCtx.beginPath(); gameCtx.arc(sx, hatY + hatH * 0.05, 0.8, 0, Math.PI * 2); gameCtx.fill();
+      // White plume feather curving from left tip
+      gameCtx.strokeStyle = '#fff';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - hatW * 0.5, hatY - hatH * 0.5);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.6, hatY - hatH * 0.9, sx - hatW * 0.35, hatY - hatH * 1.0);
+      gameCtx.stroke();
+      gameCtx.lineWidth = 1.2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - hatW * 0.48, hatY - hatH * 0.55);
+      gameCtx.quadraticCurveTo(sx - hatW * 0.55, hatY - hatH * 0.85, sx - hatW * 0.3, hatY - hatH * 0.95);
+      gameCtx.stroke();
+      // Cavalry glow when mounted
+      if (p.napoleonCavalry) {
+        gameCtx.strokeStyle = 'rgba(200, 169, 110, 0.6)';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Speed lines
+        gameCtx.strokeStyle = 'rgba(200, 169, 110, 0.4)';
+        gameCtx.lineWidth = 1.5;
+        for (let i = 0; i < 3; i++) {
+          const a = (i / 3) * Math.PI * 2 + Date.now() * 0.005;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx + Math.cos(a) * (radius + 3), sy + Math.sin(a) * (radius + 3));
+          gameCtx.lineTo(sx + Math.cos(a) * (radius + 10), sy + Math.sin(a) * (radius + 10));
+          gameCtx.stroke();
+        }
+      }
+      // Cannon indicator
+      if (p.napoleonCannonId) {
+        gameCtx.fillStyle = '#555';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'moderator') {
+      // Moderator: terminal screen on head
+      const termW = radius * 1.4, termH = radius * 1.0;
+      const termX = sx - termW / 2, termY = sy - radius * 1.1;
+      gameCtx.fillStyle = '#0c0c0c';
+      gameCtx.fillRect(termX, termY, termW, termH);
+      gameCtx.strokeStyle = '#333';
+      gameCtx.lineWidth = 1;
+      gameCtx.strokeRect(termX, termY, termW, termH);
+      // Green cursor blink
+      gameCtx.fillStyle = '#0f0';
+      gameCtx.font = 'bold 6px monospace';
+      gameCtx.textAlign = 'left';
+      gameCtx.fillText('>', termX + 2, termY + termH - 3);
+      gameCtx.textAlign = 'left';
+      // Firewall glow when active
+      if (p.modFirewallTimer > 0) {
+        gameCtx.strokeStyle = 'rgba(0, 200, 255, 0.6)';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+        gameCtx.stroke();
+      }
+      // Server Update glow when buffed
+      if (p.modServerUpdateTimer > 0) {
+        gameCtx.strokeStyle = 'rgba(50, 255, 100, 0.5)';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+        gameCtx.stroke();
+      }
+      // Fear indicator on feared players
+      if (p.modFearTimer > 0) {
+        gameCtx.fillStyle = '#ff4444';
+        gameCtx.font = 'bold 8px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('😱 ' + Math.ceil(p.modFearTimer) + 's', sx, sy - radius - 10);
+      }
+      // Disabled ability indicator
+      if (p.modDisabledAbilities && p.modDisabledAbilities.length > 0 && p.id === localPlayerId) {
+        gameCtx.fillStyle = '#e67e22';
+        gameCtx.font = 'bold 8px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('🐛 ' + p.modDisabledAbilities.length + ' disabled', sx, sy + radius + 10);
+      }
+    } else if (p.fighter && p.fighter.id === 'pyromaniac') {
+      // Pyromaniac: Fiery glow + flame flicker
+      const fireGlow = gameCtx.createRadialGradient(sx, sy, radius * 0.3, sx, sy, radius * 1.8);
+      fireGlow.addColorStop(0, 'rgba(255, 100, 0, 0.6)');
+      fireGlow.addColorStop(0.5, 'rgba(255, 60, 0, 0.3)');
+      fireGlow.addColorStop(1, 'rgba(255, 30, 0, 0)');
+      gameCtx.fillStyle = fireGlow;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 1.8, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Flickering flames on top
+      const now = Date.now() / 100;
+      for (let f = 0; f < 5; f++) {
+        const fa = (f / 5) * Math.PI * 2 + now * 0.3;
+        const fh = radius * (0.5 + Math.sin(now + f * 2) * 0.3);
+        const fx = sx + Math.cos(fa) * radius * 0.6;
+        const fy = sy + Math.sin(fa) * radius * 0.6 - fh;
+        gameCtx.fillStyle = f % 2 === 0 ? 'rgba(255, 200, 0, 0.7)' : 'rgba(255, 80, 0, 0.7)';
+        gameCtx.beginPath();
+        gameCtx.ellipse(fx, fy, 3, fh * 0.5, fa, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Fire buff indicator
+      if (p.pyroFireBuffTimer > 0) {
+        gameCtx.strokeStyle = '#ff2200';
+        gameCtx.lineWidth = 2;
+        gameCtx.setLineDash([3, 3]);
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+        gameCtx.fillStyle = '#ff4400';
+        gameCtx.font = 'bold 8px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('🔥 2× ' + Math.ceil(p.pyroFireBuffTimer) + 's', sx, sy - radius - 12);
+      }
+    } else if (p.fighter && p.fighter.id === 'heavyrope') {
+      // Heavy Rope: Rope coil visual + swing/grip indicators
+      // Rope coil on the player
+      gameCtx.strokeStyle = '#8b4513';
+      gameCtx.lineWidth = 2.5;
+      for (let i = 0; i < 3; i++) {
+        const a = (Date.now() / 600 + i * Math.PI * 0.67) % (Math.PI * 2);
+        const rx = sx + Math.cos(a) * radius * 0.5;
+        const ry = sy + Math.sin(a) * radius * 0.5;
+        gameCtx.beginPath();
+        gameCtx.arc(rx, ry, radius * 0.3, a, a + Math.PI);
+        gameCtx.stroke();
+      }
+      // Rope Swing shield indicator
+      if (p.ropeSwingActive) {
+        gameCtx.save();
+        const angle = Math.atan2(p.ropeSwingNy, p.ropeSwingNx);
+        gameCtx.strokeStyle = 'rgba(139, 69, 19, 0.8)';
+        gameCtx.lineWidth = 4;
+        if (p.ropeSecondGripTimer > 0) {
+          // Second Grip: wider arc (front + both sides)
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy, radius + 6, angle - Math.PI * 0.75, angle + Math.PI * 0.75);
+          gameCtx.stroke();
+        } else {
+          // Normal: frontal shield arc
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy, radius + 6, angle - Math.PI * 0.35, angle + Math.PI * 0.35);
+          gameCtx.stroke();
+        }
+        gameCtx.restore();
+      }
+      // Rope Grip indicator
+      if (p.ropeGripActive) {
+        gameCtx.strokeStyle = '#d4a017';
+        gameCtx.lineWidth = 2;
+        gameCtx.setLineDash([3, 3]);
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+      }
+      // ROPE POWER spinning animation
+      if (p.ropePowerTimer > 0) {
+        const spinR = 3.5 * GAME_TILE;
+        const t = Date.now() / 120;
+        const ropeSegments = 20;
+        gameCtx.save();
+        // Draw two rope strands opposite each other
+        for (let strand = 0; strand < 2; strand++) {
+          const baseAngle = t + strand * Math.PI;
+          gameCtx.strokeStyle = strand === 0 ? '#8b4513' : '#a0522d';
+          gameCtx.lineWidth = 4;
+          gameCtx.beginPath();
+          for (let i = 0; i <= ropeSegments; i++) {
+            const frac = i / ropeSegments;
+            const r = frac * spinR;
+            const wobble = Math.sin(frac * Math.PI * 4 + t * 3) * 6;
+            const angle = baseAngle + frac * Math.PI * 0.3;
+            const rx = sx + Math.cos(angle) * r + Math.sin(angle) * wobble;
+            const ry = sy + Math.sin(angle) * r - Math.cos(angle) * wobble;
+            if (i === 0) gameCtx.moveTo(rx, ry);
+            else gameCtx.lineTo(rx, ry);
+          }
+          gameCtx.stroke();
+          // Rope end knot
+          const endAngle = baseAngle + Math.PI * 0.3;
+          const ex = sx + Math.cos(endAngle) * spinR;
+          const ey = sy + Math.sin(endAngle) * spinR;
+          gameCtx.fillStyle = '#5c3317';
+          gameCtx.beginPath();
+          gameCtx.arc(ex, ey, 5, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+        // Range circle (faint)
+        gameCtx.strokeStyle = 'rgba(139, 69, 19, 0.2)';
+        gameCtx.lineWidth = 2;
+        gameCtx.setLineDash([6, 6]);
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, spinR, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+        gameCtx.restore();
+      }
+      // Second Grip buff indicator
+      if (p.ropeSecondGripTimer > 0) {
+        gameCtx.fillStyle = '#d4a017';
+        gameCtx.font = 'bold 8px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('⚡ 2nd Grip ' + Math.ceil(p.ropeSecondGripTimer) + 's', sx, sy - radius - 12);
+      }
+      // Rope Grab projectile line
+      if (p.ropeGrabActive) {
+        const gsx = p.ropeGrabX - camX;
+        const gsy = p.ropeGrabY - camY;
+        gameCtx.strokeStyle = '#8b4513';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy);
+        gameCtx.lineTo(gsx, gsy);
+        gameCtx.stroke();
+        // Rope end knot
+        gameCtx.fillStyle = '#5c3317';
+        gameCtx.beginPath();
+        gameCtx.arc(gsx, gsy, 4, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    } else {
+      const swordLen = radius * 1.3;
+      const swordAngle = -Math.PI / 4;
+      const sBaseX = sx + Math.cos(swordAngle) * radius * 0.4;
+      const sBaseY = sy + Math.sin(swordAngle) * radius * 0.4;
+      const sTipX = sBaseX + Math.cos(swordAngle) * swordLen;
+      const sTipY = sBaseY + Math.sin(swordAngle) * swordLen;
+      gameCtx.strokeStyle = '#ccc';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sBaseX, sBaseY);
+      gameCtx.lineTo(sTipX, sTipY);
+      gameCtx.stroke();
+      const hiltX = sBaseX + Math.cos(swordAngle) * swordLen * 0.3;
+      const hiltY = sBaseY + Math.sin(swordAngle) * swordLen * 0.3;
+      const perpAngle = swordAngle + Math.PI / 2;
+      gameCtx.strokeStyle = '#a0522d';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(hiltX + Math.cos(perpAngle) * 4, hiltY + Math.sin(perpAngle) * 4);
+      gameCtx.lineTo(hiltX - Math.cos(perpAngle) * 4, hiltY - Math.sin(perpAngle) * 4);
+      gameCtx.stroke();
+    }
+    } // end normal player dot
+
+    // Neon red aura when special is ready (visible to all players)
+    if (!p.isSummon && p.specialUnlocked && !p.specialUsed && p.alive && !isDying) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+      gameCtx.strokeStyle = `rgba(255, 20, 20, ${0.5 + pulse * 0.4})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8 + pulse * 3, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Outer glow
+      gameCtx.strokeStyle = `rgba(255, 20, 20, ${0.15 + pulse * 0.15})`;
+      gameCtx.lineWidth = 6;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 12 + pulse * 3, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Support buff ring (visible to all players)
+    if (p.supportBuff > 0) {
+      gameCtx.strokeStyle = '#2ecc71';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Pulsing glow
+      gameCtx.strokeStyle = 'rgba(46, 204, 113, 0.3)';
+      gameCtx.lineWidth = 6;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Buff timer text below the dot
+      gameCtx.fillStyle = '#2ecc71';
+      gameCtx.font = 'bold 12px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('BUFF ' + Math.ceil(p.supportBuff) + 's', sx, sy + radius + 18);
+    }
+
+    // Intimidation debuff ring drawn on any intimidated player
+    if (p.intimidated > 0) {
+      gameCtx.strokeStyle = 'rgba(155, 89, 182, 0.6)';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Timer text
+      gameCtx.fillStyle = 'rgba(155, 89, 182, 0.9)';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText(Math.ceil(p.intimidated) + 's', sx, sy - radius - 22);
+    }
+
+    // Name + HP above
+    gameCtx.globalAlpha = 1;
+    gameCtx.fillStyle = isDying ? '#8b0000' : '#fff';
+    gameCtx.font = 'bold 11px sans-serif';
+    gameCtx.textAlign = 'center';
+    const nameLabel = (gameMode === 'teams' && p.team) ? '[T' + p.team + '] ' + p.name : p.name;
+    gameCtx.fillText(nameLabel, sx, sy - radius - 14);
+
+    // HP bar above dot
+    if (p.alive) {
+      const barW = radius * 2.2;
+      const barH = 4;
+      const barX = sx - barW / 2;
+      const barY = sy - radius - 10;
+      gameCtx.fillStyle = '#333';
+      gameCtx.fillRect(barX, barY, barW, barH);
+      const hpFrac = Math.max(0, Math.min(1, (p.hp || 0) / (p.maxHp || 1)));
+      gameCtx.fillStyle = hpFrac >= 0.7 ? '#2ecc71' : hpFrac >= 0.4 ? '#f5a623' : '#e94560';
+      gameCtx.fillRect(barX, barY, barW * hpFrac, barH);
+    }
+
+    // Dragon breath fuel bar (visible when fuel is not full)
+    if (p.id === localPlayerId && p.fighter && p.fighter.id === 'dragon' && (p.dragonBreathFuel || 0) < (p.fighter.abilities[0].maxFuel || 5)) {
+      const maxFuel = p.fighter.abilities[0].maxFuel || 5;
+      const fuelFrac = Math.max(0, (p.dragonBreathFuel || 0) / maxFuel);
+      const fBarW = radius * 2.8;
+      const fBarH = 3;
+      const fBarX = sx - fBarW / 2;
+      const fBarY = sy - radius - 5;
+      gameCtx.fillStyle = '#222';
+      gameCtx.fillRect(fBarX, fBarY, fBarW, fBarH);
+      gameCtx.fillStyle = fuelFrac > 0.3 ? '#00aaff' : '#ff4444';
+      gameCtx.fillRect(fBarX, fBarY, fBarW * fuelFrac, fBarH);
+    }
+
+    // Pyromaniac flame fuel bar (visible when fuel is not full)
+    if (p.id === localPlayerId && p.fighter && p.fighter.id === 'pyromaniac' && (p.pyroFlameFuel || 0) < (p.fighter.abilities[0].maxFuel || 5)) {
+      const maxFuel = p.fighter.abilities[0].maxFuel || 5;
+      const fuelFrac = Math.max(0, (p.pyroFlameFuel || 0) / maxFuel);
+      const fBarW = radius * 2.8;
+      const fBarH = 3;
+      const fBarX = sx - fBarW / 2;
+      const fBarY = sy - radius - 5;
+      gameCtx.fillStyle = '#222';
+      gameCtx.fillRect(fBarX, fBarY, fBarW, fBarH);
+      gameCtx.fillStyle = fuelFrac > 0.3 ? '#ff6600' : '#ff2222';
+      gameCtx.fillRect(fBarX, fBarY, fBarW * fuelFrac, fBarH);
+    }
+
+    // Team heal/buff range indicator (visible to local player in team mode when healing)
+    if (p.id === localPlayerId && gameMode === 'teams' && p.team && p.isHealing && p.alive && !p.isSummon && p.fighter && p.fighter.id !== 'filbus') {
+      const rangeR = TEAM_HEAL_RANGE * GAME_TILE;
+      gameCtx.save();
+      gameCtx.strokeStyle = 'rgba(46, 204, 113, 0.35)';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.setLineDash([6, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, rangeR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      gameCtx.restore();
+    }
+
+    // Sword swing effect
+    const swordFx = p.effects.find((fx) => fx.type === 'sword');
+    if (swordFx) {
+      const swLen = GAME_TILE * 1.3;
+      gameCtx.strokeStyle = '#ccc';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(swordFx.aimNy, swordFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
+      gameCtx.stroke();
+    }
+
+    // Heavy Rope: Rope Hit swing effect (brown whip arc)
+    const ropeHitFx = p.effects.find((fx) => fx.type === 'rope-hit');
+    if (ropeHitFx) {
+      const ropeLen = (p.ropeGripActive ? 1.25 : 2.5) * GAME_TILE;
+      gameCtx.strokeStyle = '#8b4513';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(ropeHitFx.aimNy, ropeHitFx.aimNx);
+      gameCtx.arc(sx, sy, ropeLen, aRad - 0.4, aRad + 0.4);
+      gameCtx.stroke();
+    }
+
+    // Heavy Rope: Rope Swing release effect (wide brown arc)
+    const ropeReleaseFx = p.effects.find((fx) => fx.type === 'rope-swing-release');
+    if (ropeReleaseFx) {
+      const ropeLen = (p.ropeGripActive ? 1.25 : 2.5) * GAME_TILE;
+      gameCtx.strokeStyle = '#5c3317';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(ropeReleaseFx.aimNy, ropeReleaseFx.aimNx);
+      gameCtx.arc(sx, sy, ropeLen, aRad - 0.8, aRad + 0.8);
+      gameCtx.stroke();
+    }
+
+    // Heavy Rope: Shield block flash
+    const ropeBlockFx = p.effects.find((fx) => fx.type === 'rope-block');
+    if (ropeBlockFx) {
+      gameCtx.save();
+      gameCtx.strokeStyle = 'rgba(255, 215, 0, 0.7)';
+      gameCtx.lineWidth = 3;
+      const angle = Math.atan2(p.ropeSwingNy || 0, p.ropeSwingNx || 1);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, angle - 0.5, angle + 0.5);
+      gameCtx.stroke();
+      gameCtx.restore();
+    }
+
+    // Moderator: Ban Hammer swing effect (red arc, directional)
+    const banFx = p.effects.find((fx) => fx.type === 'ban-hammer');
+    if (banFx) {
+      const swLen = GAME_TILE * 1.5;
+      const aRad = Math.atan2(banFx.aimNy || 0, banFx.aimNx || 1);
+      // Hammer handle
+      gameCtx.strokeStyle = '#8b4513';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + Math.cos(aRad) * swLen * 0.7, sy + Math.sin(aRad) * swLen * 0.7);
+      gameCtx.stroke();
+      // Hammer head
+      gameCtx.fillStyle = '#ff4444';
+      const hx = sx + Math.cos(aRad) * swLen * 0.75;
+      const hy = sy + Math.sin(aRad) * swLen * 0.75;
+      gameCtx.fillRect(hx - 8, hy - 5, 16, 10);
+      gameCtx.strokeStyle = '#cc0000';
+      gameCtx.lineWidth = 2;
+      gameCtx.strokeRect(hx - 8, hy - 5, 16, 10);
+      // Red sweep arc
+      gameCtx.strokeStyle = 'rgba(255, 68, 68, 0.6)';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
+      gameCtx.stroke();
+    }
+    // Moderator: Ban Teleport flash on target
+    if (p.effects.some((fx) => fx.type === 'ban-teleport')) {
+      gameCtx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 15, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#ff0000';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('BANNED!', sx, sy - radius - 12);
+    }
+    // Moderator: Scare TP flash (purple burst on victim)
+    if (p.effects.some((fx) => fx.type === 'scare-tp')) {
+      gameCtx.fillStyle = 'rgba(155, 89, 182, 0.35)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 18, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#9b59b6';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 18, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#9b59b6';
+      gameCtx.font = 'bold 11px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('😱 SCARED!', sx, sy - radius - 16);
+    }
+    // Moderator: Bug Fix effect
+    if (p.effects.some((fx) => fx.type === 'bug-fix')) {
+      gameCtx.strokeStyle = '#e67e22';
+      gameCtx.lineWidth = 2;
+      gameCtx.setLineDash([3, 3]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      gameCtx.fillStyle = '#e67e22';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🐛 BUG FIX', sx, sy - radius - 12);
+    }
+    // Moderator: Server Reset flash (blue pulse)
+    if (p.effects.some((fx) => fx.type === 'server-reset')) {
+      gameCtx.fillStyle = 'rgba(52, 152, 219, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#3498db';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+    // Moderator: Server Update buff glow (green pulsing ring)
+    if (p.effects.some((fx) => fx.type === 'server-update')) {
+      gameCtx.fillStyle = 'rgba(46, 204, 113, 0.2)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 14, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#2ecc71';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 14, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+    // Moderator: Firewall activation flash (bright cyan ring)
+    if (p.effects.some((fx) => fx.type === 'firewall')) {
+      gameCtx.strokeStyle = 'rgba(0, 200, 255, 0.7)';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(0, 200, 255, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // D&D Axe swing effect (orange arc, wider)
+    const dndAxeFx = p.effects.find((fx) => fx.type === 'dnd-axe');
+    if (dndAxeFx) {
+      const swLen = GAME_TILE * 1.4;
+      gameCtx.strokeStyle = '#e67e22';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(dndAxeFx.aimNy, dndAxeFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.7, aRad + 0.7);
+      gameCtx.stroke();
+      // Inner lighter arc
+      gameCtx.strokeStyle = 'rgba(230, 126, 34, 0.4)';
+      gameCtx.lineWidth = 8;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen * 0.8, aRad - 0.5, aRad + 0.5);
+      gameCtx.stroke();
+    }
+
+    // D&D Bow shot effect (green flash line in aim direction)
+    const dndBowFx = p.effects.find((fx) => fx.type === 'dnd-bow');
+    if (dndBowFx) {
+      gameCtx.strokeStyle = '#2ecc71';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + dndBowFx.aimNx * GAME_TILE * 1.5, sy + dndBowFx.aimNy * GAME_TILE * 1.5);
+      gameCtx.stroke();
+      // Bow string pull effect (small arc behind player)
+      gameCtx.strokeStyle = 'rgba(46, 204, 113, 0.5)';
+      gameCtx.lineWidth = 1.5;
+      const bRad = Math.atan2(dndBowFx.aimNy, dndBowFx.aimNx);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 1.2, bRad + Math.PI - 0.4, bRad + Math.PI + 0.4);
+      gameCtx.stroke();
+    }
+
+    // Dragon Breath effect (icy wind cone)
+    if (p.dragonBreathActive) {
+      const range = (p.fighter && p.fighter.abilities[0].range || 4) * GAME_TILE;
+      const nx = p.dragonBreathAimNx || 0;
+      const ny = p.dragonBreathAimNy || 0;
+      const angle = Math.atan2(ny, nx);
+      // Draw multiple semi-transparent icy blue + white wisps
+      for (let i = 0; i < 10; i++) {
+        const spread = (Math.random() - 0.5) * 0.6;
+        const dist = range * (0.3 + Math.random() * 0.7);
+        const ex = sx + Math.cos(angle + spread) * dist;
+        const ey = sy + Math.sin(angle + spread) * dist;
+        const alpha = 0.2 + Math.random() * 0.3;
+        // Alternate between icy blue and white wisps
+        if (i % 2 === 0) {
+          gameCtx.strokeStyle = 'rgba(80, 180, 255, ' + alpha + ')';
+        } else {
+          gameCtx.strokeStyle = 'rgba(220, 240, 255, ' + alpha + ')';
+        }
+        gameCtx.lineWidth = 3 + Math.random() * 6;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + Math.cos(angle + spread * 0.3) * radius, sy + Math.sin(angle + spread * 0.3) * radius);
+        gameCtx.lineTo(ex, ey);
+        gameCtx.stroke();
+      }
+      // Core bright blue-white beam
+      gameCtx.strokeStyle = 'rgba(100, 200, 255, 0.35)';
+      gameCtx.lineWidth = 10;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + Math.cos(angle) * range * 0.6, sy + Math.sin(angle) * range * 0.6);
+      gameCtx.stroke();
+      // Inner white glow
+      gameCtx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + Math.cos(angle) * range * 0.5, sy + Math.sin(angle) * range * 0.5);
+      gameCtx.stroke();
+    }
+
+    // Dragon Beam fire effect (wide icy beam)
+    const beamFx = p.effects.find((fx) => fx.type === 'dragon-beam-fire');
+    if (beamFx) {
+      const beamWidth = (p.fighter && p.fighter.abilities[2] ? p.fighter.abilities[2].beamWidth || 2 : 2) * GAME_TILE;
+      const beamLen = Math.max(gameCanvas.width, gameCanvas.height) * 2;
+      const nx = beamFx.aimNx || 0; const ny = beamFx.aimNy || 0;
+      gameCtx.save();
+      gameCtx.globalAlpha = 0.6 * Math.min(1, beamFx.timer / 0.3);
+      gameCtx.fillStyle = '#00ccff';
+      // Draw beam rectangle along aim direction
+      const perpX = -ny; const perpY = nx;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + perpX * beamWidth / 2, sy + perpY * beamWidth / 2);
+      gameCtx.lineTo(sx + perpX * beamWidth / 2 + nx * beamLen, sy + perpY * beamWidth / 2 + ny * beamLen);
+      gameCtx.lineTo(sx - perpX * beamWidth / 2 + nx * beamLen, sy - perpY * beamWidth / 2 + ny * beamLen);
+      gameCtx.lineTo(sx - perpX * beamWidth / 2, sy - perpY * beamWidth / 2);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Bright center
+      gameCtx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + perpX * beamWidth / 4, sy + perpY * beamWidth / 4);
+      gameCtx.lineTo(sx + perpX * beamWidth / 4 + nx * beamLen, sy + perpY * beamWidth / 4 + ny * beamLen);
+      gameCtx.lineTo(sx - perpX * beamWidth / 4 + nx * beamLen, sy - perpY * beamWidth / 4 + ny * beamLen);
+      gameCtx.lineTo(sx - perpX * beamWidth / 4, sy - perpY * beamWidth / 4);
+      gameCtx.closePath();
+      gameCtx.fill();
+      gameCtx.restore();
+    }
+
+    // Lich lightning effect
+    const lichFx = p.effects.find((fx) => fx.type === 'lich-lightning');
+    if (lichFx && lichFx.targetX !== undefined) {
+      const tx = lichFx.targetX - camX; const ty = lichFx.targetY - camY;
+      gameCtx.strokeStyle = '#aa00ff';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      // Zigzag lightning
+      const ldx = tx - sx; const ldy = ty - sy;
+      const steps = 6;
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const jx = (Math.random() - 0.5) * 15;
+        const jy = (Math.random() - 0.5) * 15;
+        if (i === steps) gameCtx.lineTo(tx, ty);
+        else gameCtx.lineTo(sx + ldx * t + jx, sy + ldy * t + jy);
+      }
+      gameCtx.stroke();
+      // Bright glow at target
+      gameCtx.fillStyle = 'rgba(170, 0, 255, 0.4)';
+      gameCtx.beginPath();
+      gameCtx.arc(tx, ty, GAME_TILE * 0.4, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Power Swing red circle effect
+    const powerFx = p.effects.find((fx) => fx.type === 'power-arc');
+    if (powerFx) {
+      const swLen = GAME_TILE * 1.3;
+      gameCtx.strokeStyle = '#e94560';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Faint fill
+      gameCtx.fillStyle = 'rgba(233, 69, 96, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Cricket bat swing effect
+    const batFx = p.effects.find((fx) => fx.type === 'bat-swing');
+    if (batFx) {
+      const swLen = GAME_TILE * 1.0;
+      gameCtx.strokeStyle = '#c8a96e';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(batFx.aimNy, batFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.6, aRad + 0.6);
+      gameCtx.stroke();
+    }
+
+    // Cricket Drive effect
+    const driveFx = p.effects.find((fx) => fx.type === 'drive');
+    if (driveFx) {
+      const swLen = GAME_TILE * 1.8;
+      gameCtx.strokeStyle = '#f5a623';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(driveFx.aimNy, driveFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.4, aRad + 0.4);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(245, 166, 35, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.4, aRad + 0.4);
+      gameCtx.lineTo(sx, sy);
+      gameCtx.fill();
+    }
+
+    // Cricket Gear Up ring
+    if (p.gearUpTimer > 0) {
+      gameCtx.strokeStyle = '#3498db';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#3498db';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('GEAR ' + Math.ceil(p.gearUpTimer) + 's', sx, sy + radius + 16);
+    }
+
+    // Deer Spear effect (antler stab arc)
+    const deerSpearFx = p.effects.find((fx) => fx.type === 'deer-spear');
+    if (deerSpearFx) {
+      const swLen = GAME_TILE * 1.0;
+      gameCtx.strokeStyle = '#8b6914';
+      gameCtx.lineWidth = 4;
+      const aRad = Math.atan2(deerSpearFx.aimNy, deerSpearFx.aimNx);
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + Math.cos(aRad) * swLen, sy + Math.sin(aRad) * swLen);
+      gameCtx.stroke();
+      // Prongs
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + Math.cos(aRad) * swLen * 0.7, sy + Math.sin(aRad) * swLen * 0.7);
+      gameCtx.lineTo(sx + Math.cos(aRad - 0.3) * swLen, sy + Math.sin(aRad - 0.3) * swLen);
+      gameCtx.moveTo(sx + Math.cos(aRad) * swLen * 0.7, sy + Math.sin(aRad) * swLen * 0.7);
+      gameCtx.lineTo(sx + Math.cos(aRad + 0.3) * swLen, sy + Math.sin(aRad + 0.3) * swLen);
+      gameCtx.stroke();
+    }
+
+    // Deer dodge flash
+    if (p.effects.some((fx) => fx.type === 'deer-dodge')) {
+      gameCtx.fillStyle = 'rgba(221, 160, 221, 0.4)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Deer Seer state indicator
+    if (p.deerSeerTimer > 0) {
+      gameCtx.strokeStyle = '#dda0dd';
+      gameCtx.lineWidth = 2;
+      gameCtx.setLineDash([4, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      gameCtx.fillStyle = '#dda0dd';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('SEER ' + Math.ceil(p.deerSeerTimer) + 's', sx, sy + radius + 16);
+    }
+
+    // Deer Fear indicator
+    if (p.deerFearTimer > 0) {
+      gameCtx.fillStyle = '#8fbc8f';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('FEAR ' + Math.ceil(p.deerFearTimer) + 's', sx, sy - radius - 8);
+    }
+
+    // Noli Tendril Stab effect (purple slash)
+    const tendrilFx = p.effects.find((fx) => fx.type === 'tendril-stab');
+    if (tendrilFx) {
+      const swLen = GAME_TILE * 1.2;
+      const aRad = Math.atan2(tendrilFx.aimNy, tendrilFx.aimNx);
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 3;
+      gameCtx.shadowColor = '#a020f0';
+      gameCtx.shadowBlur = 6;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + Math.cos(aRad) * swLen, sy + Math.sin(aRad) * swLen);
+      gameCtx.stroke();
+      gameCtx.shadowBlur = 0;
+    }
+
+    // Noli Void Rush speed trail (purple afterimages behind player)
+    if (p._voidRushTrail && p._voidRushTrail.length > 0) {
+      for (const pt of p._voidRushTrail) {
+        const ptSx = pt.x - camX, ptSy = pt.y - camY;
+        const alpha = Math.max(0, pt.t / 0.3) * 0.4;
+        const trailR = radius * (0.5 + alpha);
+        gameCtx.fillStyle = 'rgba(160, 32, 240, ' + alpha.toFixed(2) + ')';
+        gameCtx.beginPath();
+        gameCtx.arc(ptSx, ptSy, trailR, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    }
+
+    // Noli Void Rush aura — grows with chain count
+    if (p.noliVoidRushActive) {
+      const rushChain = p.noliVoidRushChain || 0;
+      const rushRadius = radius + 4 + rushChain * 2;
+      const rushAlpha = Math.min(0.5, 0.25 + rushChain * 0.05);
+      gameCtx.fillStyle = 'rgba(160, 32, 240, ' + rushAlpha + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, rushRadius, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 1.5 + rushChain * 0.5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, rushRadius, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Noli Void Rush chain indicator
+    if (p.noliVoidRushChainTimer > 0 && p.noliVoidRushChain > 0) {
+      gameCtx.fillStyle = '#a020f0';
+      gameCtx.font = 'bold ' + Math.min(16, 10 + p.noliVoidRushChain) + 'px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('CHAIN ' + p.noliVoidRushChain + '!', sx, sy - radius - 12);
+    }
+
+    // Noli Void Star aiming indicator
+    if (p.noliVoidStarAiming) {
+      const aimSx = p.noliVoidStarAimX - camX, aimSy = p.noliVoidStarAimY - camY;
+      const starAbil = p.fighter && p.fighter.abilities[2];
+      const starR = ((starAbil ? starAbil.radius : 1.5) || 1.5) * GAME_TILE;
+      gameCtx.fillStyle = 'rgba(160, 32, 240, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(aimSx, aimSy, starR, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 2;
+      gameCtx.setLineDash([4, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(aimSx, aimSy, starR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      // Star shape in center
+      gameCtx.fillStyle = '#a020f0';
+      gameCtx.font = 'bold 14px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('⭐', aimSx, aimSy + 5);
+      gameCtx.fillStyle = '#a020f0';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.fillText(Math.ceil(p.noliVoidStarTimer) + 's', aimSx, aimSy - starR - 6);
+    }
+
+    // Noli Observant charge ring timer
+    if (p.noliObservantCharging > 0) {
+      const chargeMax = p.noliObservantChargeMax || 2;
+      const chargeFrac = 1 - (p.noliObservantCharging / chargeMax); // 0 → 1 as it charges
+      const ringR = radius + 8;
+      // Background ring (dim)
+      gameCtx.strokeStyle = 'rgba(160, 32, 240, 0.25)';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2, false);
+      gameCtx.stroke();
+      // Filled arc (progress)
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 4;
+      gameCtx.shadowColor = '#a020f0';
+      gameCtx.shadowBlur = 8;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * chargeFrac, false);
+      gameCtx.stroke();
+      gameCtx.shadowBlur = 0;
+      // Countdown text
+      gameCtx.fillStyle = '#a020f0';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText(p.noliObservantCharging.toFixed(1) + 's', sx, sy - ringR - 4);
+    }
+
+    // Noli Observant teleport flash
+    if (p.effects.some((fx) => fx.type === 'observant-tp')) {
+      gameCtx.fillStyle = 'rgba(160, 32, 240, 0.5)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // ── Hitman effects ──────────────────────────────────────────
+    if (p.fighter && p.fighter.id === 'hitman') {
+      // Conceal: dim/ghosted appearance
+      if (p.hitmanConcealTimer > 0) {
+        // Only truly invisible to enemies — show faded to self
+        if (p.id === localPlayerId) {
+          gameCtx.globalAlpha = 0.3;
+          gameCtx.fillStyle = '#88aacc';
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+          gameCtx.fill();
+          gameCtx.globalAlpha = 1.0;
+        }
+      }
+      // Locking In: red flare + 3 revolving gun models
+      if (p.hitmanLockingIn) {
+        gameCtx.strokeStyle = '#ff4400';
+        gameCtx.lineWidth = 3;
+        gameCtx.shadowColor = '#ff4400';
+        gameCtx.shadowBlur = 12;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 7, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.shadowBlur = 0;
+        // Revolving guns: pistol (gold), akm (orange), sniper (cyan)
+        const orbitR = radius + 20;
+        const t = performance.now() / 1000;
+        const gunDefs = [
+          { color: '#f5c842', len: 10, thick: 2.5, label: 'P', offset: 0 },           // pistol
+          { color: '#e07020', len: 14, thick: 3.5, label: 'A', offset: (Math.PI * 2) / 3 },  // akm
+          { color: '#60cfff', len: 18, thick: 2, label: 'S', offset: (Math.PI * 4) / 3 },    // sniper
+        ];
+        for (const g of gunDefs) {
+          const angle = t * 2.2 + g.offset;
+          const gx = sx + Math.cos(angle) * orbitR;
+          const gy = sy + Math.sin(angle) * orbitR;
+          gameCtx.save();
+          gameCtx.translate(gx, gy);
+          gameCtx.rotate(angle + Math.PI / 2);
+          // Barrel
+          gameCtx.strokeStyle = g.color;
+          gameCtx.lineWidth = g.thick;
+          gameCtx.shadowColor = g.color;
+          gameCtx.shadowBlur = 6;
+          gameCtx.beginPath();
+          gameCtx.moveTo(0, -g.len / 2);
+          gameCtx.lineTo(0, g.len / 2);
+          gameCtx.stroke();
+          // Grip (perpendicular stub)
+          gameCtx.lineWidth = g.thick * 0.7;
+          gameCtx.beginPath();
+          gameCtx.moveTo(0, g.len * 0.1);
+          gameCtx.lineTo(g.len * 0.35, g.len * 0.45);
+          gameCtx.stroke();
+          gameCtx.shadowBlur = 0;
+          gameCtx.restore();
+        }
+        // Timer ring (shrinks as time runs out)
+        const timeFrac = Math.max(0, p.hitmanLockingInTimer / 10);
+        gameCtx.strokeStyle = 'rgba(255,68,0,0.4)';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, orbitR + 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * timeFrac);
+        gameCtx.stroke();
+      }
+      // Heightened Senses: cyan glow
+      if (p.hitmanSenseTimer > 0) {
+        gameCtx.fillStyle = 'rgba(96, 207, 255, 0.2)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Weapon equip animation: pulsing yellow ring
+      if (p.hitmanEquipping) {
+        const equipFrac = 1 - (p.hitmanEquipTimer / 5);
+        gameCtx.strokeStyle = 'rgba(245, 200, 66, 0.6)';
+        gameCtx.lineWidth = 2;
+        gameCtx.setLineDash([4, 4]);
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 4, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * equipFrac);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+      }
+      // Weapon / ammo HUD (only for local player)
+      if (p.id === localPlayerId) {
+        const wDefs = p.fighter.abilities[0].weapons || {};
+        const wDef = wDefs[p.hitmanWeapon] || wDefs['pistol'];
+        const maxA = wDef ? wDef.maxAmmo : 20;
+        const curA = p.hitmanAmmo || 0;
+        const hudX = sx - 20; const hudY = sy + radius + 12;
+        // Weapon label
+        gameCtx.fillStyle = wDef ? wDef.color : '#f5c842';
+        gameCtx.font = 'bold 8px monospace';
+        gameCtx.textAlign = 'center';
+        const wLabel = p.hitmanEquipping ? '⏳ ' + (wDef ? wDef.label : '') : (wDef ? wDef.label : '');
+        gameCtx.fillText(wLabel, sx, hudY);
+        // Ammo bar
+        const barW = 30; const barH = 4;
+        const barX = sx - barW / 2; const barY = hudY + 4;
+        gameCtx.fillStyle = 'rgba(0,0,0,0.4)';
+        gameCtx.fillRect(barX, barY, barW, barH);
+        if (p.hitmanReloading) {
+          // Reload progress bar
+          const rt = wDef ? wDef.reloadTime || 1 : 1;
+          const prog = 1 - (p.hitmanReloadTimer / rt);
+          gameCtx.fillStyle = '#ffcc00';
+          gameCtx.fillRect(barX, barY, barW * prog, barH);
+          gameCtx.fillStyle = '#ffcc00';
+          gameCtx.font = '7px sans-serif';
+          gameCtx.textAlign = 'center';
+          gameCtx.fillText('RELOAD', sx, barY + barH + 6);
+        } else {
+          const ammoFrac = maxA > 0 ? curA / maxA : 0;
+          gameCtx.fillStyle = ammoFrac > 0.3 ? '#60cfff' : '#e94560';
+          gameCtx.fillRect(barX, barY, barW * ammoFrac, barH);
+          gameCtx.fillStyle = '#ddd';
+          gameCtx.font = '7px monospace';
+          gameCtx.textAlign = 'center';
+          gameCtx.fillText(curA + '/' + maxA, sx, barY + barH + 6);
+        }
+        gameCtx.textAlign = 'left';
+      }
+    }
+    // Hitman Heightened Senses: draw arrows for off-screen fighters
+    if (localPlayer && localPlayer.fighter && localPlayer.fighter.id === 'hitman' && localPlayer.hitmanSenseTimer > 0) {
+      if (p.id !== localPlayerId && p.alive && !p.isSummon) {
+        const onScreen = sx >= 0 && sx <= gameCanvas.width && sy >= 0 && sy <= gameCanvas.height;
+        if (!onScreen) {
+          // Draw edge arrow pointing toward this player
+          const cw2 = gameCanvas.width; const ch2 = gameCanvas.height;
+          const dx2 = sx - cw2 / 2; const dy2 = sy - ch2 / 2;
+          const ang = Math.atan2(dy2, dx2);
+          const margin = 24;
+          const ex = Math.max(margin, Math.min(cw2 - margin, cw2 / 2 + Math.cos(ang) * (cw2 / 2 - margin)));
+          const ey = Math.max(margin, Math.min(ch2 - margin, ch2 / 2 + Math.sin(ang) * (ch2 / 2 - margin)));
+          gameCtx.save();
+          gameCtx.translate(ex, ey);
+          gameCtx.rotate(ang);
+          gameCtx.fillStyle = p.color || '#60cfff';
+          gameCtx.strokeStyle = '#000';
+          gameCtx.lineWidth = 1;
+          gameCtx.beginPath();
+          gameCtx.moveTo(10, 0); gameCtx.lineTo(-6, -6); gameCtx.lineTo(-6, 6); gameCtx.closePath();
+          gameCtx.fill(); gameCtx.stroke();
+          // Name label
+          gameCtx.rotate(-ang);
+          gameCtx.fillStyle = p.color || '#60cfff';
+          gameCtx.font = 'bold 8px sans-serif';
+          gameCtx.textAlign = 'center';
+          gameCtx.fillText(p.name, 0, -10);
+          gameCtx.restore();
+        } else {
+          // On-screen highlight (glowing ring)
+          gameCtx.strokeStyle = '#60cfff';
+          gameCtx.lineWidth = 2;
+          gameCtx.shadowColor = '#60cfff';
+          gameCtx.shadowBlur = 8;
+          gameCtx.beginPath();
+          gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+          gameCtx.stroke();
+          gameCtx.shadowBlur = 0;
+        }
+      }
+    }
+
+    // Noli Hallucination summon flash
+    if (p.effects.some((fx) => fx.type === 'hallucination')) {
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 3;
+      gameCtx.shadowColor = '#a020f0';
+      gameCtx.shadowBlur = 10;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.shadowBlur = 0;
+    }
+
+    // Hit flash
+    if (p.effects.some((fx) => fx.type === 'hit')) {
+      gameCtx.fillStyle = 'rgba(255,0,0,0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Apple heal glow
+    if (p.effects.some((fx) => fx.type === 'apple-heal')) {
+      gameCtx.fillStyle = 'rgba(46, 204, 113, 0.35)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#2ecc71';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('+300', sx, sy - radius - 8);
+      gameCtx.textAlign = 'left';
+    }
+
+    // Team heal glow (green pulse)
+    if (p.effects.some((fx) => fx.type === 'team-heal')) {
+      gameCtx.fillStyle = 'rgba(46, 204, 113, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Team buff glow (gold pulse)
+    if (p.effects.some((fx) => fx.type === 'team-buff')) {
+      gameCtx.fillStyle = 'rgba(245, 166, 35, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Blind ring (Poker)
+    if (p.blindBuff === 'small') {
+      gameCtx.strokeStyle = 'rgba(100, 200, 255, 0.7)';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 7, 0, Math.PI * 2);
+      gameCtx.stroke();
+    } else if (p.blindBuff === 'big') {
+      gameCtx.strokeStyle = 'rgba(255, 80, 80, 0.7)';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 7, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(255, 80, 80, 0.8)';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('BIG ' + Math.ceil(p.blindTimer) + 's', sx, sy + radius + 18);
+    }
+
+    // Chip change indicator
+    if (p.chipChangeDmg >= 0 && p.chipChangeTimer > 0) {
+      gameCtx.fillStyle = '#f5a623';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('♠' + p.chipChangeDmg + ' ' + Math.ceil(p.chipChangeTimer) + 's', sx, sy + radius + (p.blindBuff === 'big' ? 28 : 18));
+    }
+
+    // Royal Flush explosion effect
+    if (p.effects.some((fx) => fx.type === 'royal-flush')) {
+      gameCtx.strokeStyle = '#f5a623';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(245, 166, 35, 0.2)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Filbus: Chair swing arc effect
+    const chairFx = p.effects.find((fx) => fx.type === 'chair-swing');
+    if (chairFx) {
+      const swLen = GAME_TILE * 2.2;
+      gameCtx.strokeStyle = '#a0522d';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(chairFx.aimNy, chairFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.6, aRad + 0.6);
+      gameCtx.stroke();
+    }
+
+    // Filbus: Table swing effect (bigger, orange)
+    const tableFx = p.effects.find((fx) => fx.type === 'table-swing');
+    if (tableFx) {
+      const swLen = GAME_TILE * 2.2;
+      gameCtx.strokeStyle = '#ff6600';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(tableFx.aimNy, tableFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.7, aRad + 0.7);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(255, 102, 0, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.7, aRad + 0.7);
+      gameCtx.fill();
+    }
+
+    // Filbus: Crafting channel indicator
+    if (p.isCraftingChair) {
+      const pct = 1 - (p.craftTimer / ((p.fighter.abilities && p.fighter.abilities[1] ? p.fighter.abilities[1].channelTime : 10) || 10));
+      gameCtx.strokeStyle = '#c8a96e';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, -Math.PI / 2, -Math.PI / 2 + pct * Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#c8a96e';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🪑 ' + Math.ceil(p.craftTimer) + 's', sx, sy + radius + 20);
+    }
+
+    // Filbus: Eating channel indicator
+    if (p.isEatingChair) {
+      const pct = 1 - (p.eatTimer / ((p.fighter.abilities && p.fighter.abilities[2] ? p.fighter.abilities[2].channelTime : 3) || 3));
+      gameCtx.strokeStyle = '#2ecc71';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, -Math.PI / 2, -Math.PI / 2 + pct * Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#2ecc71';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🍽 ' + Math.ceil(p.eatTimer) + 's', sx, sy + radius + 20);
+    }
+
+    // Filbus: Chair charges display
+    if (p.fighter && p.fighter.id === 'filbus' && p.chairCharges > 0 && p.alive) {
+      gameCtx.fillStyle = '#c8a96e';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🪑×' + p.chairCharges, sx, sy + radius + (p.isCraftingChair || p.isEatingChair ? 32 : 18));
+    }
+
+    // Filbus: Boiled One dark aura
+    if (p.boiledOneActive) {
+      gameCtx.strokeStyle = '#8b0000';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 16, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(139, 0, 0, 0.2)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 16, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#8b0000';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🩸BOILED ' + Math.ceil(p.boiledOneTimer) + 's', sx, sy - radius - 26);
+    }
+
+    // 1X1X1X1: Slash arc effect (neon green)
+    const slashFx = p.effects.find((fx) => fx.type === 'slash-1x');
+    if (slashFx) {
+      const swLen = GAME_TILE * 1.3;
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(slashFx.aimNy, slashFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
+      gameCtx.stroke();
+    }
+
+    // 1X1X1X1: Mass Infection close-range slash (dramatic green burst, distinct from M1)
+    const miSlashFx = p.effects.find((fx) => fx.type === 'mass-infection-slash');
+    if (miSlashFx) {
+      const aRad = Math.atan2(miSlashFx.aimNy, miSlashFx.aimNx);
+      // Filled green wedge — much more dramatic than the thin M1 arc
+      const wedgeR = GAME_TILE * 2;
+      gameCtx.save();
+      gameCtx.globalAlpha = 0.5;
+      gameCtx.fillStyle = '#00ff66';
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.arc(sx, sy, wedgeR, aRad - Math.PI / 3, aRad + Math.PI / 3);
+      gameCtx.closePath();
+      gameCtx.fill();
+      gameCtx.globalAlpha = 1.0;
+      // Bright outline arc
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, wedgeR, aRad - Math.PI / 3, aRad + Math.PI / 3);
+      gameCtx.stroke();
+      gameCtx.restore();
+    }
+
+    // 1X1X1X1: Zombie slash effect (dark green arc)
+    const zombieSlashFx = p.effects.find((fx) => fx.type === 'zombie-slash');
+    if (zombieSlashFx) {
+      const swLen = GAME_TILE * 1.2;
+      gameCtx.strokeStyle = '#1a5c1a';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(zombieSlashFx.aimNy, zombieSlashFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.4, aRad + 0.4);
+      gameCtx.stroke();
+    }
+
+    // Exploding Cat: Scratch claw marks effect (3 red claw arcs)
+    const clawFx = p.effects.find((fx) => fx.type === 'cat-scratch');
+    if (clawFx) {
+      const clawLen = GAME_TILE * 0.9;
+      const aRad = Math.atan2(clawFx.aimNy || 0, clawFx.aimNx || 1);
+      gameCtx.strokeStyle = '#ff4444';
+      gameCtx.lineWidth = 2.5;
+      gameCtx.lineCap = 'round';
+      for (let ci = -1; ci <= 1; ci++) {
+        const offset = ci * 0.25;
+        const startA = aRad - 0.35 + offset;
+        const endA = aRad + 0.35 + offset;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, clawLen + ci * 2, startA, endA);
+        gameCtx.stroke();
+      }
+      // Claw tip marks (sharp ends)
+      gameCtx.strokeStyle = '#ff6666';
+      gameCtx.lineWidth = 1.5;
+      for (let ci = -1; ci <= 1; ci++) {
+        const tipA = aRad + 0.35 + ci * 0.25;
+        const tipR = clawLen + ci * 2;
+        const tx = sx + Math.cos(tipA) * tipR;
+        const ty = sy + Math.sin(tipA) * tipR;
+        gameCtx.beginPath();
+        gameCtx.moveTo(tx, ty);
+        gameCtx.lineTo(tx + Math.cos(tipA) * 4, ty + Math.sin(tipA) * 4);
+        gameCtx.stroke();
+      }
+    }
+
+    // Cat Steal-Fire effect: orange slash/ring depending on stolen ability type
+    const stealFireFx = p.effects.find((fx) => fx.type === 'cat-steal-fire');
+    if (stealFireFx) {
+      const aRad = Math.atan2(stealFireFx.aimNy || 0, stealFireFx.aimNx || 1);
+      const sType = stealFireFx.stolenType;
+      if (sType === 'melee') {
+        // Orange directional arc
+        const swLen = GAME_TILE * 1.2;
+        gameCtx.strokeStyle = '#ff9900';
+        gameCtx.lineWidth = 4;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
+        gameCtx.stroke();
+      } else if (sType === 'ranged' || sType === 'projectile') {
+        // Orange line in aim direction
+        const lineLen = GAME_TILE * 1.5;
+        gameCtx.strokeStyle = '#ff9900';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy);
+        gameCtx.lineTo(sx + Math.cos(aRad) * lineLen, sy + Math.sin(aRad) * lineLen);
+        gameCtx.stroke();
+      } else if (sType === 'buff' || sType === 'self') {
+        // Orange glow ring (self-buff)
+        gameCtx.strokeStyle = '#ff9900';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.fillStyle = 'rgba(255, 153, 0, 0.15)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (sType === 'debuff') {
+        // Purple pulse ring (debuff applied)
+        gameCtx.strokeStyle = '#9b59b6';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.fillStyle = 'rgba(155, 89, 182, 0.15)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (sType === 'summon') {
+        // Gold summon flash
+        gameCtx.fillStyle = 'rgba(212, 175, 55, 0.25)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#d4af37';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+        gameCtx.stroke();
+      } else {
+        // Default: orange ring
+        gameCtx.strokeStyle = '#ff9900';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+        gameCtx.stroke();
+      }
+    }
+
+    // Cat Draw card text (visible to all players via synced effects)
+    const drawCatFx = p.effects.find((fx) => fx.type === 'cat-draw-cat');
+    const drawDefuseFx = p.effects.find((fx) => fx.type === 'cat-draw-defuse');
+    const drawNopeFx = p.effects.find((fx) => fx.type === 'cat-draw-nope');
+    const drawRevealFx = p.effects.find((fx) => fx.type === 'cat-draw-reveal');
+    if (drawCatFx || drawDefuseFx || drawNopeFx || drawRevealFx) {
+      gameCtx.font = 'bold 11px sans-serif';
+      gameCtx.textAlign = 'center';
+      let drawText, drawColor;
+      if (drawCatFx) { drawText = '🐱 CAT!'; drawColor = '#ff9900'; }
+      else if (drawDefuseFx) { drawText = '🟢 DEFUSE!'; drawColor = '#00ff88'; }
+      else if (drawNopeFx) { drawText = '🚫 NOPE!'; drawColor = '#e94560'; }
+      else { drawText = '🔮 REVEAL!'; drawColor = '#dda0dd'; }
+      gameCtx.fillStyle = '#000';
+      gameCtx.fillText(drawText, sx + 1, sy - radius - 11);
+      gameCtx.fillStyle = drawColor;
+      gameCtx.fillText(drawText, sx, sy - radius - 12);
+    }
+
+    // Poison visual: green ring when poisoned
+    if (p.poisonTimers && p.poisonTimers.length > 0 && p.alive) {
+      gameCtx.strokeStyle = 'rgba(0, 255, 102, 0.7)';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#00ff66';
+      gameCtx.font = 'bold 8px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('☣ POISON', sx, sy - radius - 8);
+    }
+
+    // Moderator Fear indicator (on any player)
+    if (p.modFearTimer > 0 && !(p.fighter && p.fighter.id === 'moderator')) {
+      gameCtx.fillStyle = '#ff4444';
+      gameCtx.font = 'bold 8px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('😱 FEAR ' + Math.ceil(p.modFearTimer) + 's', sx, sy - radius - 10);
+    }
+
+    // Moderator Bug Fix disabled abilities (on any player)
+    if (p.modDisabledAbilities && p.modDisabledAbilities.length > 0 && p.id === localPlayerId && !(p.fighter && p.fighter.id === 'moderator')) {
+      gameCtx.fillStyle = '#e67e22';
+      gameCtx.font = 'bold 8px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🐛 ' + p.modDisabledAbilities.length + ' move(s) disabled', sx, sy + radius + 10);
+    }
+
+    // Unstable Eye: speed indicator
+    if (p.unstableEyeTimer > 0) {
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 3;
+      gameCtx.setLineDash([4, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      gameCtx.fillStyle = '#00ff66';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('👁 EYE ' + Math.ceil(p.unstableEyeTimer) + 's', sx, sy - radius - 18);
+    }
+
+    // Summon-specific rendering
+    if (p.isSummon) {
+      // Tether line to owner (but not for wickets — they have their own line)
+      if (p.summonType !== 'wicket') {
+        const owner2 = gamePlayers.find(pl => pl.id === p.summonOwner);
+        if (owner2 && owner2.alive) {
+          const ownSx = owner2.x - camX;
+          const ownSy = owner2.y - camY;
+          gameCtx.strokeStyle = 'rgba(212, 175, 55, 0.3)';
+          gameCtx.lineWidth = 1;
+          gameCtx.beginPath();
+          gameCtx.moveTo(sx, sy);
+          gameCtx.lineTo(ownSx, ownSy);
+          gameCtx.stroke();
+        }
+      }
+    }
+
+    // Cricket: draw wicket line between two wickets
+    if (p.wicketIds && p.wicketIds.length === 2) {
+      const w0 = gamePlayers.find(x => x.id === p.wicketIds[0]);
+      const w1 = gamePlayers.find(x => x.id === p.wicketIds[1]);
+      if (w0 && w0.alive && w1 && w1.alive) {
+        const w0x = w0.x - camX, w0y = w0.y - camY;
+        const w1x = w1.x - camX, w1y = w1.y - camY;
+        // Dashed green line between wickets
+        gameCtx.strokeStyle = 'rgba(200, 169, 110, 0.5)';
+        gameCtx.lineWidth = 3;
+        gameCtx.setLineDash([8, 6]);
+        gameCtx.beginPath();
+        gameCtx.moveTo(w0x, w0y);
+        gameCtx.lineTo(w1x, w1y);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+      }
+    }
+
+    // Deer: draw igloo dome
+    if (p.iglooTimer > 0) {
+      const ix = p.iglooX - camX, iy = p.iglooY - camY;
+      const iglooAbil = p.fighter && p.fighter.abilities[4];
+      const ir = ((iglooAbil ? iglooAbil.radius : 2.5) || 2.5) * GAME_TILE;
+      // Ice dome fill
+      gameCtx.fillStyle = 'rgba(135, 206, 235, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(ix, iy, ir, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Ice dome border
+      gameCtx.strokeStyle = 'rgba(135, 206, 235, 0.6)';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(ix, iy, ir, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Ice blocks pattern
+      gameCtx.strokeStyle = 'rgba(200, 230, 255, 0.3)';
+      gameCtx.lineWidth = 1;
+      for (let a = 0; a < 6; a++) {
+        const angle = (a / 6) * Math.PI * 2;
+        gameCtx.beginPath();
+        gameCtx.moveTo(ix, iy);
+        gameCtx.lineTo(ix + Math.cos(angle) * ir, iy + Math.sin(angle) * ir);
+        gameCtx.stroke();
+      }
+      // Timer text
+      gameCtx.fillStyle = '#87ceeb';
+      gameCtx.font = 'bold 11px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('IGLOO ' + Math.ceil(p.iglooTimer) + 's', ix, iy - ir - 6);
+    }
+
+    // Pyromaniac: Draw molotov shadows (falling indicators)
+    if (p.pyroMolotovShadows && p.pyroMolotovShadows.length > 0) {
+      const fallDelay = (p.fighter && p.fighter.abilities[2] ? p.fighter.abilities[2].fallDelay : 2) || 2;
+      for (const ms of p.pyroMolotovShadows) {
+        const msx = ms.x - camX; const msy = ms.y - camY;
+        const msR = (ms.radius || 3) * GAME_TILE;
+        const progress = 1 - (ms.timer / fallDelay);
+        const shadowR = msR * (0.3 + progress * 0.7);
+        // Dark shadow circle on ground — grows as molotov descends
+        gameCtx.fillStyle = 'rgba(80, 20, 0, ' + (0.08 + progress * 0.3) + ')';
+        gameCtx.beginPath();
+        gameCtx.arc(msx, msy, shadowR, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Shadow edge ring
+        gameCtx.strokeStyle = 'rgba(255, 60, 0, ' + (0.15 + progress * 0.4) + ')';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(msx, msy, shadowR, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Descending molotov bottle — starts high, comes down
+        const bottleOffsetY = -(1 - progress) * msR * 2.5;
+        const bottleAlpha = 0.4 + progress * 0.6;
+        // Bottle glow (orange)
+        gameCtx.fillStyle = 'rgba(255, 100, 0, ' + (bottleAlpha * 0.3) + ')';
+        gameCtx.beginPath();
+        gameCtx.arc(msx, msy + bottleOffsetY, 8, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Bottle body (dark brown)
+        gameCtx.fillStyle = 'rgba(120, 60, 10, ' + bottleAlpha + ')';
+        gameCtx.beginPath();
+        gameCtx.arc(msx, msy + bottleOffsetY, 5, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Flame wick on top
+        gameCtx.fillStyle = 'rgba(255, 200, 0, ' + bottleAlpha + ')';
+        gameCtx.beginPath();
+        gameCtx.arc(msx, msy + bottleOffsetY - 6, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Timer text
+        gameCtx.fillStyle = '#ff4400';
+        gameCtx.font = 'bold 10px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('🔥 ' + Math.ceil(ms.timer) + 's', msx, msy - shadowR - 8);
+      }
+    }
+
+    // Pyromaniac: Draw fire zones
+    if (p.pyroFireZones && p.pyroFireZones.length > 0) {
+      for (const fz of p.pyroFireZones) {
+        const fzx = fz.x - camX; const fzy = fz.y - camY;
+        const fzr = (fz.radius || 1.5) * GAME_TILE;
+        // Fire glow
+        const fireGrad = gameCtx.createRadialGradient(fzx, fzy, 0, fzx, fzy, fzr);
+        fireGrad.addColorStop(0, 'rgba(255, 100, 0, 0.35)');
+        fireGrad.addColorStop(0.6, 'rgba(255, 50, 0, 0.2)');
+        fireGrad.addColorStop(1, 'rgba(255, 20, 0, 0)');
+        gameCtx.fillStyle = fireGrad;
+        gameCtx.beginPath();
+        gameCtx.arc(fzx, fzy, fzr, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Flickering embers
+        const now = Date.now() / 150;
+        for (let e = 0; e < 4; e++) {
+          const ea = (e / 4) * Math.PI * 2 + now;
+          const er = fzr * (0.3 + Math.sin(now + e) * 0.2);
+          gameCtx.fillStyle = 'rgba(255, 200, 0, 0.5)';
+          gameCtx.beginPath();
+          gameCtx.arc(fzx + Math.cos(ea) * er, fzy + Math.sin(ea) * er, 3, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+        // Timer
+        gameCtx.fillStyle = '#ff6600';
+        gameCtx.font = 'bold 9px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('🔥 ' + Math.ceil(fz.timer) + 's', fzx, fzy - fzr - 4);
+      }
+    }
+
+    // Pyromaniac: Draw gasoline trail
+    if (p.pyroGasolineTrail && p.pyroGasolineTrail.length > 0) {
+      for (const g of p.pyroGasolineTrail) {
+        const gx = g.x - camX; const gy = g.y - camY;
+        if (g.lit) {
+          gameCtx.fillStyle = 'rgba(255, 80, 0, 0.4)';
+        } else {
+          gameCtx.fillStyle = 'rgba(100, 80, 20, 0.4)';
+        }
+        gameCtx.beginPath();
+        gameCtx.arc(gx, gy, GAME_TILE * 0.6, 0, Math.PI * 2);
+        gameCtx.fill();
+        if (!g.lit) {
+          gameCtx.strokeStyle = 'rgba(120, 100, 30, 0.5)';
+          gameCtx.lineWidth = 1;
+          gameCtx.stroke();
+        }
+      }
+    }
+
+    // Pyromaniac: Flamethrower cone visual
+    if (p.pyroFlameActive) {
+      const maxRange = p.pyroFlameRange || (5 * GAME_TILE);
+      const nx = p.pyroFlameNx || 1; const ny = p.pyroFlameNy || 0;
+      // Raycast to find obstacle
+      const blockedDist = _getFlameBlockedDist(p.x, p.y, nx, ny, maxRange);
+      const range = blockedDist;
+      const blocked = blockedDist < maxRange - 1;
+      const halfW = 1.5 * GAME_TILE * (range / maxRange); // narrow cone if shorter
+      gameCtx.save();
+      gameCtx.translate(sx, sy);
+      const angle = Math.atan2(ny, nx);
+      gameCtx.rotate(angle);
+      const flameGrad = gameCtx.createLinearGradient(0, 0, range, 0);
+      flameGrad.addColorStop(0, 'rgba(255, 200, 0, 0.5)');
+      flameGrad.addColorStop(0.4, 'rgba(255, 100, 0, 0.4)');
+      flameGrad.addColorStop(1, blocked ? 'rgba(255, 80, 0, 0.3)' : 'rgba(255, 30, 0, 0)');
+      gameCtx.fillStyle = flameGrad;
+      gameCtx.beginPath();
+      gameCtx.moveTo(0, 0);
+      gameCtx.lineTo(range, -halfW);
+      gameCtx.lineTo(range, halfW);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // If blocked, draw impact splash at the wall
+      if (blocked) {
+        // Sparks/splash at the blocked point
+        const now = Date.now() / 80;
+        for (let s = 0; s < 6; s++) {
+          const sa = (s / 6) * Math.PI * 2 + now * 0.5;
+          const sr = halfW * (0.4 + Math.sin(now + s * 1.5) * 0.3);
+          const sparkX = range + Math.cos(sa) * sr * 0.5;
+          const sparkY = Math.sin(sa) * sr;
+          gameCtx.fillStyle = s % 2 === 0 ? 'rgba(255, 200, 0, 0.8)' : 'rgba(255, 100, 0, 0.6)';
+          gameCtx.beginPath();
+          gameCtx.arc(sparkX, sparkY, 2.5, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+        // Orange glow at impact point
+        const impactGlow = gameCtx.createRadialGradient(range, 0, 0, range, 0, halfW * 0.8);
+        impactGlow.addColorStop(0, 'rgba(255, 150, 0, 0.5)');
+        impactGlow.addColorStop(1, 'rgba(255, 80, 0, 0)');
+        gameCtx.fillStyle = impactGlow;
+        gameCtx.beginPath();
+        gameCtx.arc(range, 0, halfW * 0.8, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      gameCtx.restore();
+    }
+
+    // Pyromaniac: Rain effect (T ability — local)
+    if (p.pyroRainTimer > 0) {
+      const rainX = p.pyroRainX - camX; const rainY = p.pyroRainY - camY;
+      const rainR = (p.fighter && p.fighter.abilities[3] ? p.fighter.abilities[3].fireRadius || 5 : 5) * GAME_TILE;
+      gameCtx.strokeStyle = 'rgba(255, 100, 0, 0.4)';
+      gameCtx.lineWidth = 1;
+      gameCtx.setLineDash([2, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(rainX, rainY, rainR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      // Falling fire arrows
+      const now = Date.now() / 80;
+      for (let a = 0; a < 12; a++) {
+        const aa = (a / 12) * Math.PI * 2 + now * 0.2;
+        const ar = rainR * (0.3 + (a % 3) * 0.2);
+        const ax = rainX + Math.cos(aa) * ar;
+        const ay = rainY + Math.sin(aa) * ar + Math.sin(now + a) * 6;
+        gameCtx.fillStyle = 'rgba(255, 150, 0, 0.7)';
+        gameCtx.beginPath();
+        gameCtx.moveTo(ax, ay - 6);
+        gameCtx.lineTo(ax - 2, ay + 2);
+        gameCtx.lineTo(ax + 2, ay + 2);
+        gameCtx.closePath();
+        gameCtx.fill();
+      }
+    }
+
+    // Pyromaniac: Map-wide special rain effect (SPACE ability)
+    if (p.pyroSpecialRainTimer > 0) {
+      // Draw fire arrows raining across the visible screen area
+      const now = Date.now() / 60;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      // Dense fire arrows scattered across viewport
+      for (let a = 0; a < 40; a++) {
+        const seed = a * 137.508 + now * 0.3;
+        const ax = ((Math.sin(seed * 1.3) * 0.5 + 0.5) * cw * 1.2) - cw * 0.1;
+        const ay = ((Math.cos(seed * 0.7) * 0.5 + 0.5) * ch * 1.2) - ch * 0.1 + Math.sin(now * 2 + a) * 8;
+        const alpha = 0.5 + Math.sin(seed) * 0.3;
+        gameCtx.fillStyle = `rgba(255, ${80 + (a % 4) * 30}, 0, ${alpha})`;
+        gameCtx.beginPath();
+        gameCtx.moveTo(ax, ay - 8);
+        gameCtx.lineTo(ax - 3, ay + 3);
+        gameCtx.lineTo(ax + 3, ay + 3);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Glow
+        gameCtx.fillStyle = `rgba(255, 200, 50, ${alpha * 0.3})`;
+        gameCtx.beginPath();
+        gameCtx.arc(ax, ay, 4, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Orange tint overlay
+      gameCtx.fillStyle = 'rgba(255, 80, 0, 0.06)';
+      gameCtx.fillRect(0, 0, cw, ch);
+    }
+
+    // ── Dog Tooth attack renders ──
+    // Stab effect (detailed knife thrust in attack direction)
+    // Illusion: Teleattack arc (silvery-blue slash)
+    const teleattackFx = p.effects.find((fx) => fx.type === 'teleattack');
+    if (teleattackFx) {
+      const aRad = Math.atan2(teleattackFx.aimNy || 0, teleattackFx.aimNx || 1);
+      const swLen = GAME_TILE * 1.3;
+      gameCtx.strokeStyle = 'rgba(200, 220, 255, 0.8)';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
+      gameCtx.stroke();
+      // Shimmer trail
+      gameCtx.strokeStyle = 'rgba(200, 220, 255, 0.3)';
+      gameCtx.lineWidth = 6;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen + 3, aRad - 0.4, aRad + 0.4);
+      gameCtx.stroke();
+    }
+
+    // Illusion: Dodge flash (brief bright flash when dodging)
+    const illuDodgeFx = p.effects.find((fx) => fx.type === 'illusion-dodge');
+    if (illuDodgeFx) {
+      gameCtx.fillStyle = 'rgba(200, 220, 255, 0.4)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Illusion: Rewind swirl on teleported players
+    const rewindFx = p.effects.find((fx) => fx.type === 'illusion-rewind');
+    if (rewindFx) {
+      const prog = rewindFx.timer / 1.0;
+      gameCtx.strokeStyle = `rgba(200, 220, 255, ${prog * 0.6})`;
+      gameCtx.lineWidth = 2;
+      const spiralR = radius + 8 + (1 - prog) * 10;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, spiralR, 0, Math.PI * 2 * prog);
+      gameCtx.stroke();
+    }
+
+    const stabFx = p.effects.find((fx) => fx.type === 'stab');
+    if (stabFx) {
+      const kA = Math.atan2(stabFx.aimNy || 0, stabFx.aimNx || 1);
+      const kPerp = kA + Math.PI / 2;
+      const progress = 1 - (stabFx.timer / 0.2);
+      const kLen = GAME_TILE * 1.2 * (0.6 + progress * 0.4);
+      // Anchor positions along the knife axis, starting from player center
+      const oX = sx + Math.cos(kA) * radius * 0.2;
+      const oY = sy + Math.sin(kA) * radius * 0.2;
+      const hEndX = oX; const hEndY = oY;
+      const kBaseX = oX + Math.cos(kA) * kLen * 0.28;
+      const kBaseY = oY + Math.sin(kA) * kLen * 0.28;
+      const kMidX = oX + Math.cos(kA) * kLen * 0.6;
+      const kMidY = oY + Math.sin(kA) * kLen * 0.6;
+      const kTipX = oX + Math.cos(kA) * kLen;
+      const kTipY = oY + Math.sin(kA) * kLen;
+      // Blade — wide near base tapering to sharp tip
+      const bwBase = 5;
+      const bwMid = 3.5;
+      gameCtx.fillStyle = '#c8c8c8';
+      gameCtx.beginPath();
+      gameCtx.moveTo(kBaseX + Math.cos(kPerp) * bwBase, kBaseY + Math.sin(kPerp) * bwBase);
+      gameCtx.lineTo(kMidX + Math.cos(kPerp) * bwMid, kMidY + Math.sin(kPerp) * bwMid);
+      gameCtx.lineTo(kTipX, kTipY);
+      gameCtx.lineTo(kMidX - Math.cos(kPerp) * (bwMid * 0.4), kMidY - Math.sin(kPerp) * (bwMid * 0.4));
+      gameCtx.lineTo(kBaseX - Math.cos(kPerp) * (bwBase * 0.5), kBaseY - Math.sin(kPerp) * (bwBase * 0.5));
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Blade outline
+      gameCtx.strokeStyle = '#777'; gameCtx.lineWidth = 0.8; gameCtx.stroke();
+      // Spine (back edge)
+      gameCtx.strokeStyle = '#aaa'; gameCtx.lineWidth = 0.6;
+      gameCtx.beginPath();
+      gameCtx.moveTo(kBaseX - Math.cos(kPerp) * (bwBase * 0.5), kBaseY - Math.sin(kPerp) * (bwBase * 0.5));
+      gameCtx.lineTo(kTipX, kTipY);
+      gameCtx.stroke();
+      // Edge highlight (sharp side)
+      gameCtx.strokeStyle = '#eee'; gameCtx.lineWidth = 0.7;
+      gameCtx.beginPath();
+      gameCtx.moveTo(kBaseX + Math.cos(kPerp) * bwBase, kBaseY + Math.sin(kPerp) * bwBase);
+      gameCtx.lineTo(kTipX, kTipY);
+      gameCtx.stroke();
+      // Fuller (groove)
+      gameCtx.strokeStyle = 'rgba(100,100,110,0.5)'; gameCtx.lineWidth = 1.2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(kBaseX + Math.cos(kA) * kLen * 0.05 + Math.cos(kPerp) * 2,
+                     kBaseY + Math.sin(kA) * kLen * 0.05 + Math.sin(kPerp) * 2);
+      gameCtx.lineTo(kBaseX + Math.cos(kA) * kLen * 0.25 + Math.cos(kPerp) * 1,
+                     kBaseY + Math.sin(kA) * kLen * 0.25 + Math.sin(kPerp) * 1);
+      gameCtx.stroke();
+      // Crossguard
+      gameCtx.strokeStyle = '#555'; gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.moveTo(kBaseX + Math.cos(kPerp) * 7, kBaseY + Math.sin(kPerp) * 7);
+      gameCtx.lineTo(kBaseX - Math.cos(kPerp) * 7, kBaseY - Math.sin(kPerp) * 7);
+      gameCtx.stroke();
+      gameCtx.strokeStyle = '#777'; gameCtx.lineWidth = 1; gameCtx.stroke();
+      // Handle (grip with wrap lines)
+      gameCtx.strokeStyle = '#1a0e05'; gameCtx.lineWidth = 5.5; gameCtx.lineCap = 'round';
+      gameCtx.beginPath(); gameCtx.moveTo(kBaseX, kBaseY); gameCtx.lineTo(hEndX, hEndY); gameCtx.stroke();
+      gameCtx.strokeStyle = '#3a2010'; gameCtx.lineWidth = 0.8;
+      for (let g = 0.15; g < 0.9; g += 0.2) {
+        const gx = kBaseX + (hEndX - kBaseX) * g;
+        const gy = kBaseY + (hEndY - kBaseY) * g;
+        gameCtx.beginPath();
+        gameCtx.moveTo(gx + Math.cos(kPerp) * 3, gy + Math.sin(kPerp) * 3);
+        gameCtx.lineTo(gx - Math.cos(kPerp) * 3, gy - Math.sin(kPerp) * 3);
+        gameCtx.stroke();
+      }
+      // Pommel
+      gameCtx.fillStyle = '#444'; gameCtx.beginPath(); gameCtx.arc(hEndX, hEndY, 2.5, 0, Math.PI * 2); gameCtx.fill();
+      gameCtx.strokeStyle = '#666'; gameCtx.lineWidth = 0.8; gameCtx.stroke();
+      gameCtx.lineCap = 'butt';
+    }
+    // Love Letter effect (gray shockwave ring expanding outward)
+    const loveFx = p.effects.find((fx) => fx.type === 'love-letter');
+    if (loveFx) {
+      const progress = 1 - (loveFx.timer / 1.5);
+      const ringR = radius + progress * GAME_TILE * 8;
+      const alpha = Math.max(0, 0.5 - progress * 0.45);
+      gameCtx.strokeStyle = 'rgba(180, 180, 180, ' + alpha + ')';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Envelope icon at center
+      if (loveFx.timer > 1) {
+        gameCtx.fillStyle = 'rgba(200, 200, 200, 0.8)';
+        gameCtx.font = 'bold 14px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('💌', sx, sy - radius - 10);
+      }
+    }
+    // Smile Tapes active indicator (red pulsing aura + text)
+    if (p.dogtoothSmileTimer > 0 && p.fighter && p.fighter.id === 'dogtooth') {
+      gameCtx.fillStyle = 'rgba(255, 0, 0, 0.1)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#ff4444';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('SMILE ' + Math.ceil(p.dogtoothSmileTimer) + 's', sx, sy + radius + 16);
+    }
+
+    // ── Illusion status indicators ──
+    // Invisibility aura (E or SPACE) — local player only
+    if ((p.illusionInvisTimer > 0 || p.illusionSpecialInvis || p.illusionBushInvisTimer > 0) && isLocal) {
+      // Ghostly shimmer ring pulsing
+      const ilPulse = 0.3 + 0.4 * Math.sin(Date.now() * 0.004);
+      gameCtx.strokeStyle = `rgba(200, 220, 255, ${ilPulse})`;
+      gameCtx.lineWidth = 2;
+      gameCtx.setLineDash([4, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      gameCtx.fillStyle = 'rgba(200, 220, 255, 0.8)';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      if (p.illusionInvisTimer > 0) {
+        gameCtx.fillText('👻 INVIS ' + Math.ceil(p.illusionInvisTimer) + 's', sx, sy - radius - 14);
+      } else {
+        gameCtx.fillText('👻 INVIS (kill copies)', sx, sy - radius - 14);
+      }
+    }
+    // Teleattack dodge indicator
+    if (p.illusionDodgeTimer > 0 && (isLocal || (gameMode === 'teams' && localPlayer && localPlayer.team && p.team === localPlayer.team))) {
+      gameCtx.strokeStyle = 'rgba(100, 200, 255, 0.5)';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+    // Time freeze indicator on frozen players
+    if (p.effects && p.effects.some(fx => fx.type === 'illusion-frozen')) {
+      gameCtx.fillStyle = 'rgba(200, 220, 255, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = 'rgba(200, 220, 255, 0.5)';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#c8dcff';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('⏱ FROZEN', sx, sy - radius - 14);
+    }
+    // See-grass indicator (F ability)
+    if (p.illusionSeeGrassTimer > 0 && isLocal) {
+      gameCtx.fillStyle = 'rgba(100, 255, 100, 0.7)';
+      gameCtx.font = 'bold 8px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('👁 SEE ' + Math.ceil(p.illusionSeeGrassTimer) + 's', sx, sy + radius + 16);
+    }
+
+    // Moon shadow warning (growing dark circle on ground + descending white moon)
+    if (p.dogtoothMoonTimer > 0 && p.dogtoothMoonX) {
+      const moonSx = p.dogtoothMoonX - camX;
+      const moonSy = p.dogtoothMoonY - camY;
+      const moonR = p.dogtoothMoonRadius || (10 * GAME_TILE);
+      const progress = 1 - (p.dogtoothMoonTimer / 3);
+      const shadowR = moonR * (0.3 + progress * 0.7);
+      // Dark shadow circle on ground — grows as moon descends
+      gameCtx.fillStyle = 'rgba(0, 0, 0, ' + (0.08 + progress * 0.35) + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(moonSx, moonSy, shadowR, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Shadow edge ring
+      gameCtx.strokeStyle = 'rgba(0, 0, 0, ' + (0.15 + progress * 0.3) + ')';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(moonSx, moonSy, shadowR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Descending white moon circle — starts high and small, ends at shadow position and full size
+      const moonVisualR = moonR * (0.4 + progress * 0.6);
+      const moonOffsetY = -(1 - progress) * moonR * 3; // starts 3× radius above, descends to 0
+      const moonAlpha = 0.3 + progress * 0.7;
+      // Moon glow
+      gameCtx.fillStyle = 'rgba(255, 255, 255, ' + (moonAlpha * 0.15) + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(moonSx, moonSy + moonOffsetY, moonVisualR * 1.4, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Moon body (bright white circle)
+      gameCtx.fillStyle = 'rgba(255, 255, 255, ' + moonAlpha + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(moonSx, moonSy + moonOffsetY, moonVisualR, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Moon crater details
+      // Unsettling smiley face — black hole eyes and mouth
+      const mCx = moonSx;
+      const mCy = moonSy + moonOffsetY;
+      const mR = moonVisualR;
+      gameCtx.fillStyle = 'rgba(0, 0, 0, ' + moonAlpha + ')';
+      // Left eye — hollow circle
+      gameCtx.beginPath();
+      gameCtx.arc(mCx - mR * 0.28, mCy - mR * 0.15, mR * 0.13, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Right eye — hollow circle
+      gameCtx.beginPath();
+      gameCtx.arc(mCx + mR * 0.28, mCy - mR * 0.15, mR * 0.13, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Mouth — wide unsettling curved smile
+      gameCtx.strokeStyle = 'rgba(0, 0, 0, ' + moonAlpha + ')';
+      gameCtx.lineWidth = mR * 0.08;
+      gameCtx.beginPath();
+      gameCtx.arc(mCx, mCy + mR * 0.1, mR * 0.5, Math.PI * 0.1, Math.PI * 0.9);
+      gameCtx.stroke();
+      // Fill the mouth as a black hole
+      gameCtx.fillStyle = 'rgba(0, 0, 0, ' + moonAlpha + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(mCx, mCy + mR * 0.1, mR * 0.5, Math.PI * 0.1, Math.PI * 0.9);
+      gameCtx.lineTo(mCx - mR * 0.48 * Math.cos(Math.PI * 0.1), mCy + mR * 0.1 + mR * 0.5 * Math.sin(Math.PI * 0.1));
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Moon outline
+      gameCtx.strokeStyle = 'rgba(200, 200, 210, ' + moonAlpha + ')';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(moonSx, moonSy + moonOffsetY, moonVisualR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Timer text
+      gameCtx.fillStyle = '#ffeeaa';
+      gameCtx.font = 'bold 14px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🌙 ' + Math.ceil(p.dogtoothMoonTimer) + 's', moonSx, moonSy - shadowR - 10);
+    }
+    // Moon impact flash — white covers the entire screen
+    const moonImpactFx = p.effects.find((fx) => fx.type === 'moon-impact');
+    if (moonImpactFx && p.dogtoothMoonX) {
+      const moonSx = p.dogtoothMoonX - camX;
+      const moonSy = p.dogtoothMoonY - camY;
+      const moonR = p.dogtoothMoonRadius || (10 * GAME_TILE);
+      const impactProgress = 1 - (moonImpactFx.timer / 1.5);
+      // Phase 1 (0-0.3): white flash covers entire screen
+      if (impactProgress < 0.3) {
+        const flashAlpha = Math.max(0, 1 - impactProgress / 0.3);
+        gameCtx.fillStyle = 'rgba(255, 255, 255, ' + (flashAlpha * 0.9) + ')';
+        gameCtx.fillRect(0, 0, gameCanvas.width, gameCanvas.height);
+      }
+      // Phase 2 (0.1-0.8): large white moon circle shrinks and fades
+      if (impactProgress > 0.1 && impactProgress < 0.8) {
+        const phase2 = (impactProgress - 0.1) / 0.7;
+        const impR = moonR * (2.0 - phase2 * 1.5);
+        const alpha = Math.max(0, 0.8 - phase2);
+        gameCtx.fillStyle = 'rgba(255, 255, 255, ' + alpha + ')';
+        gameCtx.beginPath();
+        gameCtx.arc(moonSx, moonSy, impR, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Phase 3 (0.3-1.0): shockwave ring expands outward
+      if (impactProgress > 0.3) {
+        const phase3 = (impactProgress - 0.3) / 0.7;
+        const ringR = moonR * (1 + phase3 * 3);
+        const ringAlpha = Math.max(0, 0.6 - phase3 * 0.6);
+        gameCtx.strokeStyle = 'rgba(255, 255, 255, ' + ringAlpha + ')';
+        gameCtx.lineWidth = 4 - phase3 * 3;
+        gameCtx.beginPath();
+        gameCtx.arc(moonSx, moonSy, ringR, 0, Math.PI * 2);
+        gameCtx.stroke();
+      }
+    }
+    // Complex enter/exit flash
+    if (p.effects.some((fx) => fx.type === 'complex-enter' || fx.type === 'complex-exit')) {
+      gameCtx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+    // Ouriel summon flash
+    if (p.effects.some((fx) => fx.type === 'ouriel-summon')) {
+      gameCtx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // ── Unstable effect renders ──
+    // M1: Unstable Fist — purple lightning slash arc
+    const unstFistFx = p.effects.find((fx) => fx.type === 'unstable-fist');
+    if (unstFistFx) {
+      const swLen = GAME_TILE * 1.4;
+      const aRad = Math.atan2(unstFistFx.aimNy, unstFistFx.aimNx);
+      // Main slash arc
+      gameCtx.strokeStyle = '#ff00ff';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
+      gameCtx.stroke();
+      // Inner glow arc
+      gameCtx.strokeStyle = 'rgba(255, 0, 255, 0.4)';
+      gameCtx.lineWidth = 8;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen * 0.85, aRad - 0.4, aRad + 0.4);
+      gameCtx.stroke();
+      // Lightning sparks
+      gameCtx.strokeStyle = '#ffff00';
+      gameCtx.lineWidth = 1.5;
+      for (let i = 0; i < 3; i++) {
+        const sa = aRad - 0.4 + Math.random() * 0.8;
+        const sr = swLen * (0.6 + Math.random() * 0.4);
+        const ex = sx + Math.cos(sa) * sr;
+        const ey = sy + Math.sin(sa) * sr;
+        gameCtx.beginPath();
+        gameCtx.moveTo(ex, ey);
+        gameCtx.lineTo(ex + (Math.random() - 0.5) * 10, ey + (Math.random() - 0.5) * 10);
+        gameCtx.stroke();
+      }
+    }
+
+    // E: Unstable Gamble — dice-like magenta burst with question marks
+    const unstGambleFx = p.effects.find((fx) => fx.type === 'unstable-gamble');
+    if (unstGambleFx) {
+      const swLen = GAME_TILE * 1.5;
+      const aRad = Math.atan2(unstGambleFx.aimNy || 0, unstGambleFx.aimNx || 1);
+      // Magenta sweep arc
+      gameCtx.strokeStyle = '#ff00ff';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.7, aRad + 0.7);
+      gameCtx.stroke();
+      // Glowing fill
+      gameCtx.fillStyle = 'rgba(255, 0, 255, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.7, aRad + 0.7);
+      gameCtx.lineTo(sx, sy);
+      gameCtx.fill();
+      // Random symbols flying out
+      gameCtx.fillStyle = '#ffff00';
+      gameCtx.font = 'bold 14px sans-serif';
+      gameCtx.textAlign = 'center';
+      const symbols = ['🎲', '?', '!', '💀', '⚡'];
+      for (let i = 0; i < 3; i++) {
+        const sa = aRad - 0.5 + Math.random() * 1.0;
+        const sr = swLen * (0.5 + Math.random() * 0.6);
+        gameCtx.fillText(symbols[Math.floor(Math.random() * symbols.length)],
+          sx + Math.cos(sa) * sr, sy + Math.sin(sa) * sr);
+      }
+    }
+
+    // R: Unstable Infantry spawn flash — purple ring burst
+    if (p.effects.some((fx) => fx.type === 'unstable-infantry')) {
+      const pulse = Math.sin(Date.now() * 0.01) * 0.3 + 0.7;
+      gameCtx.strokeStyle = `rgba(255, 0, 255, ${pulse})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 18, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Three small circles around player (representing infantry)
+      for (let i = 0; i < 3; i++) {
+        const a = (i / 3) * Math.PI * 2 + Date.now() * 0.004;
+        const ix = sx + Math.cos(a) * (radius + 22);
+        const iy = sy + Math.sin(a) * (radius + 22);
+        gameCtx.fillStyle = '#ff00ff';
+        gameCtx.beginPath();
+        gameCtx.arc(ix, iy, 4, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    }
+
+    // Infantry hit — purple flash on the infantry unit
+    if (p.effects.some((fx) => fx.type === 'unstable-infantry-hit')) {
+      gameCtx.fillStyle = 'rgba(255, 0, 255, 0.4)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Teleport target — purple swirl on teleported enemy
+    if (p.effects.some((fx) => fx.type === 'unstable-teleport')) {
+      const t = Date.now() * 0.008;
+      gameCtx.strokeStyle = '#ff00ff';
+      gameCtx.lineWidth = 2;
+      for (let i = 0; i < 4; i++) {
+        const a = t + (i / 4) * Math.PI * 2;
+        const r1 = radius + 4;
+        const r2 = radius + 14;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + Math.cos(a) * r1, sy + Math.sin(a) * r1);
+        gameCtx.lineTo(sx + Math.cos(a + 0.3) * r2, sy + Math.sin(a + 0.3) * r2);
+        gameCtx.stroke();
+      }
+      gameCtx.fillStyle = 'rgba(255, 0, 255, 0.2)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // T: Unstable Summon spawn — purple portal effect
+    if (p.effects.some((fx) => fx.type === 'unstable-summon-spawn')) {
+      const t = Date.now() * 0.005;
+      const portalR = radius + 20;
+      // Outer spinning ring
+      gameCtx.strokeStyle = '#ff00ff';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, portalR, t, t + Math.PI * 1.5);
+      gameCtx.stroke();
+      // Inner spinning ring (opposite direction)
+      gameCtx.strokeStyle = '#cc00cc';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, portalR * 0.7, -t, -t + Math.PI * 1.2);
+      gameCtx.stroke();
+      // Center glow
+      gameCtx.fillStyle = 'rgba(255, 0, 255, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, portalR * 0.5, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // SPACE: Unstable Domain — expanding magenta shockwave ring
+    if (p.effects.some((fx) => fx.type === 'unstable-domain')) {
+      const domFx = p.effects.find((fx) => fx.type === 'unstable-domain');
+      const progress = 1 - (domFx.timer / 2.5);
+      const ringR = radius + progress * GAME_TILE * 10;
+      const alpha = Math.max(0, 1 - progress);
+      // Expanding shockwave ring
+      gameCtx.strokeStyle = `rgba(255, 0, 255, ${alpha * 0.8})`;
+      gameCtx.lineWidth = 4 - progress * 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Inner filled pulse
+      gameCtx.fillStyle = `rgba(255, 0, 255, ${alpha * 0.1})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR * 0.8, 0, Math.PI * 2);
+      gameCtx.fill();
+      // ⚡ symbol at center
+      if (progress < 0.5) {
+        gameCtx.fillStyle = `rgba(255, 255, 0, ${alpha})`;
+        gameCtx.font = 'bold 16px sans-serif';
+        gameCtx.textAlign = 'center';
+        gameCtx.textBaseline = 'middle';
+        gameCtx.fillText('⚡', sx, sy - radius - 14);
+      }
+    }
+
+    // Unstablism / Death swap — purple flash + character switch visual
+    if (p.effects.some((fx) => fx.type === 'unstable-swap')) {
+      const swapFx = p.effects.find((fx) => fx.type === 'unstable-swap');
+      const progress = 1 - (swapFx.timer / 2.0);
+      const flashAlpha = Math.max(0, 1 - progress * 2);
+      // Bright flash
+      gameCtx.fillStyle = `rgba(255, 0, 255, ${flashAlpha * 0.5})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 25, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Rotating arrows (swap symbol)
+      const t = Date.now() * 0.006;
+      gameCtx.strokeStyle = `rgba(255, 255, 0, ${Math.max(0, 0.8 - progress)})`;
+      gameCtx.lineWidth = 2.5;
+      for (let i = 0; i < 2; i++) {
+        const a = t + i * Math.PI;
+        const r = radius + 15;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + Math.cos(a) * r, sy + Math.sin(a) * r);
+        gameCtx.lineTo(sx + Math.cos(a + 0.5) * (r + 8), sy + Math.sin(a + 0.5) * (r + 8));
+        gameCtx.stroke();
+      }
+    }
+
+    // Unstable eye (T ability active indicator)
+    if (p.effects.some((fx) => fx.type === 'unstable-eye')) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.006);
+      gameCtx.strokeStyle = `rgba(255, 0, 255, ${0.3 + pulse * 0.4})`;
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#ff00ff';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('👁', sx, sy - radius - 8);
+    }
+
+    // Power bleed effect — dripping red overlay
+    if (p.effects.some((fx) => fx.type === 'power-bleed')) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.008);
+      gameCtx.strokeStyle = `rgba(180, 0, 0, ${0.5 + pulse * 0.3})`;
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 2, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Drip lines
+      gameCtx.strokeStyle = `rgba(180, 0, 0, ${0.4 + pulse * 0.3})`;
+      gameCtx.lineWidth = 1.5;
+      for (let d = 0; d < 3; d++) {
+        const angle = (d / 3) * Math.PI * 2 + Date.now() * 0.001;
+        const dripX = sx + Math.cos(angle) * radius * 0.6;
+        gameCtx.beginPath();
+        gameCtx.moveTo(dripX, sy + radius * 0.3);
+        gameCtx.lineTo(dripX, sy + radius * 0.3 + 6 + pulse * 4);
+        gameCtx.stroke();
+      }
+    }
+
+    // Poker debt indicator — gold chains + debt counter
+    if (p.pokerDebtTarget && p.pokerDebtHits > 0) {
+      // Gold chain ring around debtor
+      const debtPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+      gameCtx.strokeStyle = `rgba(255, 215, 0, ${0.5 + debtPulse * 0.3})`;
+      gameCtx.lineWidth = 2;
+      gameCtx.setLineDash([4, 3]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      // Debt counter text
+      gameCtx.fillStyle = '#ffd700';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.textBaseline = 'bottom';
+      gameCtx.fillText('💰' + p.pokerDebtHits, sx, sy - radius - 6);
+    }
+
+    // Cricket trophy shield — gold shimmer around protected cricket
+    if (p.cricketTrophyShield && p.cricketTrophyId) {
+      const shieldPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.004);
+      gameCtx.strokeStyle = `rgba(255, 215, 0, ${0.4 + shieldPulse * 0.4})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = `rgba(255, 215, 0, ${0.08 + shieldPulse * 0.05})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Igloo teleport flash effect
+    if (p.effects.some((fx) => fx.type === 'igloo-teleport')) {
+      const tpFx = p.effects.find((fx) => fx.type === 'igloo-teleport');
+      const progress = 1 - (tpFx.timer / 1.5);
+      const flashAlpha = Math.max(0, 1 - progress * 2);
+      gameCtx.fillStyle = `rgba(135, 206, 235, ${flashAlpha * 0.4})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 15 * (1 - progress), 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Debt cleared flash
+    if (p.effects.some((fx) => fx.type === 'debt-cleared')) {
+      const dcFx = p.effects.find((fx) => fx.type === 'debt-cleared');
+      const progress = 1 - (dcFx.timer / 1.5);
+      const flashAlpha = Math.max(0, 1 - progress);
+      gameCtx.fillStyle = `rgba(0, 255, 136, ${flashAlpha * 0.3})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Trophy spawn effect — expanding gold ring
+    if (p.effects.some((fx) => fx.type === 'trophy-spawn')) {
+      const tsFx = p.effects.find((fx) => fx.type === 'trophy-spawn');
+      const progress = 1 - (tsFx.timer / 2.0);
+      const ringR = radius + progress * GAME_TILE * 3;
+      const alpha = Math.max(0, 1 - progress);
+      gameCtx.strokeStyle = `rgba(255, 215, 0, ${alpha * 0.6})`;
+      gameCtx.lineWidth = 3 - progress * 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Trophy destroyed — red flash
+    if (p.effects.some((fx) => fx.type === 'trophy-destroyed')) {
+      const tdFx = p.effects.find((fx) => fx.type === 'trophy-destroyed');
+      const progress = 1 - (tdFx.timer / 2.0);
+      const flashAlpha = Math.max(0, 1 - progress);
+      gameCtx.fillStyle = `rgba(255, 0, 0, ${flashAlpha * 0.3})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Dino spawn effect — green pulse
+    if (p.effects.some((fx) => fx.type === 'dino-spawn')) {
+      const dsFx = p.effects.find((fx) => fx.type === 'dino-spawn');
+      const progress = 1 - (dsFx.timer / 2.0);
+      gameCtx.strokeStyle = `rgba(85, 107, 47, ${Math.max(0, 1 - progress) * 0.6})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + progress * GAME_TILE * 2, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Dino bite effect — snap animation
+    if (p.effects.some((fx) => fx.type === 'dino-bite')) {
+      const dbFx = p.effects.find((fx) => fx.type === 'dino-bite');
+      const progress = 1 - (dbFx.timer / 0.4);
+      gameCtx.fillStyle = `rgba(255, 200, 0, ${Math.max(0, 1 - progress * 2)})`;
+      gameCtx.font = `${14 + progress * 6}px sans-serif`;
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🦷', sx, sy - radius - 5);
+    }
+
+    // Slasher spawn effect — red flash
+    if (p.effects.some((fx) => fx.type === 'slasher-spawn')) {
+      const ssFx = p.effects.find((fx) => fx.type === 'slasher-spawn');
+      const progress = 1 - (ssFx.timer / 2.0);
+      gameCtx.fillStyle = `rgba(139, 0, 0, ${Math.max(0, 1 - progress) * 0.3})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 20, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Slasher slash effect — quick X flash
+    if (p.effects.some((fx) => fx.type === 'slasher-slash')) {
+      const slFx = p.effects.find((fx) => fx.type === 'slasher-slash');
+      const alpha = Math.max(0, slFx.timer / 0.3);
+      gameCtx.strokeStyle = `rgba(255, 0, 0, ${alpha})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius, sy - radius);
+      gameCtx.lineTo(sx + radius, sy + radius);
+      gameCtx.stroke();
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius, sy - radius);
+      gameCtx.lineTo(sx - radius, sy + radius);
+      gameCtx.stroke();
+    }
+
+    // Guest666 spawn effect — dark red shockwave
+    if (p.effects.some((fx) => fx.type === 'guest666-spawn')) {
+      const gFx = p.effects.find((fx) => fx.type === 'guest666-spawn');
+      const progress = 1 - (gFx.timer / 2.0);
+      const ringR = radius + progress * GAME_TILE * 4;
+      gameCtx.strokeStyle = `rgba(139, 0, 0, ${Math.max(0, 1 - progress) * 0.7})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, ringR, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Guest666 jump effect — red streak
+    if (p.effects.some((fx) => fx.type === 'guest666-jump')) {
+      const jFx = p.effects.find((fx) => fx.type === 'guest666-jump');
+      const alpha = Math.max(0, jFx.timer / 0.6);
+      gameCtx.fillStyle = `rgba(139, 0, 0, ${alpha * 0.4})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 3, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Guest666 lacerate effect — claw marks
+    if (p.effects.some((fx) => fx.type === 'guest666-lacerate')) {
+      const lFx = p.effects.find((fx) => fx.type === 'guest666-lacerate');
+      const alpha = Math.max(0, lFx.timer / 0.5);
+      gameCtx.strokeStyle = `rgba(255, 0, 0, ${alpha})`;
+      gameCtx.lineWidth = 3;
+      for (let cl = -1; cl <= 1; cl++) {
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + cl * 6 - 8, sy - 10);
+        gameCtx.lineTo(sx + cl * 6 + 8, sy + 10);
+        gameCtx.stroke();
+      }
+    }
+
+    // Imploding kitten spawn effect
+    if (p.effects.some((fx) => fx.type === 'imploding-kitten-spawn')) {
+      const ikFx = p.effects.find((fx) => fx.type === 'imploding-kitten-spawn');
+      const progress = 1 - (ikFx.timer / 2.0);
+      gameCtx.fillStyle = `rgba(74, 159, 255, ${Math.max(0, 1 - progress) * 0.3})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + progress * GAME_TILE * 2, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Kitten implode transition effect (kitten → black hole)
+    if (p.effects.some((fx) => fx.type === 'kitten-implode')) {
+      const kiFx = p.effects.find((fx) => fx.type === 'kitten-implode');
+      const progress = 1 - (kiFx.timer / 1.5);
+      // Collapsing blue ring that turns purple
+      const collapseR = radius * 3 * (1 - progress);
+      const r = Math.round(74 + (80 - 74) * progress);
+      const g = Math.round(159 * (1 - progress));
+      const b = Math.round(255 - (255 - 160) * progress);
+      gameCtx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${Math.max(0, 0.8 - progress * 0.6)})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, collapseR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Flash at center
+      if (progress > 0.4 && progress < 0.8) {
+        const flashA = Math.sin((progress - 0.4) / 0.4 * Math.PI);
+        gameCtx.fillStyle = `rgba(160, 60, 255, ${flashA * 0.5})`;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 2 * progress, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    }
+
+    // Black hole detonation flash
+    if (p.effects.some((fx) => fx.type === 'blackhole-detonate')) {
+      const bhFx = p.effects.find((fx) => fx.type === 'blackhole-detonate');
+      const progress = 1 - (bhFx.timer / 1.5);
+      const flashAlpha = Math.max(0, 1 - progress * 2);
+      gameCtx.fillStyle = `rgba(80, 0, 160, ${flashAlpha * 0.5})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 30, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Napoleon Full Power effect
+    if (p.effects.some((fx) => fx.type === 'napoleon-full-power')) {
+      const npFx = p.effects.find((fx) => fx.type === 'napoleon-full-power');
+      const progress = 1 - (npFx.timer / 2.0);
+      gameCtx.strokeStyle = `rgba(139, 69, 19, ${Math.max(0, 1 - progress) * 0.6})`;
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + progress * GAME_TILE * 5, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Cavalry charge effect
+    if (p.effects.some((fx) => fx.type === 'cavalry-charge')) {
+      const ccFx = p.effects.find((fx) => fx.type === 'cavalry-charge');
+      const alpha = Math.max(0, ccFx.timer / 0.4);
+      gameCtx.fillStyle = `rgba(139, 69, 19, ${alpha * 0.4})`;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 2, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Pyromaniac roar shockwave
+    if (p.effects.some((fx) => fx.type === 'pyro-roar')) {
+      const roFx = p.effects.find((fx) => fx.type === 'pyro-roar');
+      const progress = 1 - roFx.timer / 1.5;
+      const waveR = radius * 2 + progress * GAME_TILE * 8;
+      const alpha = Math.max(0, 1 - progress);
+      gameCtx.strokeStyle = `rgba(255, 60, 0, ${alpha * 0.6})`;
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, waveR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.strokeStyle = `rgba(255, 200, 0, ${alpha * 0.3})`;
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, waveR * 0.7, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Pyromaniac burn indicator (on burned players)
+    if (p.pyroBurnTimers && p.pyroBurnTimers.length > 0 && p.alive) {
+      const burnNow = Date.now() / 120;
+      for (let bi = 0; bi < 3; bi++) {
+        const bAngle = (bi / 3) * Math.PI * 2 + burnNow;
+        const bx = sx + Math.cos(bAngle) * (radius + 3);
+        const by = sy + Math.sin(bAngle) * (radius + 3) - Math.sin(burnNow + bi) * 4;
+        gameCtx.fillStyle = 'rgba(255, 120, 0, 0.7)';
+        gameCtx.beginPath();
+        gameCtx.arc(bx, by, 2.5, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    }
+
+    gameCtx.restore();
+  }
+
+  // Draw projectiles (hidden when local player is in backrooms or Complex)
+  if (!(localPlayer && (localPlayer.inBackrooms || localPlayer.dogtoothInComplex))) {
+  for (const proj of projectiles) {
+    const px = proj.x - camX;
+    const py = proj.y - camY;
+    if (px < -50 || px > cw + 50 || py < -50 || py > ch + 50) continue;
+    if (proj.type === 'hitman-bullet') {
+      // Small fast bullet with tracer line
+      const angle = Math.atan2(proj.vy, proj.vx);
+      const traceLen = 10;
+      gameCtx.save();
+      gameCtx.strokeStyle = proj.color || '#f5c842';
+      gameCtx.lineWidth = 2;
+      gameCtx.shadowColor = proj.color || '#f5c842';
+      gameCtx.shadowBlur = 4;
+      gameCtx.beginPath();
+      gameCtx.moveTo(px - Math.cos(angle) * traceLen, py - Math.sin(angle) * traceLen);
+      gameCtx.lineTo(px, py);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#fff';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 2.5, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.shadowBlur = 0;
+      gameCtx.restore();
+    } else if (proj.type === 'chip') {
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 5, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#333';
+      gameCtx.lineWidth = 1;
+      gameCtx.stroke();
+    } else if (proj.type === 'card') {
+      gameCtx.save();
+      const angle = Math.atan2(proj.vy, proj.vx);
+      gameCtx.translate(px, py);
+      gameCtx.rotate(angle);
+      // Large card shape
+      gameCtx.fillStyle = '#fff';
+      gameCtx.fillRect(-14, -9, 28, 18);
+      gameCtx.strokeStyle = '#e94560';
+      gameCtx.lineWidth = 2;
+      gameCtx.strokeRect(-14, -9, 28, 18);
+      gameCtx.fillStyle = '#e94560';
+      gameCtx.font = 'bold 12px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.textBaseline = 'middle';
+      gameCtx.fillText('♠', 0, 0);
+      gameCtx.restore();
+    } else if (proj.type === 'entangle') {
+      // Neon green spinning swords
+      gameCtx.save();
+      const angle = Math.atan2(proj.vy, proj.vx) + (Date.now() / 100);
+      gameCtx.translate(px, py);
+      gameCtx.rotate(angle);
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 2.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(-10, 0);
+      gameCtx.lineTo(10, 0);
+      gameCtx.moveTo(0, -10);
+      gameCtx.lineTo(0, 10);
+      gameCtx.stroke();
+      // Glow
+      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(0, 0, 8, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.restore();
+    } else if (proj.type === 'shockwave') {
+      // Subtle green ripple so the shockwave is visible but not overwhelming
+      gameCtx.save();
+      gameCtx.globalAlpha = Math.min(0.6, proj.timer * 0.3);
+      const angle = Math.atan2(proj.vy, proj.vx);
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 6, angle - 0.6, angle + 0.6);
+      gameCtx.stroke();
+      gameCtx.globalAlpha = 1.0;
+      gameCtx.restore();
+    } else if (proj.type === 'coolkidd-ball') {
+      gameCtx.fillStyle = proj.color || '#ff0000';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 6, 0, Math.PI * 2);
+      gameCtx.fill();
+    } else if (proj.type === 'bowler-ball') {
+      gameCtx.fillStyle = proj.color || '#228b22';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 5, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#fff';
+      gameCtx.lineWidth = 1;
+      gameCtx.stroke();
+    } else if (proj.type === 'cannonball') {
+      // ── Napoleon Cannonball: dark iron sphere with smoke trail ──
+      // Smoke trail
+      gameCtx.fillStyle = 'rgba(120, 120, 120, 0.3)';
+      for (let i = 1; i <= 3; i++) {
+        const tx = px - proj.vx * i * 0.3;
+        const ty = py - proj.vy * i * 0.3;
+        gameCtx.beginPath();
+        gameCtx.arc(tx, ty, 4 - i * 0.8, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Main cannonball
+      gameCtx.fillStyle = '#222';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 5, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Metallic highlight
+      gameCtx.fillStyle = 'rgba(200, 200, 200, 0.35)';
+      gameCtx.beginPath();
+      gameCtx.arc(px - 1.5, py - 1.5, 2, 0, Math.PI * 2);
+      gameCtx.fill();
+    } else if (proj.type === 'infantry-bullet') {
+      // ── Napoleon Infantry Bullet: small bright musket ball ──
+      gameCtx.fillStyle = '#ffcc44';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 2.5, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Muzzle flash glow
+      gameCtx.fillStyle = 'rgba(255, 200, 60, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 5, 0, Math.PI * 2);
+      gameCtx.fill();
+    } else if (proj.type === 'kel-basketball') {
+      // ── Kel Basketball: proper ball with seams ──
+      const br = 5;
+      gameCtx.fillStyle = '#e67e22';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, br, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Dark outline
+      gameCtx.strokeStyle = '#8b4513';
+      gameCtx.lineWidth = 1;
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, br, 0, Math.PI * 2);
+      gameCtx.stroke();
+      // Horizontal seam
+      gameCtx.strokeStyle = '#333';
+      gameCtx.lineWidth = 0.7;
+      gameCtx.beginPath();
+      gameCtx.moveTo(px - br, py); gameCtx.lineTo(px + br, py);
+      gameCtx.stroke();
+      // Curved seams (left + right arcs)
+      gameCtx.beginPath();
+      gameCtx.arc(px - br * 0.3, py, br * 0.7, -Math.PI * 0.4, Math.PI * 0.4);
+      gameCtx.stroke();
+      gameCtx.beginPath();
+      gameCtx.arc(px + br * 0.3, py, br * 0.7, Math.PI - Math.PI * 0.4, Math.PI + Math.PI * 0.4);
+      gameCtx.stroke();
+    } else if (proj.type === 'dnd-arrow') {
+      // ── D&D Elf Arrow: brown shaft with white tip ──
+      gameCtx.save();
+      const angle = Math.atan2(proj.vy, proj.vx);
+      gameCtx.translate(px, py);
+      gameCtx.rotate(angle);
+      // Shaft
+      gameCtx.strokeStyle = '#8b4513';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(-10, 0);
+      gameCtx.lineTo(6, 0);
+      gameCtx.stroke();
+      // Arrowhead
+      gameCtx.fillStyle = '#ddd';
+      gameCtx.beginPath();
+      gameCtx.moveTo(10, 0);
+      gameCtx.lineTo(5, -3);
+      gameCtx.lineTo(5, 3);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Fletching
+      gameCtx.fillStyle = '#2ecc71';
+      gameCtx.beginPath();
+      gameCtx.moveTo(-10, 0);
+      gameCtx.lineTo(-8, -3);
+      gameCtx.lineTo(-6, 0);
+      gameCtx.closePath();
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.moveTo(-10, 0);
+      gameCtx.lineTo(-8, 3);
+      gameCtx.lineTo(-6, 0);
+      gameCtx.closePath();
+      gameCtx.fill();
+      gameCtx.restore();
+    } else if (proj.type === 'dnd-fireball') {
+      // ── D&D Fireball: large 3×3 orange-red ball with flame trail ──
+      const fbR = (proj.aoeRadius || 1.5 * GAME_TILE) * 0.5;
+      // Flame trail
+      for (let i = 1; i <= 6; i++) {
+        const tx = px - proj.vx * i * 0.12;
+        const ty = py - proj.vy * i * 0.12;
+        gameCtx.fillStyle = 'rgba(255, ' + (80 + i * 25) + ', 0, ' + (0.35 - i * 0.05) + ')';
+        gameCtx.beginPath();
+        gameCtx.arc(tx, ty, fbR * (1 - i * 0.12), 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Outer glow
+      gameCtx.fillStyle = 'rgba(255, 69, 0, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, fbR * 1.15, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Main ball
+      gameCtx.fillStyle = '#ff4500';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, fbR * 0.7, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Inner bright core
+      gameCtx.fillStyle = '#ffcc00';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, fbR * 0.3, 0, Math.PI * 2);
+      gameCtx.fill();
+    } else if (proj.type === 'dnd-blur-bolt') {
+      // ── D&D Blur Bolt: purple spinning bolt ──
+      gameCtx.save();
+      const angle = Math.atan2(proj.vy, proj.vx) + (Date.now() / 150);
+      gameCtx.translate(px, py);
+      gameCtx.rotate(angle);
+      gameCtx.fillStyle = '#9b59b6';
+      gameCtx.beginPath();
+      gameCtx.moveTo(8, 0);
+      gameCtx.lineTo(0, -5);
+      gameCtx.lineTo(-8, 0);
+      gameCtx.lineTo(0, 5);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Glow
+      gameCtx.fillStyle = 'rgba(155, 89, 182, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(0, 0, 8, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.restore();
+    }
+  }
+  } // end backrooms projectile hide
+
+  // Render spike entities (John Doe) — hidden in backrooms
+  if (!(localPlayer && localPlayer.inBackrooms) && window._spikeEntities && window._spikeEntities.length > 0) {
+    for (const spike of window._spikeEntities) {
+      const sx = spike.x - camX;
+      const sy = spike.y - camY;
+      if (sx < -50 || sx > cw + 50 || sy < -50 || sy > ch + 50) continue;
+      const alpha = Math.min(1, spike.timer / 2);
+      gameCtx.fillStyle = 'rgba(139, 0, 0, ' + (alpha * 0.6) + ')';
+      gameCtx.fillRect(sx - GAME_TILE / 2, sy - GAME_TILE / 2, GAME_TILE, GAME_TILE);
+      // Draw spike cross
+      gameCtx.strokeStyle = 'rgba(255, 50, 50, ' + alpha + ')';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - 8, sy - 8); gameCtx.lineTo(sx + 8, sy + 8);
+      gameCtx.moveTo(sx + 8, sy - 8); gameCtx.lineTo(sx - 8, sy + 8);
+      gameCtx.stroke();
+    }
+  }
+
+  // Boiled One horror overlay — dark reddish tint + random dark patches
+  const anyBoiledOne = gamePlayers.some(p => p.boiledOneActive);
+  if (anyBoiledOne) {
+    gameCtx.fillStyle = 'rgba(60, 0, 0, 0.5)';
+    gameCtx.fillRect(0, 0, cw, ch);
+    // Random dark splotches scattered across the screen (seeded by frame-stable positions)
+    const t = Math.floor(Date.now() / 200); // shift slowly
+    for (let i = 0; i < 18; i++) {
+      const seed = i * 7919 + 1301;
+      const px = ((seed * 31 + t * 3) % cw + cw) % cw;
+      const py = ((seed * 47 + t * 5) % ch + ch) % ch;
+      const r = 30 + (seed % 60);
+      const alpha = 0.08 + (seed % 12) * 0.015;
+      gameCtx.fillStyle = 'rgba(0, 0, 0, ' + alpha + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, r, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+  }
+
+  // Unstable Eye overlay: pixelation (low-res redraw) + green tint (only visible to the 1x player, overridden by Boiled One)
+  if (localPlayer && localPlayer.unstableEyeTimer > 0 && localPlayer.fighter.id === 'onexonexonex' && !anyBoiledOne) {
+    // Pixelation pass — draw the canvas at 1/8 resolution then scale back up without smoothing
+    const pixelBlock = 8;
+    const pw = Math.ceil(cw / pixelBlock);
+    const ph = Math.ceil(ch / pixelBlock);
+    if (!gameLoop._unstablePixelCanvas) {
+      gameLoop._unstablePixelCanvas = document.createElement('canvas');
+    }
+    const pCanvas = gameLoop._unstablePixelCanvas;
+    if (pCanvas.width !== pw) pCanvas.width = pw;
+    if (pCanvas.height !== ph) pCanvas.height = ph;
+    const pCtx = pCanvas.getContext('2d');
+    pCtx.imageSmoothingEnabled = false;
+    pCtx.drawImage(gameCanvas, 0, 0, pw, ph);
+    gameCtx.save();
+    gameCtx.imageSmoothingEnabled = false;
+    gameCtx.drawImage(pCanvas, 0, 0, cw, ch);
+    gameCtx.restore();
+    // Green colour wash to further obscure
+    gameCtx.fillStyle = 'rgba(0, 50, 10, 0.25)';
+    gameCtx.fillRect(0, 0, cw, ch);
+    // Subtle green outlines on enemies (reveal effect, but hard to see through blur)
+    for (const p of gamePlayers) {
+      if (p.id === localPlayerId || !p.alive) continue;
+      if (p.isSummon) continue;
+      const ex = p.x - camX;
+      const ey = p.y - camY;
+      if (ex < -100 || ex > cw + 100 || ey < -100 || ey > ch + 100) continue;
+      const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(ex, ey, r + 8, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(ex, ey, r + 8, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+  }
+
+  // D&D Blur overlay: heavy blur + purple tint (applied by blur bolt spell)
+  if (localPlayer && localPlayer.dndBlurTimer > 0) {
+    gameCtx.save();
+    gameCtx.filter = 'blur(12px)';
+    gameCtx.drawImage(gameCanvas, 0, 0);
+    gameCtx.filter = 'none';
+    gameCtx.restore();
+    gameCtx.save();
+    gameCtx.filter = 'blur(6px)';
+    gameCtx.globalAlpha = 0.5;
+    gameCtx.drawImage(gameCanvas, 0, 0);
+    gameCtx.filter = 'none';
+    gameCtx.globalAlpha = 1.0;
+    gameCtx.restore();
+    // Purple colour wash
+    gameCtx.fillStyle = 'rgba(80, 0, 120, 0.2)';
+    gameCtx.fillRect(0, 0, cw, ch);
+  }
+
+  // ── Final Battle overlay: Dog Tooth in Complex — grayscale filter + glitch ──
+  if (localPlayer && localPlayer.dogtoothInComplex) {
+    // Grayscale filter
+    gameCtx.save();
+    gameCtx.filter = 'grayscale(1)';
+    gameCtx.drawImage(gameCanvas, 0, 0);
+    gameCtx.filter = 'none';
+    gameCtx.restore();
+    // Heavy glitchy vertical black stripes — big, thick, lingering
+    const glitchTime = Date.now();
+    // Slow cycle vertical stripes (persist ~300ms each)
+    const slowSeed = Math.floor(glitchTime / 300);
+    for (let i = 0; i < 8; i++) {
+      const hash = (slowSeed * 7919 + i * 104729) & 0xFFFFFF;
+      if ((hash & 1) !== 0) continue; // ~50% chance
+      const stripeX = ((hash >> 1) % cw);
+      const stripeW = 8 + ((hash >> 8) % 25);
+      gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      gameCtx.fillRect(stripeX, 0, stripeW, ch);
+    }
+    // Fast cycle vertical stripes (flicker every ~80ms)
+    const fastSeed = Math.floor(glitchTime / 80);
+    for (let i = 0; i < 15; i++) {
+      const hash = (fastSeed * 3571 + i * 78917) & 0xFFFFFF;
+      if ((hash & 3) !== 0) continue; // ~25% chance
+      const stripeX = ((hash >> 2) % cw);
+      const stripeW = 3 + ((hash >> 10) % 15);
+      const stripeY = ((hash >> 14) % (ch >> 2));
+      const stripeH = ch * 0.4 + ((hash >> 6) % (ch >> 1));
+      gameCtx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+      gameCtx.fillRect(stripeX, stripeY, stripeW, stripeH);
+    }
+    // Screen-tear: occasional horizontal offset block
+    const tearSeed = Math.floor(glitchTime / 150);
+    if ((tearSeed & 3) === 0) {
+      const tearX = ((tearSeed * 4919) % (cw - 40));
+      const tearW = 15 + ((tearSeed * 7) % 30);
+      const tearShift = -20 + ((tearSeed * 13) % 40);
+      gameCtx.drawImage(gameCanvas, tearX, 0, tearW, ch, tearX + tearShift, 0, tearW, ch);
+    }
+    // Full-height white flash glitch
+    if ((fastSeed & 5) === 0) {
+      const flashX = ((fastSeed * 3571) % cw);
+      gameCtx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+      gameCtx.fillRect(flashX, 0, 3 + (fastSeed % 6), ch);
+    }
+    // "THE COMPLEX" text
+    gameCtx.fillStyle = 'rgba(100, 0, 0, 0.4)';
+    gameCtx.font = 'bold 28px sans-serif';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText('THE COMPLEX', cw / 2, 40);
+  }
+
+  // Draw zone overlay
+  if (zoneInset > 0) {
+    gameCtx.fillStyle = 'rgba(200, 30, 30, 0.25)';
+    for (let r = startRow; r <= endRow; r++) {
+      for (let c = startCol; c <= endCol; c++) {
+        if (r < zoneInset || r >= gameMap.rows - zoneInset ||
+            c < zoneInset || c >= gameMap.cols - zoneInset) {
+          if (r >= 0 && r < gameMap.rows && c >= 0 && c < gameMap.cols) {
+            const ox = c * GAME_TILE - camX;
+            const oy = r * GAME_TILE - camY;
+            gameCtx.fillRect(ox, oy, GAME_TILE, GAME_TILE);
+          }
+        }
+      }
+    }
+    // Zone border line
+    const zx = zoneInset * GAME_TILE - camX;
+    const zy = zoneInset * GAME_TILE - camY;
+    const zw = (gameMap.cols - zoneInset * 2) * GAME_TILE;
+    const zh = (gameMap.rows - zoneInset * 2) * GAME_TILE;
+    gameCtx.strokeStyle = 'rgba(255, 60, 60, 0.7)';
+    gameCtx.lineWidth = 3;
+    gameCtx.strokeRect(zx, zy, zw, zh);
+  }
+
+  // Zone timer countdown
+  gameCtx.save();
+  gameCtx.font = 'bold 16px "Press Start 2P", monospace';
+  gameCtx.textAlign = 'center';
+  gameCtx.fillStyle = '#000';
+  gameCtx.fillText('Zone: ' + Math.ceil(zoneTimer) + 's', cw / 2 + 1, 33);
+  gameCtx.fillStyle = zoneTimer <= 10 ? '#e94560' : '#fff';
+  gameCtx.fillText('Zone: ' + Math.ceil(zoneTimer) + 's', cw / 2, 32);
+  gameCtx.restore();
+
+  // Spectator overlay when dead
+  if (localPlayer && !localPlayer.alive) {
+    gameCtx.save();
+    // "YOU DIED" fades out after 5 seconds
+    if (deathOverlayTimer < 5) {
+      const fadeAlpha = deathOverlayTimer < 4 ? 1.0 : 1.0 - (deathOverlayTimer - 4);
+      // Slight dark overlay
+      gameCtx.fillStyle = 'rgba(0,0,0,' + (0.15 * fadeAlpha) + ')';
+      gameCtx.fillRect(0, 0, cw, ch);
+      // "YOU DIED" text
+      gameCtx.globalAlpha = fadeAlpha;
+      gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+      gameCtx.textAlign = 'center';
+      const deathMsg = diedInOtherWorld ? 'YOU DIED IN ANOTHER WORLD' : 'YOU DIED';
+      gameCtx.fillStyle = '#000';
+      gameCtx.fillText(deathMsg, cw / 2 + 2, ch / 2 - 40 + 2);
+      gameCtx.fillStyle = diedInOtherWorld ? '#4a0080' : '#8b0000';
+      gameCtx.fillText(deathMsg, cw / 2, ch / 2 - 40);
+      gameCtx.globalAlpha = 1.0;
+      // Respawn mode: show countdown
+      if (respawnMode) {
+        const respawnEntry = _respawnQueue.find(r => r.playerId === localPlayerId);
+        if (respawnEntry) {
+          gameCtx.font = 'bold 18px "Press Start 2P", monospace';
+          gameCtx.fillStyle = '#2ecc71';
+          gameCtx.fillText('Respawning in ' + Math.ceil(respawnEntry.timer) + '...', cw / 2, ch / 2 + 10);
+        }
+      }
+    }
+    // Spectator hint (always visible)
+    gameCtx.font = 'bold 12px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillStyle = '#ccc';
+    if (spectateIndex >= 0 && gamePlayers[spectateIndex]) {
+      gameCtx.fillText('Spectating: ' + gamePlayers[spectateIndex].name, cw / 2, ch - 40);
+    }
+    gameCtx.fillText('TAB = cycle players | WASD = free cam | ESC = free cam', cw / 2, ch - 20);
+    gameCtx.restore();
+  }
+
+  // Respawn mode: draw scoreboard and timer at top center
+  if (respawnMode && gameRunning) {
+    gameCtx.save();
+    const cw = gameCanvas.width;
+    const mins = Math.floor(respawnGameTimer / 60);
+    const secs = Math.floor(respawnGameTimer % 60);
+    const timeStr = mins + ':' + (secs < 10 ? '0' : '') + secs;
+    // Timer
+    gameCtx.font = 'bold 20px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillStyle = respawnGameTimer <= 10 ? '#e94560' : '#fff';
+    gameCtx.fillText(timeStr, cw / 2, 30);
+    // Kill scoreboard
+    gameCtx.font = 'bold 14px "Press Start 2P", monospace';
+    const myTeam = localPlayer ? localPlayer.team : 0;
+    const t1Color = myTeam === 1 ? '#2ecc71' : '#e94560';
+    const t2Color = myTeam === 2 ? '#2ecc71' : '#e94560';
+    gameCtx.fillStyle = t1Color;
+    gameCtx.textAlign = 'right';
+    gameCtx.fillText('Team 1: ' + respawnTeam1Kills, cw / 2 - 20, 55);
+    gameCtx.fillStyle = t2Color;
+    gameCtx.textAlign = 'left';
+    gameCtx.fillText('Team 2: ' + respawnTeam2Kills, cw / 2 + 20, 55);
+    gameCtx.restore();
+  }
+
+  // Draw HP in top-left corner
+  drawTopRightHP();
+
+  // Draw active effects log at center top
+  drawEffectLog();
+
+  // Update HUD
+  updateHUD();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HUD
+// ═══════════════════════════════════════════════════════════════
+function drawTopRightHP() {
+  if (!localPlayer) return;
+  const lp = localPlayer;
+  const hpFrac = Math.max(0, lp.hp / lp.maxHp);
+  const hpColor = hpFrac >= 0.7 ? '#2ecc71' : hpFrac >= 0.4 ? '#f5a623' : '#e94560';
+  const text = Math.ceil(lp.hp) + '/' + lp.maxHp;
+
+  gameCtx.save();
+  gameCtx.font = 'bold 22px "Press Start 2P", monospace';
+  gameCtx.textAlign = 'left';
+  gameCtx.fillStyle = '#000';
+  gameCtx.fillText(text, 22, 38);
+  gameCtx.fillStyle = hpColor;
+  gameCtx.fillText(text, 20, 36);
+  gameCtx.restore();
+}
+
+function drawEffectLog() {
+  if (!localPlayer) return;
+  const lp = localPlayer;
+  const cw = gameCanvas.width;
+
+  // Draw centered at top, below zone timer
+  gameCtx.save();
+  gameCtx.font = 'bold 13px "Press Start 2P", monospace';
+  gameCtx.textAlign = 'center';
+  let logY = 56;
+  if (lp.blindBuff === 'small') {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🛡 Small Blind (½ dmg taken)', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#64c8ff';
+    gameCtx.fillText('🛡 Small Blind (½ dmg taken)', cw / 2, logY);
+    logY += 20;
+  } else if (lp.blindBuff === 'big' && lp.blindTimer > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('⚠ Big Blind: take 1.5× dmg ' + Math.ceil(lp.blindTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#ff5050';
+    gameCtx.fillText('⚠ Big Blind: take 1.5× dmg ' + Math.ceil(lp.blindTimer) + 's', cw / 2, logY);
+    logY += 20;
+  } else if (lp.blindBuff === 'dealer') {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🎰 Dealer — Gamble reset!', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#f5a623';
+    gameCtx.fillText('🎰 Dealer — Gamble reset!', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.chipChangeDmg >= 0 && lp.chipChangeTimer > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('♠ Chips→' + lp.chipChangeDmg + ' ' + Math.ceil(lp.chipChangeTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#f5a623';
+    gameCtx.fillText('♠ Chips→' + lp.chipChangeDmg + ' ' + Math.ceil(lp.chipChangeTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.supportBuff > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('💪 Buff ' + Math.ceil(lp.supportBuff) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#2ecc71';
+    gameCtx.fillText('💪 Buff ' + Math.ceil(lp.supportBuff) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.intimidated > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#9b59b6';
+    gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.buffSlowed > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🐌 Slowed ' + Math.ceil(lp.buffSlowed) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#e67e22';
+    gameCtx.fillText('🐌 Slowed ' + Math.ceil(lp.buffSlowed) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  // Filbus status
+  if (lp.isCraftingChair) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🪑 Crafting... ' + Math.ceil(lp.craftTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#c8a96e';
+    gameCtx.fillText('🪑 Crafting... ' + Math.ceil(lp.craftTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.isEatingChair) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🍽 Eating chair... ' + Math.ceil(lp.eatTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#2ecc71';
+    gameCtx.fillText('🍽 Eating chair... ' + Math.ceil(lp.eatTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.chairCharges > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🪑 Chairs: ' + lp.chairCharges, cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#c8a96e';
+    gameCtx.fillText('🪑 Chairs: ' + lp.chairCharges, cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.boiledOneActive) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🩸 BOILED ONE ' + Math.ceil(lp.boiledOneTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#8b0000';
+    gameCtx.fillText('🩸 BOILED ONE ' + Math.ceil(lp.boiledOneTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.illusionInvisTimer > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('👻 INVISIBLE ' + Math.ceil(lp.illusionInvisTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#c8dcff';
+    gameCtx.fillText('👻 INVISIBLE ' + Math.ceil(lp.illusionInvisTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.illusionSpecialInvis) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('👻 INVISIBLE (kill all copies)', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#c8dcff';
+    gameCtx.fillText('👻 INVISIBLE (kill all copies)', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.illusionTimeFreezeTimer > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('⏱ TIME FROZEN ' + Math.ceil(lp.illusionTimeFreezeTimer * 10) / 10 + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#c8dcff';
+    gameCtx.fillText('⏱ TIME FROZEN ' + Math.ceil(lp.illusionTimeFreezeTimer * 10) / 10 + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.illusionSeeGrassTimer > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('👁 SEE THROUGH GRASS ' + Math.ceil(lp.illusionSeeGrassTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#7fff7f';
+    gameCtx.fillText('👁 SEE THROUGH GRASS ' + Math.ceil(lp.illusionSeeGrassTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  for (let i = 0; i < combatLog.length; i++) {
+    const entry = combatLog[i];
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText(entry.text, cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = entry.color;
+    gameCtx.fillText(entry.text, cw / 2, logY);
+    logY += 20;
+  }
+  gameCtx.restore();
+}
+
+function buildHUD() {
+  const abils = document.querySelector('#hud-abilities');
+  abils.innerHTML = '';
+  const fighter = localPlayer.fighter;
+  const hasF = fighter.abilities.length > 5;
+  const keys = hasF ? ['M1', 'E', 'R', 'T', 'F', 'SPC'] : ['M1', 'E', 'R', 'T', 'SPC'];
+  const nameMap = {};
+  fighter.abilities.forEach(a => { nameMap[a.key === 'SPACE' ? 'SPC' : a.key] = a.name; });
+  keys.forEach((k) => {
+    let n = nameMap[k] || k;
+    // Power Special names when achievement is unlocked
+    if (k === 'SPC' && typeof isMove4Unlocked === 'function' && isMove4Unlocked(fighter.id)) {
+      const powerNames = {
+        'fighter': 'With Extra Power',
+        'poker': 'The Price Of Gambling',
+        'filbus': 'Prehistoric Emergence',
+        'onexonexonex': '+Slasher',
+        'cricket': 'Winning the Finals',
+        'deer': 'YOU ARE THE IGLOO',
+        'noli': 'Guest666',
+        'explodingcat': 'Imploding Kitten',
+        'napoleon': 'Full Power',
+        'moderator': 'Multi Update',
+        'dragon': 'Double Trouble',
+        'dnd': 'Super Lucky',
+        'illusion': '...and more',
+        'dogtooth': 'Puppet God + Moon',
+      };
+      if (powerNames[fighter.id]) {
+        n = n + ' (+' + powerNames[fighter.id] + ')';
+      }
+    }
+    const shortName = n.length > 7 ? n.substring(0, 6) + '.' : n;
+    const div = document.createElement('div');
+    div.className = 'hud-ability ready';
+    div.id = 'hud-ab-' + k;
+    div.innerHTML = `<span class="key-label">${k}</span>`;
+    div.title = n; // show full name with power special in tooltip
+    abils.appendChild(div);
+  });
+  // Show special bar
+  document.querySelector('#hud-special-bar').classList.remove('hidden');
+}
+
+function updateHUD() {
+  if (!localPlayer) return;
+  const lp = localPlayer;
+
+  // HP bar (bottom HUD)
+  const hpFrac = Math.max(0, lp.hp / lp.maxHp);
+  const hpFill = document.querySelector('#hud-hp-fill');
+  hpFill.style.width = (hpFrac * 100) + '%';
+  // Match HP bar colour to thresholds
+  hpFill.style.background = hpFrac >= 0.7 ? '#2ecc71' : hpFrac >= 0.4 ? '#f5a623' : '#e94560';
+  document.querySelector('#hud-hp-text').textContent = Math.ceil(lp.hp) + '/' + lp.maxHp;
+
+  // Special meter
+  const specThresh = getSpecialThreshold(lp);
+  let specFrac;
+  if (lp.specialUsed) {
+    specFrac = 0; // used — empty
+  } else if (lp.specialUnlocked) {
+    if (lp.specialGraceTimer > 0) {
+      specFrac = 1; // grace period — full
+    } else {
+      specFrac = Math.max(0, 1 - lp.specialDecayTimer / 5); // draining
+    }
+  } else {
+    specFrac = Math.min(1, lp.totalDamageTaken / specThresh); // charging
+  }
+  const specFill = document.querySelector('#hud-special-fill');
+  specFill.style.width = (specFrac * 100) + '%';
+  // Color: gold while charging, green during grace, red during decay
+  if (lp.specialUnlocked && !lp.specialUsed) {
+    if (lp.specialGraceTimer > 0) {
+      specFill.style.background = '#2ecc71'; // green: ready
+    } else {
+      specFill.style.background = '#e94560'; // red: draining
+    }
+  } else {
+    specFill.style.background = ''; // default gold/orange gradient
+  }
+
+  // Ability cooldowns
+  const cds = [
+    { id: 'M1', cd: lp.cdM1, max: lp.fighter.abilities[0].cooldown },
+    { id: 'E', cd: lp.cdE, max: lp.fighter.abilities[1].cooldown },
+    { id: 'R', cd: lp.cdR, max: lp.fighter.abilities[2].cooldown },
+    { id: 'T', cd: lp.cdT, max: lp.fighter.abilities[3].cooldown },
+    { id: 'SPC', cd: lp.specialUsed ? 999 : (lp.specialUnlocked ? 0 : 999), max: 1 },
+  ];
+  // Add F ability cooldown if fighter has it
+  if (lp.fighter.abilities.length > 5) {
+    const fAbil = lp.fighter.abilities[5];
+    const fUnlocked = typeof isMove4Unlocked === 'function' && isMove4Unlocked(lp.fighter.id);
+    const fMaxUsed = lp.move4Uses >= 3;
+    cds.push({ id: 'F', cd: fUnlocked ? (fMaxUsed ? 999 : lp.cdF) : 999, max: fAbil.cooldown || 10 });
+  }
+
+  cds.forEach((c) => {
+    const el = document.querySelector('#hud-ab-' + c.id);
+    if (!el) return;
+    const existing = el.querySelector('.cd-overlay');
+    if (c.cd > 0.05) {
+      el.className = 'hud-ability on-cd';
+      if (!existing) {
+        const ov = document.createElement('div');
+        ov.className = 'cd-overlay';
+        el.appendChild(ov);
+      }
+      const ov = el.querySelector('.cd-overlay');
+      if (c.id === 'SPC') {
+        ov.textContent = lp.specialUsed ? '✓' : '🔒';
+      } else if (c.id === 'F' && c.cd >= 999) {
+        ov.textContent = lp.move4Uses >= 3 ? '✓' : '🔒';
+      } else {
+        ov.textContent = (c.cd < 1 ? c.cd.toFixed(1) : Math.ceil(c.cd)) + 's';
+      }
+    } else {
+      if (c.id === 'SPC' && lp.specialUnlocked && !lp.specialUsed) {
+        el.className = 'hud-ability special-ready';
+      } else {
+        el.className = 'hud-ability ready';
+      }
+      if (existing) existing.remove();
+    }
+  });
+}
+
+function showPopup(text) {
+  const popup = document.querySelector('#hud-popup');
+  popup.textContent = text;
+  popup.classList.remove('hidden');
+  setTimeout(() => popup.classList.add('hidden'), 2500);
+}
+
+function checkWinCondition() {
+  if (!localPlayer) return;
+  if (gameMode === 'fight' || gameMode === 'fight-hard') {
+    const alive = gamePlayers.filter(p => p.alive && !p.isSummon);
+    // When local player dies, show placement immediately
+    if (!localPlayer.alive && gameRunning) {
+      const place = alive.length + 1; // they were eliminated, so their place = alive count + 1
+      gameRunning = false;
+      _gameEnded = true;
+      const cw = gameCanvas.width;
+      const ch = gameCanvas.height;
+      gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      gameCtx.fillRect(0, 0, cw, ch);
+      gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillStyle = '#e94560';
+      const suffix = place === 2 ? 'nd' : place === 3 ? 'rd' : 'th';
+      gameCtx.fillText(place + suffix + ' PLACE', cw / 2, ch / 2 - 60);
+      _showPlayAgainOverlay();
+      return;
+    }
+    // Victory if last alive
+    if (alive.length <= 1) {
+      gameRunning = false;
+      _gameEnded = true;
+      const cw = gameCanvas.width;
+      const ch = gameCanvas.height;
+      gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      gameCtx.fillRect(0, 0, cw, ch);
+      gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+      gameCtx.textAlign = 'center';
+      if (alive.length === 1 && alive[0].id === localPlayerId) {
+        gameCtx.fillStyle = '#2ecc71';
+        gameCtx.fillText('VICTORY!', cw / 2, ch / 2 - 80);
+        gameCtx.font = 'bold 20px "Press Start 2P", monospace';
+        gameCtx.fillStyle = '#fff';
+        gameCtx.fillText('1st PLACE', cw / 2, ch / 2 - 35);
+        // Achievement tracking: singleplayer win
+        if (typeof trackSPWin === 'function') {
+          trackSPWin(localPlayer.fighter.id);
+        }
+        // Check deer restricted win (only M1, T/Spear, SPACE/IGLOO used)
+        if (localPlayer.fighter.id === 'deer' && typeof trackDeerRestrictedWin === 'function') {
+          const forbidden = new Set(['E', 'R']);
+          let usedForbidden = false;
+          for (const k of usedAbilityKeys) {
+            if (forbidden.has(k)) { usedForbidden = true; break; }
+          }
+          if (!usedForbidden) trackDeerRestrictedWin();
+        }
+        // Poker: win without using special
+        if (localPlayer.fighter.id === 'poker' && !localPlayer.specialUsed && typeof trackPokerNoSpecialWin === 'function') {
+          trackPokerNoSpecialWin();
+        }
+        // Flush remaining gear damage absorbed
+        if (_gearDmgAbsorbedRemainder >= 1 && typeof trackGearDmgAbsorbed === 'function') {
+          trackGearDmgAbsorbed(_gearDmgAbsorbedRemainder);
+          _gearDmgAbsorbedRemainder = 0;
+        }
+        // Napoleon unlock: win a battle with a summon
+        if (_hadSummonKillThisGame && typeof trackNapoleonSummonWin === 'function') {
+          trackNapoleonSummonWin();
+        }
+        // Moderator achievement: win one game as moderator
+        if (localPlayer && localPlayer.fighter.id === 'moderator' && typeof trackModWin === 'function') {
+          trackModWin();
+        }
+        // D&D achievement: track race win
+        if (localPlayer && localPlayer.fighter.id === 'dnd' && typeof trackDndRaceWin === 'function') {
+          trackDndRaceWin(localPlayer.dndRace || 'human');
+        }
+        // Dragon achievement: track dragon win
+        if (localPlayer && localPlayer.fighter.id === 'dragon' && typeof trackDragonBeamAch === 'function') {
+          // Beam achievement tracked separately in dealDamage; no per-win tracking needed here
+        }
+      } else {
+        gameCtx.fillStyle = '#e94560';
+        const winnerName = alive.length === 1 ? alive[0].name : 'Nobody';
+        gameCtx.fillText(winnerName + ' WINS', cw / 2, ch / 2 - 60);
+      }
+      _showPlayAgainOverlay();
+    }
+    return;
+  }
+  // Multiplayer: server handles this
+  const realPlayers = gamePlayers.filter((p) => p.id !== 'dummy');
+  if (realPlayers.length > 1) return;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MULTIPLAYER SYNC
+// ═══════════════════════════════════════════════════════════════
+function onRemoteBuff(casterId, type, duration, cx, cy) {
+  // Apply buff to the caster only
+  if (type === 'support') {
+    const caster = gamePlayers.find((p) => p.id === casterId);
+    if (caster && caster.alive) caster.supportBuff = duration;
+  } else if (type === 'blind') {
+    const caster = gamePlayers.find((p) => p.id === casterId);
+    if (caster && caster.alive) {
+      // Visual only — damage modifiers are resolved locally by the attacker
+      caster.blindBuff = duration > 0 ? 'big' : 'small';
+      caster.blindTimer = duration;
+    }
+  } else if (type === 'royal-flush') {
+    // Royal Flush: distance-tiered effects
+    const caster = gamePlayers.find((p) => p.id === casterId);
+    const casterX = cx || (caster ? caster.x : 0);
+    const casterY = cy || (caster ? caster.y : 0);
+    const closeRange = 3 * GAME_TILE;
+    const mediumRange = 10 * GAME_TILE;
+    for (const target of gamePlayers) {
+      if (target.id === casterId || !target.alive) continue;
+      const ddx = target.x - casterX; const ddy = target.y - casterY;
+      const dist = Math.sqrt(ddx * ddx + ddy * ddy);
+      if (dist > mediumRange) continue;
+      if (dist <= closeRange) {
+        target.stunned = duration;
+        target.effects.push({ type: 'stun', timer: duration });
+      }
+      target.cdM1 = target.fighter.abilities[0].cooldown;
+      target.cdE = target.fighter.abilities[1].cooldown;
+      target.cdR = target.fighter.abilities[2].cooldown;
+      target.cdT = target.fighter.abilities[3].cooldown;
+      target.specialUnlocked = false;
+      target.totalDamageTaken = 0;
+    }
+    if (caster) caster.effects.push({ type: 'royal-flush', timer: 2.0 });
+  } else if (type === 'boiled-one') {
+    // Remote Filbus activated The Boiled One Phenomenon
+    const caster = gamePlayers.find((p) => p.id === casterId);
+    if (caster && caster.alive) {
+      caster.boiledOneActive = true;
+      caster.boiledOneTimer = duration;
+      caster.effects.push({ type: 'boiled-one', timer: duration + 1 });
+      // Stun all non-Filbus players
+      for (const target of gamePlayers) {
+        if (!target.alive || target.isSummon) continue;
+        if (target.id === casterId) continue;
+        target.stunned = duration;
+        target.effects.push({ type: 'stun', timer: duration });
+      }
+      showPopup('\ud83e\ude78 THE BOILED ONE PHENOMENON');
+      combatLog.push({ text: '\ud83e\ude78 Phen 228 has entered...', timer: 5, color: '#8b0000' });
+    }
+  }
+}
+
+function onRemoteDebuff(casterId, targetId, type, duration) {
+  if (type === 'intimidation') {
+    const target = gamePlayers.find((p) => p.id === targetId);
+    if (target) {
+      target.intimidated = duration;
+      target.intimidatedBy = casterId;
+    }
+  } else if (type === 'stun') {
+    const target = gamePlayers.find((p) => p.id === targetId);
+    if (target && target.alive) {
+      target.stunned = duration;
+      target.effects.push({ type: 'stun', timer: duration });
+    }
+  } else if (type === 'poison') {
+    const target = gamePlayers.find((p) => p.id === targetId);
+    if (target && target.alive) {
+      if (!target.poisonTimers) target.poisonTimers = [];
+      target.poisonTimers.push({ sourceId: casterId, dps: 50, remaining: duration });
+      target.effects.push({ type: 'poison', timer: duration });
+    }
+  }
+}
+
+function onRemoteProjectiles(ownerId, projs) {
+  // Legacy: Add visual-only projectiles (used as fallback only)
+  for (const p of projs) {
+    projectiles.push({
+      x: p.x, y: p.y, vx: p.vx, vy: p.vy,
+      ownerId: ownerId, damage: 0,
+      timer: p.timer, type: p.type,
+    });
+  }
+}
+
+// ── HOST-AUTHORITATIVE MULTIPLAYER ────────────────────────────
+
+// Build a serialisable snapshot of the full game state for broadcast
+function buildGameStateSnapshot() {
+  const players = gamePlayers.map(p => ({
+    id: p.id,
+    name: p.name, color: p.color,
+    x: p.x, y: p.y,
+    hp: p.hp, maxHp: p.maxHp,
+    alive: p.alive,
+    stunned: p.stunned,
+    // cooldowns
+    cdM1: p.cdM1, cdE: p.cdE, cdR: p.cdR, cdT: p.cdT, cdF: p.cdF || 0,
+    // summon identity
+    isSummon: p.isSummon || false,
+    summonOwner: p.summonOwner || null,
+    summonType: p.summonType || null,
+    // buffs/debuffs
+    supportBuff: p.supportBuff,
+    buffSlowed: p.buffSlowed || 0,
+    intimidated: p.intimidated,
+    intimidatedBy: p.intimidatedBy || null,
+    poisonTimers: p.poisonTimers || [],
+    unstableEyeTimer: p.unstableEyeTimer || 0,
+    zombieIds: p.zombieIds || [],
+    boiledOneActive: p.boiledOneActive || false,
+    boiledOneTimer: p.boiledOneTimer || 0,
+    specialUnlocked: p.specialUnlocked,
+    specialUsed: p.specialUsed,
+    totalDamageTaken: p.totalDamageTaken,
+    specialGraceTimer: p.specialGraceTimer || 0,
+    specialDecayTimer: p.specialDecayTimer || 0,
+    // Auto-heal state
+    noDamageTimer: p.noDamageTimer || 0,
+    healTickTimer: p.healTickTimer || 0,
+    isHealing: p.isHealing || false,
+    // Fighter special aim state
+    specialAiming: p.specialAiming || false,
+    specialAimX: p.specialAimX || 0,
+    specialAimY: p.specialAimY || 0,
+    specialAimTimer: p.specialAimTimer || 0,
+    // Poker state
+    blindBuff: p.blindBuff || null,
+    blindTimer: p.blindTimer || 0,
+    chipChangeDmg: p.chipChangeDmg != null ? p.chipChangeDmg : -1,
+    chipChangeTimer: p.chipChangeTimer || 0,
+    // Team
+    team: p.team || null,
+    // Filbus
+    chairCharges: p.chairCharges || 0,
+    isCraftingChair: p.isCraftingChair || false,
+    isEatingChair: p.isEatingChair || false,
+    craftTimer: p.craftTimer || 0,
+    eatTimer: p.eatTimer || 0,
+    eatHealPool: p.eatHealPool || 0,
+    // Filbus chair linger
+    chairSwingTimer: p.chairSwingTimer || 0,
+    chairSwingAimNx: p.chairSwingAimNx || 0,
+    chairSwingAimNy: p.chairSwingAimNy || 0,
+    chairSwingRange: p.chairSwingRange || 0,
+    chairSwingDmg: p.chairSwingDmg || 0,
+    summonId: p.summonId || null,
+    // Cricket
+    gearUpTimer: p.gearUpTimer || 0,
+    driveReflectTimer: p.driveReflectTimer || 0,
+    wicketIds: p.wicketIds || [],
+    // Deer
+    deerFearTimer: p.deerFearTimer || 0,
+    deerFearTargetX: p.deerFearTargetX || 0,
+    deerFearTargetY: p.deerFearTargetY || 0,
+    deerSeerTimer: p.deerSeerTimer || 0,
+    deerRobotId: p.deerRobotId || null,
+    deerBuildSlowTimer: p.deerBuildSlowTimer || 0,
+    iglooX: p.iglooX || 0,
+    iglooY: p.iglooY || 0,
+    iglooTimer: p.iglooTimer || 0,
+    // Noli
+    noliVoidRushActive: p.noliVoidRushActive || false,
+    noliVoidRushTimer: p.noliVoidRushTimer || 0,
+    noliVoidRushVx: p.noliVoidRushVx || 0,
+    noliVoidRushVy: p.noliVoidRushVy || 0,
+    noliVoidRushChain: p.noliVoidRushChain || 0,
+    noliVoidRushChainTimer: p.noliVoidRushChainTimer || 0,
+    noliVoidRushLastHitId: p.noliVoidRushLastHitId || null,
+    noliVoidStarAiming: p.noliVoidStarAiming || false,
+    noliVoidStarAimX: p.noliVoidStarAimX || 0,
+    noliVoidStarAimY: p.noliVoidStarAimY || 0,
+    noliVoidStarTimer: p.noliVoidStarTimer || 0,
+    noliObservantUses: p.noliObservantUses || 0,
+    noliCloneId: p.noliCloneId || null,
+    // Exploding Cat
+    catCards: p.catCards || 0,
+    catStolenAbil: p.catStolenAbil || null,
+    catStolenReady: p.catStolenReady || false,
+    catAttackBuff: p.catAttackBuff || 0,
+    catSeerTimer: p.catSeerTimer || 0,
+    catNopeTimer: p.catNopeTimer || 0,
+    catNopeAbility: p.catNopeAbility || null,
+    catKittenIds: p.catKittenIds || [],
+    catUnicornId: p.catUnicornId || null,
+    // Move 4 F ability state
+    move4Uses: p.move4Uses || 0,
+    pokerFullHouseActive: p.pokerFullHouseActive || false,
+    potionHealPool: p.potionHealPool || 0,
+    potionHealTimer: p.potionHealTimer || 0,
+    coolkiddId: p.coolkiddId || null,
+    bowlerId: p.bowlerId || null,
+    crabIds: p.crabIds || [],
+    johnDoeId: p.johnDoeId || null,
+    // Filbus Analogus state
+    inBackrooms: p.inBackrooms || false,
+    backroomsDoorX: p.backroomsDoorX || 0,
+    backroomsDoorY: p.backroomsDoorY || 0,
+    backroomsChaserId: p.backroomsChaserId || null,
+    backroomsTimer: p.backroomsTimer || 0,
+    hasAlternate: p.hasAlternate || false,
+    alternateId: p.alternateId || null,
+    // Summon target tracking (for backrooms-chaser, alternate, and room)
+    summonTargetId: p.summonTargetId || null,
+    roomDPS: p.roomDPS || 0,
+    // Moderator state
+    modFirewallTimer: p.modFirewallTimer || 0,
+    modServerUpdateTimer: p.modServerUpdateTimer || 0,
+    modFearTimer: p.modFearTimer || 0,
+    modFearSourceId: p.modFearSourceId || null,
+    modServerResetUses: p.modServerResetUses || 0,
+    modDisabledAbilities: p.modDisabledAbilities || [],
+    // Napoleon state
+    napoleonCavalry: p.napoleonCavalry || false,
+    napoleonCannonId: p.napoleonCannonId || null,
+    napoleonWallId: p.napoleonWallId || null,
+    napoleonInfantryIds: p.napoleonInfantryIds || [],
+    // D&D Campaigner state
+    dndGP: p.dndGP || 0,
+    dndRace: p.dndRace || 'human',
+    dndWeaponBonus: p.dndWeaponBonus || 0,
+    dndCharm: p.dndCharm || false,
+    dndD20Active: p.dndD20Active || false,
+    dndBlurTimer: p.dndBlurTimer || 0,
+    dndHealPool: p.dndHealPool || 0,
+    dndHealTimer: p.dndHealTimer || 0,
+    dndOrcIds: p.dndOrcIds || [],
+    dndSidekickId: p.dndSidekickId || null,
+    // Dragon of Icespire state
+    dragonBreathFuel: p.dragonBreathFuel != null ? p.dragonBreathFuel : 5,
+    dragonBreathActive: p.dragonBreathActive || false,
+    dragonBreathAimNx: p.dragonBreathAimNx || 0,
+    dragonBreathAimNy: p.dragonBreathAimNy || 0,
+    dragonBreathWindup: p.dragonBreathWindup || 0,
+    dragonBreathRegenDelay: p.dragonBreathRegenDelay || 0,
+    dragonFlying: p.dragonFlying || false,
+    dragonFlyTimer: p.dragonFlyTimer || 0,
+    dragonBeamCharging: p.dragonBeamCharging || false,
+    dragonBeamChargeTimer: p.dragonBeamChargeTimer || 0,
+    dragonBeamFiring: p.dragonBeamFiring || false,
+    dragonBeamRecovery: p.dragonBeamRecovery || 0,
+    dragonBeamAimNx: p.dragonBeamAimNx || 0,
+    dragonBeamAimNy: p.dragonBeamAimNy || 0,
+    dragonRoarActive: p.dragonRoarActive || false,
+    dragonSummonId: p.dragonSummonId || null,
+    // Dog Tooth state
+    dogtoothBleedTimers: p.dogtoothBleedTimers || [],
+    dogtoothOurielId: p.dogtoothOurielId || null,
+    dogtoothOurielHp: p.dogtoothOurielHp || null,
+    dogtoothOurielHitsLeft: p.dogtoothOurielHitsLeft || null,
+    dogtoothSmileTimer: p.dogtoothSmileTimer || 0,
+    dogtoothSmileDmg: p.dogtoothSmileDmg || 0,
+    dogtoothPuppetGod: p.dogtoothPuppetGod || false,
+    dogtoothPuppetUsed: p.dogtoothPuppetUsed || false,
+    dogtoothReviveDmgMult: p.dogtoothReviveDmgMult || 1,
+    dogtoothMoonUsed: p.dogtoothMoonUsed || false,
+    dogtoothSpecialChoice: p.dogtoothSpecialChoice || null,
+    dogtoothChoiceTimer: p.dogtoothChoiceTimer || 0,
+    dogtoothMoonX: p.dogtoothMoonX || 0,
+    dogtoothMoonY: p.dogtoothMoonY || 0,
+    dogtoothMoonTimer: p.dogtoothMoonTimer || 0,
+    dogtoothMoonRadius: p.dogtoothMoonRadius || 0,
+    dogtoothMoonDmg: p.dogtoothMoonDmg || 0,
+    dogtoothInComplex: p.dogtoothInComplex || false,
+    dogtoothComplexRoomId: p.dogtoothComplexRoomId || null,
+    dogtoothFUsed: p.dogtoothFUsed || false,
+    dogtoothCPRUsed: p.dogtoothCPRUsed || false,
+    // Omori state
+    omoriPartyIds: p.omoriPartyIds || [],
+    omoriKelBuffTimer: p.omoriKelBuffTimer || 0,
+    omoriAubreyBuffTimer: p.omoriAubreyBuffTimer || 0,
+    omoriHeroHealPool: p.omoriHeroHealPool || 0,
+    omoriHeroHealTimer: p.omoriHeroHealTimer || 0,
+    omoriSadPoemPause: p.omoriSadPoemPause || 0,
+    omoriHeadspaceActive: p.omoriHeadspaceActive || false,
+    omoriPlotArmourAvailable: p.omoriPlotArmourAvailable !== false,
+    omoriPlotArmourCooldown: p.omoriPlotArmourCooldown || 0,
+    omoriPlotArmourImmunity: p.omoriPlotArmourImmunity || 0,
+    omoriSpecialPartyIds: p.omoriSpecialPartyIds || [],
+    omoriSpecialTimer: p.omoriSpecialTimer || 0,
+    omoriSadTimer: p.omoriSadTimer || 0,
+    // Illusion state
+    illusionInvisTimer: p.illusionInvisTimer || 0,
+    illusionCopyId: p.illusionCopyId || null,
+    illusionDodgeTargetId: p.illusionDodgeTargetId || null,
+    illusionDodgeTimer: p.illusionDodgeTimer || 0,
+    illusionTimeFreezeTimer: p.illusionTimeFreezeTimer || 0,
+    illusionSpecialInvis: p.illusionSpecialInvis || false,
+    illusionSpecialCopyIds: p.illusionSpecialCopyIds || [],
+    illusionSeeGrassTimer: p.illusionSeeGrassTimer || 0,
+    illusionBushInvisTimer: p.illusionBushInvisTimer || 0,
+    // Movement state for non-host position correction
+    specialJumping: p.specialJumping || false,
+    // visual effects (include aimNx/aimNy for directional rendering, stolenType for cat-steal-fire)
+    effects: (p.effects || []).map(fx => ({ type: fx.type, timer: fx.timer, aimNx: fx.aimNx, aimNy: fx.aimNy, stolenType: fx.stolenType })),
+    // Imploding kitten / black hole state
+    kittenTimer: p.kittenTimer || 0,
+    blackHoleTimer: p.blackHoleTimer || 0,
+    blackHoleActive: p.blackHoleActive || false,
+    blackHoleRadius: p.blackHoleRadius || 0,
+    blackHoleMidRadius: p.blackHoleMidRadius || 0,
+    blackHoleInnerRadius: p.blackHoleInnerRadius || 0,
+    // Black hole zone effects on players
+    bhTrapped: p.bhTrapped || false,
+    bhZone: p.bhZone || null,
+    bhZoneTimer: p.bhZoneTimer || 0,
+    bhSourceX: p.bhSourceX || 0,
+    bhSourceY: p.bhSourceY || 0,
+    // Traits
+    traitActive: p.traitActive || false,
+    pokerDiceUsed: p.pokerDiceUsed || false,
+    gubyTimer: p.gubyTimer || 0,
+    // Pyromaniac state
+    pyroFlameActive: p.pyroFlameActive || false,
+    pyroFlameFuel: p.pyroFlameFuel != null ? p.pyroFlameFuel : 5,
+    pyroFlameNx: p.pyroFlameNx || 0,
+    pyroFlameNy: p.pyroFlameNy || 0,
+    pyroFlameRange: p.pyroFlameRange || 0,
+    pyroGasolineTimer: p.pyroGasolineTimer || 0,
+    pyroGasolineTrail: p.pyroGasolineTrail || [],
+    pyroFireZones: p.pyroFireZones || [],
+    pyroMolotovShadows: p.pyroMolotovShadows || [],
+    pyroRainTimer: p.pyroRainTimer || 0,
+    pyroRainX: p.pyroRainX || 0,
+    pyroRainY: p.pyroRainY || 0,
+    pyroFireBuffTimer: p.pyroFireBuffTimer || 0,
+    pyroBurnImmuneTimer: p.pyroBurnImmuneTimer || 0,
+    pyroRoarTimer: p.pyroRoarTimer || 0,
+    pyroSpecialRainTimer: p.pyroSpecialRainTimer || 0,
+    pyroSpecialRoarCharging: p.pyroSpecialRoarCharging || false,
+    pyroBurnTimers: p.pyroBurnTimers || [],
+    pyroFlameWindup: p.pyroFlameWindup || 0,
+    pyroFlameRegenDelay: p.pyroFlameRegenDelay || 0,
+    pyroMolotovAiming: p.pyroMolotovAiming || false,
+    pyroMolotovAimX: p.pyroMolotovAimX || 0,
+    pyroMolotovAimY: p.pyroMolotovAimY || 0,
+    pyroMolotovTimer: p.pyroMolotovTimer || 0,
+    // Heavy Rope state
+    ropeSwingActive: p.ropeSwingActive || false,
+    ropeSwingNx: p.ropeSwingNx || 0,
+    ropeSwingNy: p.ropeSwingNy || 0,
+    ropeGripActive: p.ropeGripActive || false,
+    ropeGrabActive: p.ropeGrabActive || false,
+    ropeGrabX: p.ropeGrabX || 0,
+    ropeGrabY: p.ropeGrabY || 0,
+    ropeGrabNx: p.ropeGrabNx || 0,
+    ropeGrabNy: p.ropeGrabNy || 0,
+    ropePowerTimer: p.ropePowerTimer || 0,
+    ropePowerHit: p.ropePowerHit || {},
+    ropeSecondGripTimer: p.ropeSecondGripTimer || 0,
+    ropeTraitTimer: p.ropeTraitTimer != null ? p.ropeTraitTimer : 30,
+    // Hitman state
+    hitmanWeapon: p.hitmanWeapon || 'pistol',
+    hitmanAmmo: p.hitmanAmmo != null ? p.hitmanAmmo : 20,
+    hitmanReloading: p.hitmanReloading || false,
+    hitmanReloadTimer: p.hitmanReloadTimer || 0,
+    hitmanEquipping: p.hitmanEquipping || false,
+    hitmanEquipTimer: p.hitmanEquipTimer || 0,
+    hitmanSenseTimer: p.hitmanSenseTimer || 0,
+    hitmanConcealTimer: p.hitmanConcealTimer || 0,
+    hitmanConcealUses: p.hitmanConcealUses || 0,
+    hitmanBackupIds: p.hitmanBackupIds || [],
+    hitmanLockingIn: p.hitmanLockingIn || false,
+    hitmanLockingInTimer: p.hitmanLockingInTimer || 0,
+    hitmanLockingFireTimer: p.hitmanLockingFireTimer || 0,
+    // fighter id so client knows what it is
+    fighterId: p.fighter ? p.fighter.id : null,
+  }));
+  const projs = projectiles.map(p => ({
+    x: p.x, y: p.y, vx: p.vx, vy: p.vy,
+    type: p.type, timer: p.timer, ownerId: p.ownerId,
+  }));
+  return {
+    players, projectiles: projs, zoneInset, zoneTimer,
+    respawnGameTimer: respawnMode ? respawnGameTimer : undefined,
+    respawnTeam1Kills: respawnMode ? respawnTeam1Kills : undefined,
+    respawnTeam2Kills: respawnMode ? respawnTeam2Kills : undefined,
+    respawnQueue: respawnMode ? _respawnQueue.map(r => ({ playerId: r.playerId, timer: r.timer })) : undefined,
+    appleTree: appleTree ? {
+      col: appleTree.col, row: appleTree.row,
+      hp: appleTree.hp, maxHp: appleTree.maxHp,
+      alive: appleTree.alive,
+      regrowTimer: appleTree.regrowTimer,
+      appleTimer: appleTree.appleTimer,
+      apples: appleTree.apples.slice(),
+    } : null,
+  };
+}
+
+// Non-host client: receive full state snapshot from host and apply it
+function onRemoteGameState(snapshot) {
+  if (isHostAuthority) return; // host doesn't process its own broadcast
+
+  // Sync zone
+  zoneInset = snapshot.zoneInset;
+  zoneTimer = snapshot.zoneTimer;
+
+  // Sync respawn timer and kill counts from host
+  if (snapshot.respawnGameTimer != null) {
+    respawnGameTimer = snapshot.respawnGameTimer;
+  }
+  if (snapshot.respawnTeam1Kills != null) respawnTeam1Kills = snapshot.respawnTeam1Kills;
+  if (snapshot.respawnTeam2Kills != null) respawnTeam2Kills = snapshot.respawnTeam2Kills;
+  if (snapshot.respawnQueue) {
+    _respawnQueue = snapshot.respawnQueue.map(r => ({ playerId: r.playerId, timer: r.timer }));
+  }
+
+  // Sync players (including summons)
+  const incomingIds = new Set(snapshot.players.map(p => p.id));
+  // Remove players/summons that no longer exist on host
+  for (let i = gamePlayers.length - 1; i >= 0; i--) {
+    if (!incomingIds.has(gamePlayers[i].id)) gamePlayers.splice(i, 1);
+  }
+  for (const sp of snapshot.players) {
+    let p = gamePlayers.find(x => x.id === sp.id);
+    if (!p) {
+      // New player or summon — create a minimal state
+      const fighter = getFighter(sp.fighterId || 'fighter');
+      p = createPlayerState(
+        { id: sp.id, name: sp.name || sp.id, color: sp.color || '#fff', fighterId: sp.fighterId || 'fighter' },
+        { r: 1, c: 1 }, fighter
+      );
+      gamePlayers.push(p);
+    }
+    // Update name/color from snapshot
+    if (sp.name) p.name = sp.name;
+    if (sp.color) p.color = sp.color;
+    // For local player: DON'T overwrite position — local prediction handles movement.
+    // Exception: when the host controls movement (stunned, dashing, knocked back, dead)
+    // accept the host's position to prevent desync during non-predicted states.
+    // For remote players: set interpolation target so movement is smooth
+    if (sp.id !== localPlayerId) {
+      p._targetX = sp.x; p._targetY = sp.y;
+      // If first snapshot or teleported far, snap immediately
+      const dx = sp.x - p.x, dy = sp.y - p.y;
+      if (dx * dx + dy * dy > 10000) { p.x = sp.x; p.y = sp.y; }
+    } else {
+      // Local player: accept host position when in non-predicted states
+      if (sp.stunned > 0 || !sp.alive || sp.noliVoidRushActive || sp.specialJumping
+          || sp.dogtoothSmileTimer > 0 || sp.dogtoothInComplex) {
+        p.x = sp.x; p.y = sp.y;
+      } else {
+        // Soft correction: gently pull local prediction toward host position to prevent drift
+        const dx = sp.x - p.x, dy = sp.y - p.y;
+        const distSq = dx * dx + dy * dy;
+        if (distSq > (GAME_TILE * 2) * (GAME_TILE * 2)) {
+          // Teleport snap if far (>2 tiles away from host)
+          p.x = sp.x; p.y = sp.y;
+        } else if (distSq > (GAME_TILE * 0.3) * (GAME_TILE * 0.3)) {
+          // Gentle correction toward host position (prevents slow drift)
+          p.x += dx * 0.15;
+          p.y += dy * 0.15;
+        }
+      }
+    }
+    // Detect death transition for local player (init spectator camera)
+    if (sp.id === localPlayerId && p.alive && !sp.alive) {
+      freeCamX = p.x; freeCamY = p.y;
+      spectateIndex = -1;
+      deathOverlayTimer = 0;
+    }
+    // Detect respawn transition for local player (reset death overlay)
+    if (sp.id === localPlayerId && !p.alive && sp.alive) {
+      deathOverlayTimer = 0;
+      spectateIndex = -1;
+    }
+    p.hp = sp.hp; p.maxHp = sp.maxHp;
+    p.alive = sp.alive;
+    p.stunned = sp.stunned;
+    p.cdM1 = sp.cdM1; p.cdE = sp.cdE; p.cdR = sp.cdR; p.cdT = sp.cdT; p.cdF = sp.cdF || 0;
+    p.isSummon = sp.isSummon; p.summonOwner = sp.summonOwner; p.summonType = sp.summonType;
+    p.supportBuff = sp.supportBuff;
+    p.buffSlowed = sp.buffSlowed || 0;
+    p.intimidated = sp.intimidated;
+    p.intimidatedBy = sp.intimidatedBy || null;
+    p.poisonTimers = sp.poisonTimers || [];
+    p.unstableEyeTimer = sp.unstableEyeTimer || 0;
+    p.zombieIds = sp.zombieIds || [];
+    p.boiledOneActive = sp.boiledOneActive || false;
+    p.boiledOneTimer = sp.boiledOneTimer || 0;
+    p.specialUnlocked = sp.specialUnlocked;
+    p.specialUsed = sp.specialUsed;
+    p.totalDamageTaken = sp.totalDamageTaken;
+    p.specialGraceTimer = sp.specialGraceTimer || 0;
+    p.specialDecayTimer = sp.specialDecayTimer || 0;
+    // Auto-heal state
+    p.noDamageTimer = sp.noDamageTimer || 0;
+    p.healTickTimer = sp.healTickTimer || 0;
+    p.isHealing = sp.isHealing || false;
+    // Fighter special aim state
+    p.specialAiming = sp.specialAiming || false;
+    p.specialAimX = sp.specialAimX || 0;
+    p.specialAimY = sp.specialAimY || 0;
+    p.specialAimTimer = sp.specialAimTimer || 0;
+    // Poker state
+    p.blindBuff = sp.blindBuff || null;
+    p.blindTimer = sp.blindTimer || 0;
+    p.chipChangeDmg = sp.chipChangeDmg != null ? sp.chipChangeDmg : -1;
+    p.chipChangeTimer = sp.chipChangeTimer || 0;
+    // Team
+    p.team = sp.team || null;
+    p.chairCharges = sp.chairCharges || 0;
+    p.isCraftingChair = sp.isCraftingChair || false;
+    p.isEatingChair = sp.isEatingChair || false;
+    p.craftTimer = sp.craftTimer || 0;
+    p.eatTimer = sp.eatTimer || 0;
+    p.eatHealPool = sp.eatHealPool || 0;
+    p.chairSwingTimer = sp.chairSwingTimer || 0;
+    p.chairSwingAimNx = sp.chairSwingAimNx || 0;
+    p.chairSwingAimNy = sp.chairSwingAimNy || 0;
+    p.chairSwingRange = sp.chairSwingRange || 0;
+    p.chairSwingDmg = sp.chairSwingDmg || 0;
+    p.summonId = sp.summonId || null;
+    p.gearUpTimer = sp.gearUpTimer || 0;
+    p.driveReflectTimer = sp.driveReflectTimer || 0;
+    p.wicketIds = sp.wicketIds || [];
+    // Deer
+    p.deerFearTimer = sp.deerFearTimer || 0;
+    p.deerFearTargetX = sp.deerFearTargetX || 0;
+    p.deerFearTargetY = sp.deerFearTargetY || 0;
+    p.deerSeerTimer = sp.deerSeerTimer || 0;
+    p.deerRobotId = sp.deerRobotId || null;
+    p.deerBuildSlowTimer = sp.deerBuildSlowTimer || 0;
+    p.iglooX = sp.iglooX || 0;
+    p.iglooY = sp.iglooY || 0;
+    p.iglooTimer = sp.iglooTimer || 0;
+    // Noli
+    p.noliVoidRushActive = sp.noliVoidRushActive || false;
+    p.noliVoidRushTimer = sp.noliVoidRushTimer || 0;
+    p.noliVoidRushVx = sp.noliVoidRushVx || 0;
+    p.noliVoidRushVy = sp.noliVoidRushVy || 0;
+    p.noliVoidRushChain = sp.noliVoidRushChain || 0;
+    p.noliVoidRushChainTimer = sp.noliVoidRushChainTimer || 0;
+    p.noliVoidRushLastHitId = sp.noliVoidRushLastHitId || null;
+    p.noliVoidStarAiming = sp.noliVoidStarAiming || false;
+    p.noliVoidStarAimX = sp.noliVoidStarAimX || 0;
+    p.noliVoidStarAimY = sp.noliVoidStarAimY || 0;
+    p.noliVoidStarTimer = sp.noliVoidStarTimer || 0;
+    p.noliObservantUses = sp.noliObservantUses || 0;
+    p.noliCloneId = sp.noliCloneId || null;
+    // Exploding Cat
+    p.catCards = sp.catCards || 0;
+    p.catStolenAbil = sp.catStolenAbil || null;
+    p.catStolenReady = sp.catStolenReady || false;
+    p.catAttackBuff = sp.catAttackBuff || 0;
+    p.catSeerTimer = sp.catSeerTimer || 0;
+    p.catNopeTimer = sp.catNopeTimer || 0;
+    p.catNopeAbility = sp.catNopeAbility || null;
+    p.catKittenIds = sp.catKittenIds || [];
+    p.catUnicornId = sp.catUnicornId || null;
+    // Move 4 F ability state
+    p.move4Uses = sp.move4Uses || 0;
+    p.pokerFullHouseActive = sp.pokerFullHouseActive || false;
+    p.potionHealPool = sp.potionHealPool || 0;
+    p.potionHealTimer = sp.potionHealTimer || 0;
+    p.coolkiddId = sp.coolkiddId || null;
+    p.bowlerId = sp.bowlerId || null;
+    p.crabIds = sp.crabIds || [];
+    p.johnDoeId = sp.johnDoeId || null;
+    // Filbus Analogus state — detect transitions for combat log on non-host target
+    const wasInBackrooms = p.inBackrooms;
+    const hadAlternate = p.hasAlternate;
+    p.inBackrooms = sp.inBackrooms || false;
+    p.backroomsDoorX = sp.backroomsDoorX || 0;
+    p.backroomsDoorY = sp.backroomsDoorY || 0;
+    p.backroomsChaserId = sp.backroomsChaserId || null;
+    p.backroomsTimer = sp.backroomsTimer || 0;
+    p.hasAlternate = sp.hasAlternate || false;
+    p.alternateId = sp.alternateId || null;
+    // Show combat log warnings for the local player entering backrooms/alternate
+    if (p.id === localPlayerId && !isHostAuthority) {
+      if (!wasInBackrooms && p.inBackrooms) {
+        combatLog.push({ text: '⚠️ You are in the Backrooms! Find the door to escape! (10 DPS, no healing)', timer: 5, color: '#ff4444' });
+      }
+      if (!hadAlternate && p.hasAlternate) {
+        combatLog.push({ text: "⚠️ Your Alternate is hunting you! You can't see others or heal! (10 DPS)", timer: 5, color: '#ff4444' });
+      }
+    }
+    p.summonTargetId = sp.summonTargetId || null;
+    p.roomDPS = sp.roomDPS || 0;
+    // Moderator
+    p.modFirewallTimer = sp.modFirewallTimer || 0;
+    p.modServerUpdateTimer = sp.modServerUpdateTimer || 0;
+    p.modFearTimer = sp.modFearTimer || 0;
+    p.modFearSourceId = sp.modFearSourceId || null;
+    p.modServerResetUses = sp.modServerResetUses || 0;
+    p.modDisabledAbilities = sp.modDisabledAbilities || [];
+    // Napoleon
+    p.napoleonCavalry = sp.napoleonCavalry || false;
+    p.napoleonCannonId = sp.napoleonCannonId || null;
+    p.napoleonWallId = sp.napoleonWallId || null;
+    p.napoleonInfantryIds = sp.napoleonInfantryIds || [];
+    // D&D Campaigner
+    p.dndGP = sp.dndGP || 0;
+    p.dndRace = sp.dndRace || 'human';
+    p.dndWeaponBonus = sp.dndWeaponBonus || 0;
+    p.dndCharm = sp.dndCharm || false;
+    p.dndD20Active = sp.dndD20Active || false;
+    p.dndBlurTimer = sp.dndBlurTimer || 0;
+    p.dndHealPool = sp.dndHealPool || 0;
+    p.dndHealTimer = sp.dndHealTimer || 0;
+    p.dndOrcIds = sp.dndOrcIds || [];
+    p.dndSidekickId = sp.dndSidekickId || null;
+    // Dragon of Icespire
+    p.dragonBreathFuel = sp.dragonBreathFuel != null ? sp.dragonBreathFuel : 5;
+    p.dragonBreathActive = sp.dragonBreathActive || false;
+    p.dragonBreathAimNx = sp.dragonBreathAimNx || 0;
+    p.dragonBreathAimNy = sp.dragonBreathAimNy || 0;
+    p.dragonBreathWindup = sp.dragonBreathWindup || 0;
+    p.dragonBreathRegenDelay = sp.dragonBreathRegenDelay || 0;
+    p.dragonFlying = sp.dragonFlying || false;
+    p.dragonFlyTimer = sp.dragonFlyTimer || 0;
+    p.dragonBeamCharging = sp.dragonBeamCharging || false;
+    p.dragonBeamChargeTimer = sp.dragonBeamChargeTimer || 0;
+    p.dragonBeamFiring = sp.dragonBeamFiring || false;
+    p.dragonBeamRecovery = sp.dragonBeamRecovery || 0;
+    p.dragonBeamAimNx = sp.dragonBeamAimNx || 0;
+    p.dragonBeamAimNy = sp.dragonBeamAimNy || 0;
+    p.dragonRoarActive = sp.dragonRoarActive || false;
+    p.dragonSummonId = sp.dragonSummonId || null;
+    // Dog Tooth
+    p.dogtoothBleedTimers = sp.dogtoothBleedTimers || [];
+    p.dogtoothOurielId = sp.dogtoothOurielId || null;
+    p.dogtoothOurielHp = sp.dogtoothOurielHp || null;
+    p.dogtoothOurielHitsLeft = sp.dogtoothOurielHitsLeft || null;
+    p.dogtoothSmileTimer = sp.dogtoothSmileTimer || 0;
+    p.dogtoothSmileDmg = sp.dogtoothSmileDmg || 0;
+    p.dogtoothPuppetGod = sp.dogtoothPuppetGod || false;
+    p.dogtoothPuppetUsed = sp.dogtoothPuppetUsed || false;
+    p.dogtoothReviveDmgMult = sp.dogtoothReviveDmgMult || 1;
+    p.dogtoothMoonUsed = sp.dogtoothMoonUsed || false;
+    p.dogtoothSpecialChoice = sp.dogtoothSpecialChoice || null;
+    p.dogtoothChoiceTimer = sp.dogtoothChoiceTimer || 0;
+    p.dogtoothMoonX = sp.dogtoothMoonX || 0;
+    p.dogtoothMoonY = sp.dogtoothMoonY || 0;
+    p.dogtoothMoonTimer = sp.dogtoothMoonTimer || 0;
+    p.dogtoothMoonRadius = sp.dogtoothMoonRadius || 0;
+    p.dogtoothMoonDmg = sp.dogtoothMoonDmg || 0;
+    p.dogtoothInComplex = sp.dogtoothInComplex || false;
+    p.dogtoothComplexRoomId = sp.dogtoothComplexRoomId || null;
+    p.dogtoothFUsed = sp.dogtoothFUsed || false;
+    p.dogtoothCPRUsed = sp.dogtoothCPRUsed || false;
+    // Omori
+    p.omoriPartyIds = sp.omoriPartyIds || [];
+    p.omoriKelBuffTimer = sp.omoriKelBuffTimer || 0;
+    p.omoriAubreyBuffTimer = sp.omoriAubreyBuffTimer || 0;
+    p.omoriHeroHealPool = sp.omoriHeroHealPool || 0;
+    p.omoriHeroHealTimer = sp.omoriHeroHealTimer || 0;
+    p.omoriSadPoemPause = sp.omoriSadPoemPause || 0;
+    p.omoriHeadspaceActive = sp.omoriHeadspaceActive || false;
+    p.omoriPlotArmourAvailable = sp.omoriPlotArmourAvailable !== false;
+    p.omoriPlotArmourCooldown = sp.omoriPlotArmourCooldown || 0;
+    p.omoriPlotArmourImmunity = sp.omoriPlotArmourImmunity || 0;
+    p.omoriSpecialPartyIds = sp.omoriSpecialPartyIds || [];
+    p.omoriSpecialTimer = sp.omoriSpecialTimer || 0;
+    p.omoriSadTimer = sp.omoriSadTimer || 0;
+    // Illusion
+    p.illusionInvisTimer = sp.illusionInvisTimer || 0;
+    p.illusionCopyId = sp.illusionCopyId || null;
+    p.illusionDodgeTargetId = sp.illusionDodgeTargetId || null;
+    p.illusionDodgeTimer = sp.illusionDodgeTimer || 0;
+    p.illusionTimeFreezeTimer = sp.illusionTimeFreezeTimer || 0;
+    p.illusionSpecialInvis = sp.illusionSpecialInvis || false;
+    p.illusionSpecialCopyIds = sp.illusionSpecialCopyIds || [];
+    p.illusionSeeGrassTimer = sp.illusionSeeGrassTimer || 0;
+    p.illusionBushInvisTimer = sp.illusionBushInvisTimer || 0;
+    p.specialJumping = sp.specialJumping || false;
+    // Imploding kitten / black hole state
+    p.kittenTimer = sp.kittenTimer || 0;
+    p.blackHoleTimer = sp.blackHoleTimer || 0;
+    p.blackHoleActive = sp.blackHoleActive || false;
+    p.blackHoleRadius = sp.blackHoleRadius || 0;
+    p.blackHoleMidRadius = sp.blackHoleMidRadius || 0;
+    p.blackHoleInnerRadius = sp.blackHoleInnerRadius || 0;
+    // Black hole zone effects
+    p.bhTrapped = sp.bhTrapped || false;
+    p.bhZone = sp.bhZone || null;
+    p.bhZoneTimer = sp.bhZoneTimer || 0;
+    p.bhSourceX = sp.bhSourceX || 0;
+    p.bhSourceY = sp.bhSourceY || 0;
+    // Traits
+    p.traitActive = sp.traitActive || false;
+    p.pokerDiceUsed = sp.pokerDiceUsed || false;
+    p.gubyTimer = sp.gubyTimer || 0;
+    // Pyromaniac state
+    p.pyroFlameActive = sp.pyroFlameActive || false;
+    p.pyroFlameFuel = sp.pyroFlameFuel != null ? sp.pyroFlameFuel : 5;
+    p.pyroFlameNx = sp.pyroFlameNx || 0;
+    p.pyroFlameNy = sp.pyroFlameNy || 0;
+    p.pyroFlameRange = sp.pyroFlameRange || 0;
+    p.pyroGasolineTimer = sp.pyroGasolineTimer || 0;
+    p.pyroGasolineTrail = sp.pyroGasolineTrail || [];
+    p.pyroFireZones = sp.pyroFireZones || [];
+    p.pyroMolotovShadows = sp.pyroMolotovShadows || [];
+    p.pyroRainTimer = sp.pyroRainTimer || 0;
+    p.pyroRainX = sp.pyroRainX || 0;
+    p.pyroRainY = sp.pyroRainY || 0;
+    p.pyroFireBuffTimer = sp.pyroFireBuffTimer || 0;
+    p.pyroBurnImmuneTimer = sp.pyroBurnImmuneTimer || 0;
+    p.pyroRoarTimer = sp.pyroRoarTimer || 0;
+    p.pyroSpecialRainTimer = sp.pyroSpecialRainTimer || 0;
+    p.pyroSpecialRoarCharging = sp.pyroSpecialRoarCharging || false;
+    p.pyroBurnTimers = sp.pyroBurnTimers || [];
+    p.pyroFlameWindup = sp.pyroFlameWindup || 0;
+    p.pyroFlameRegenDelay = sp.pyroFlameRegenDelay || 0;
+    p.pyroMolotovAiming = sp.pyroMolotovAiming || false;
+    p.pyroMolotovAimX = sp.pyroMolotovAimX || 0;
+    p.pyroMolotovAimY = sp.pyroMolotovAimY || 0;
+    p.pyroMolotovTimer = sp.pyroMolotovTimer || 0;
+    // Heavy Rope state
+    p.ropeSwingActive = sp.ropeSwingActive || false;
+    p.ropeSwingNx = sp.ropeSwingNx || 0;
+    p.ropeSwingNy = sp.ropeSwingNy || 0;
+    p.ropeGripActive = sp.ropeGripActive || false;
+    p.ropeGrabActive = sp.ropeGrabActive || false;
+    p.ropeGrabX = sp.ropeGrabX || 0;
+    p.ropeGrabY = sp.ropeGrabY || 0;
+    p.ropeGrabNx = sp.ropeGrabNx || 0;
+    p.ropeGrabNy = sp.ropeGrabNy || 0;
+    p.ropePowerTimer = sp.ropePowerTimer || 0;
+    p.ropePowerHit = sp.ropePowerHit || {};
+    p.ropeSecondGripTimer = sp.ropeSecondGripTimer || 0;
+    p.ropeTraitTimer = sp.ropeTraitTimer != null ? sp.ropeTraitTimer : 30;
+    // Hitman state
+    if (sp.hitmanWeapon != null) p.hitmanWeapon = sp.hitmanWeapon;
+    if (sp.hitmanAmmo != null) p.hitmanAmmo = sp.hitmanAmmo;
+    if (sp.hitmanReloading != null) p.hitmanReloading = sp.hitmanReloading;
+    if (sp.hitmanReloadTimer != null) p.hitmanReloadTimer = sp.hitmanReloadTimer;
+    if (sp.hitmanEquipping != null) p.hitmanEquipping = sp.hitmanEquipping;
+    if (sp.hitmanEquipTimer != null) p.hitmanEquipTimer = sp.hitmanEquipTimer;
+    if (sp.hitmanSenseTimer != null) p.hitmanSenseTimer = sp.hitmanSenseTimer;
+    if (sp.hitmanConcealTimer != null) p.hitmanConcealTimer = sp.hitmanConcealTimer;
+    if (sp.hitmanConcealUses != null) p.hitmanConcealUses = sp.hitmanConcealUses;
+    if (sp.hitmanBackupIds != null) p.hitmanBackupIds = sp.hitmanBackupIds;
+    if (sp.hitmanLockingIn != null) p.hitmanLockingIn = sp.hitmanLockingIn;
+    if (sp.hitmanLockingInTimer != null) p.hitmanLockingInTimer = sp.hitmanLockingInTimer;
+    if (sp.hitmanLockingFireTimer != null) p.hitmanLockingFireTimer = sp.hitmanLockingFireTimer;
+    if (sp.effects) p.effects = sp.effects;
+  }
+
+  // Sync projectiles (replace entirely with host's list)
+  projectiles = snapshot.projectiles.map(sp => ({
+    x: sp.x, y: sp.y, vx: sp.vx, vy: sp.vy,
+    type: sp.type, timer: sp.timer, ownerId: sp.ownerId,
+    damage: 0, // client doesn't resolve damage — host does
+  }));
+
+  // Sync apple tree state
+  if (snapshot.appleTree) {
+    if (!appleTree) appleTree = {};
+    appleTree.col = snapshot.appleTree.col;
+    appleTree.row = snapshot.appleTree.row;
+    appleTree.hp = snapshot.appleTree.hp;
+    appleTree.maxHp = snapshot.appleTree.maxHp;
+    appleTree.alive = snapshot.appleTree.alive;
+    appleTree.regrowTimer = snapshot.appleTree.regrowTimer;
+    appleTree.appleTimer = snapshot.appleTree.appleTimer;
+    appleTree.apples = snapshot.appleTree.apples || [];
+    // Sync map tiles for dead tree (stump = ROCK)
+    if (!appleTree.alive) {
+      for (let dr = 0; dr < 2; dr++) {
+        for (let dc = 0; dc < 2; dc++) {
+          gameMap.tiles[appleTree.row + dr][appleTree.col + dc] = TILE.ROCK;
+        }
+      }
+    } else {
+      for (let dr = 0; dr < 2; dr++) {
+        for (let dc = 0; dc < 2; dc++) {
+          if (gameMap.tiles[appleTree.row + dr][appleTree.col + dc] === TILE.ROCK) {
+            gameMap.tiles[appleTree.row + dr][appleTree.col + dc] = TILE.GROUND;
+          }
+        }
+      }
+    }
+  }
+
+  // Re-bind localPlayer reference (could have been replaced above)
+  localPlayer = gamePlayers.find(p => p.id === localPlayerId);
+}
+
+// Host: receive input from a non-host client and store it
+function onRemoteInput(input) {
+  if (!isHostAuthority) return;
+  const { playerId, aimWorldX: awx, aimWorldY: awy, mouseDown: md, pendingAbilities: pa, keys: k } = input;
+  if (!remoteInputs[playerId]) remoteInputs[playerId] = { aimWorldX: 0, aimWorldY: 0, mouseDown: false, pendingAbilities: [], keys: {} };
+  const ri = remoteInputs[playerId];
+  ri.aimWorldX = awx || 0;
+  ri.aimWorldY = awy || 0;
+  ri.mouseDown = md || false;
+  if (k) ri.keys = k;
+  // Append pending abilities (don't overwrite, accumulate between frames)
+  if (pa && pa.length) ri.pendingAbilities.push(...pa);
+}
+
+// Receive a player's world position (relay from server — all clients send their own position)
+function onRemotePosition(data) {
+  const { id, x, y } = data;
+  if (id === localPlayerId) return; // never rewrite own position
+  const p = gamePlayers.find(pl => pl.id === id);
+  if (!p) return;
+  if (isHostAuthority) {
+    // Host: skip position updates when host controls movement (Smile auto-chase, Complex)
+    if (p.dogtoothSmileTimer > 0 || p.dogtoothInComplex) return;
+    // Host: directly update remote player's position for authoritative combat resolution
+    p.x = x; p.y = y;
+  }
+  // Non-host: ignore position relay — remote positions come from host snapshot only
+  // This prevents two conflicting position sources from causing jitter
+}
+
+// Apply movement from a remote input object to a player (host-side)
+function applyRemoteMovement(p, inp, dt) {
+  if (!p.alive || p.stunned > 0 || p.isCraftingChair || p.isEatingChair || p.specialAiming
+      || p.dogtoothSmileTimer > 0 || p.dogtoothInComplex) return;
+  let dx = 0, dy = 0;
+  const k = inp.keys || {};
+  if (k['ArrowUp']   || k['w'] || k['W']) dy -= 1;
+  if (k['ArrowDown'] || k['s'] || k['S']) dy += 1;
+  if (k['ArrowLeft'] || k['a'] || k['A']) dx -= 1;
+  if (k['ArrowRight']|| k['d'] || k['D']) dx += 1;
+  if (dx === 0 && dy === 0) return;
+  if (dx !== 0 && dy !== 0) { const len = Math.sqrt(2); dx /= len; dy /= len; }
+  let speed = p.fighter.speed;
+  if (p.unstableEyeTimer > 0) speed *= 1.3;
+  // Napoleon Charisma trait: allies near Napoleon get 50% speed buff
+  if (gameMode === 'teams' && p.fighter && p.fighter.id !== 'napoleon') {
+    for (const f of gamePlayers) {
+      if (!f.alive || f.isSummon || f.id === p.id) continue;
+      if (f.fighter && f.fighter.id === 'napoleon' && f.traitActive && f.team === p.team) {
+        const ndx = f.x - p.x, ndy = f.y - p.y;
+        if (ndx * ndx + ndy * ndy < (GAME_TILE * 6) * (GAME_TILE * 6)) { speed *= 1.5; break; }
+      }
+    }
+  }
+  // Cricket: Gear Up speed penalty
+  if (p.gearUpTimer > 0) speed *= (p.fighter.abilities[2].speedPenalty || 0.6);
+  // Deer: Fear speed boost (when moving away from feared enemy)
+  if (p.deerFearTimer > 0 && p.fighter.id === 'deer') {
+    const awayX = p.x - p.deerFearTargetX, awayY = p.y - p.deerFearTargetY;
+    const dot = dx * awayX + dy * awayY;
+    if (dot > 0) speed *= (p.fighter.abilities[1].speedBoost || 1.5);
+  }
+  // Deer: slower while building robot
+  if (p.deerBuildSlowTimer > 0 && p.fighter && p.fighter.id === 'deer') {
+    speed *= 0.6;
+  }
+  // Moderator Fear: 2x speed when running away from fear source
+  if (p.modFearTimer > 0 && p.modFearSourceId) {
+    const src = gamePlayers.find(pl => pl.id === p.modFearSourceId);
+    if (src && src.alive) {
+      const fdx = p.x - src.x, fdy = p.y - src.y;
+      if (fdx * dx + fdy * dy > 0) speed *= 2.0;
+    }
+  }
+  // Igloo slow: severely slow anyone inside an enemy igloo
+  for (const owner of gamePlayers) {
+    if (owner.iglooTimer > 0 && owner.id !== p.id) {
+      const iglooAbil = owner.fighter && owner.fighter.abilities[4];
+      const ir = ((iglooAbil ? iglooAbil.radius : 4.5) || 4.5) * GAME_TILE;
+      const dxI = p.x - owner.iglooX, dyI = p.y - owner.iglooY;
+      if (Math.sqrt(dxI * dxI + dyI * dyI) < ir) { speed *= 0.35; break; }
+    }
+  }
+  // Cricket: wicket line speed boost
+  if (p.wicketIds && p.wicketIds.length === 2) {
+    const w0 = gamePlayers.find(pl => pl.id === p.wicketIds[0]);
+    const w1 = gamePlayers.find(pl => pl.id === p.wicketIds[1]);
+    if (w0 && w0.alive && w1 && w1.alive) {
+      const lx = w1.x - w0.x, ly = w1.y - w0.y;
+      const ll = lx * lx + ly * ly;
+      if (ll > 0) {
+        const t = Math.max(0, Math.min(1, ((p.x - w0.x) * lx + (p.y - w0.y) * ly) / ll));
+        const cx = w0.x + t * lx, cy = w0.y + t * ly;
+        const dd = Math.sqrt((p.x - cx) ** 2 + (p.y - cy) ** 2);
+        if (dd < 1.5 * GAME_TILE) speed *= (p.fighter.abilities[3].speedBoost || 1.5);
+      }
+    }
+  }
+  // Fighter Aura trait: moving toward a Fighter with trait slows 0.8x
+  for (const f of gamePlayers) {
+    if (!f.alive || f.isSummon || f.id === p.id) continue;
+    if (!f.traitActive || !f.fighter || f.fighter.id !== 'fighter') continue;
+    if (gameMode === 'teams' && p.team && f.team === p.team) continue;
+    const toFx = f.x - p.x; const toFy = f.y - p.y;
+    const toFdist = Math.sqrt(toFx * toFx + toFy * toFy) || 1;
+    if (toFdist > GAME_TILE * 8) continue;
+    const dot = dx * (toFx / toFdist) + dy * (toFy / toFdist);
+    if (dot > 0) { speed *= 0.8; break; }
+  }
+  const move = speed * dt * 60;
+  const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
+  const newX = p.x + dx * move;
+  const newY = p.y + dy * move;
+  const prevX = p.x, prevY = p.y;
+  if (canMoveTo(newX, p.y, radius)) p.x = newX;
+  if (canMoveTo(p.x, newY, radius)) p.y = newY;
+
+  // Igloo containment removed — igloo is now freely walkable (slow applied in speed calc)
+}
+
+// Apply an ability for a remote player (host-side) — swaps localPlayer context temporarily
+function applyRemoteAbility(p, abilKey, inp) {
+  // Temporarily swap localPlayer so useAbility() works for this player
+  const savedLocal = localPlayer;
+  const savedLocalId = localPlayerId;
+  const savedMouseX = mouseX;
+  const savedMouseY = mouseY;
+  const savedMouseDown = mouseDown;
+  localPlayer = p;
+  localPlayerId = p.id;
+  // Convert world-space aim coords to screen-space for useAbility
+  const cw = gameCanvas.width, ch = gameCanvas.height;
+  const camX = p.x - cw / 2, camY = p.y - ch / 2;
+  mouseX = (inp.aimWorldX || 0) - camX;
+  mouseY = (inp.aimWorldY || 0) - camY;
+  mouseDown = inp.mouseDown || false;
+  try { useAbility(abilKey); } catch(e) { /* ignore errors from remote ability */ }
+  localPlayer = savedLocal;
+  localPlayerId = savedLocalId;
+  mouseX = savedMouseX;
+  mouseY = savedMouseY;
+  mouseDown = savedMouseDown;
+}
+
+function onPlayerMove(id, x, y, hp) {
+  // Legacy handler — only used if host-authoritative is not active
+  if (isHostAuthority) return;
+  const p = gamePlayers.find((pl) => pl.id === id);
+  if (p && p.id !== localPlayerId) {
+    p.x = x; p.y = y;
+    if (hp !== undefined) p.hp = hp;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// UTIL
+// ═══════════════════════════════════════════════════════════════
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
