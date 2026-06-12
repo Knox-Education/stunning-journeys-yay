@@ -856,7 +856,7 @@ const FIGHTERS = {
     healDelay: 10,
     healTick: 4,
     speed: 1.8,
-    description: 'Sppoky dragon wow scary',
+    description: 'Spooky dragon wow scary',
     abilities: [
       {
         key: 'M1',

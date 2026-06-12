@@ -3265,7 +3265,7 @@ function _spawnExtremeEvent() {
         type: 'warship',
         x: (tile.c + 0.5) * GAME_TILE, y: (tile.r + 0.5) * GAME_TILE,
         hp: 800, maxHp: 800, alive: true,
-        fireTimer: 2 + Math.random() * 2, fireRate: 3, duration: 30,
+        fireTimer: 2 + Math.random() * 2, fireRate: 3,
         id: 'warship-' + Date.now() + '-' + i,
       });
     }
@@ -3319,8 +3319,6 @@ function _updateExtremeEvents(dt) {
     if (!ev.alive) { _extremeEvents.splice(i, 1); continue; }
 
     if (ev.type === 'warship') {
-      ev.duration -= dt;
-      if (ev.duration <= 0) { ev.alive = false; continue; }
       ev.fireTimer -= dt;
       if (ev.fireTimer <= 0) {
         ev.fireTimer = ev.fireRate;
