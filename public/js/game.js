@@ -58,12 +58,16 @@ let dummyRespawnTimer = 0;
 // Apple tree state
 let appleTree = null; // {col, row, hp, maxHp, alive, regrowTimer, appleTimer, apples:[{col,row}]}
 
-// Game mode: 'training' | 'fight' | 'teams' | undefined (multiplayer FFA)
+// Game mode: 'training' | 'fight' | 'fight-hard' | 'fight-extreme' | 'teams' | undefined (multiplayer FFA)
 let gameMode = undefined;
 let respawnMode = false; // true for 2-team respawn mode
 let respawnGameTimer = 180; // 3 minute game timer for respawn mode
 let respawnTeam1Kills = 0;
 let respawnTeam2Kills = 0;
+
+// Extreme difficulty event system
+let _extremeEventTimer = 40;   // seconds until next event
+let _extremeEvents = [];        // active event entities: { type, ... }
 
 // Animation frame ID for cancellation
 let _gameLoopFrameId = null;
@@ -265,10 +269,10 @@ function startGame(mapIndex, players, myId, mode) {
       lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false,
     };
     gamePlayers.push(bot);
-  } else if (gameMode === 'fight' || gameMode === 'fight-hard') {
+  } else if (gameMode === 'fight' || gameMode === 'fight-hard' || gameMode === 'fight-extreme') {
     // Fight: CPU opponents
     const allFighters = getAllFighterIds().filter(f => f !== 'moderator' && f !== 'dogtooth' && f !== 'explodingcat' && f !== 'unstable' && f !== 'omori');
-    const difficulties = gameMode === 'fight-hard'
+    const difficulties = (gameMode === 'fight-hard' || gameMode === 'fight-extreme')
       ? ['expert', 'expert', 'expert', 'expert', 'expert', 'expert']
       : ['easy', 'medium', 'hard', 'hard'];
     const shuffledNames = CPU_NAMES.slice().sort(() => Math.random() - 0.5);
@@ -367,6 +371,10 @@ function startGame(mapIndex, players, myId, mode) {
   // Build HUD
   buildHUD();
 
+  // Extreme difficulty: init event system
+  _extremeEventTimer = 40;
+  _extremeEvents = [];
+
   // Hide play-again overlay from any previous game
   const _paOverlay = document.querySelector('#play-again-overlay');
   if (_paOverlay) _paOverlay.classList.add('hidden');
@@ -435,6 +443,7 @@ function cleanupGame() {
   diedInOtherWorld = false;
   appleTree = null;
   window._spikeEntities = [];
+  _extremeEvents = [];
 
   // Hide play-again overlay and reset button state
   const paOverlay = document.querySelector('#play-again-overlay');
@@ -2624,6 +2633,16 @@ function updateGame(dt) {
   // Update projectiles
   updateProjectiles(dt);
 
+  // ── Extreme difficulty: event system ──────────────────────
+  if (gameMode === 'fight-extreme' && localPlayer && localPlayer.alive) {
+    _extremeEventTimer -= dt;
+    if (_extremeEventTimer <= 0) {
+      _extremeEventTimer = 40;
+      _spawnExtremeEvent();
+    }
+    _updateExtremeEvents(dt);
+  }
+
   // ── Move 4 ticks ──────────────────────────────────────────
   // Potion heal tick (Fighter F)
   for (const p of gamePlayers) {
@@ -2750,7 +2769,7 @@ function updateGame(dt) {
 
   // CPU AI update (use wallDt for consistent timer behaviour with player)
   // Also run in multiplayer host mode so illusion clones, noli clones, etc. get AI
-  if (gameMode === 'fight' || gameMode === 'fight-hard' || isHostAuthority) {
+  if (gameMode === 'fight' || gameMode === 'fight-hard' || gameMode === 'fight-extreme' || isHostAuthority) {
     updateCPUs(wallDt);
     // Flush deferred removals from CPU ability functions
     if (_deferredRemoveIds.length > 0) {
@@ -3215,6 +3234,188 @@ function getRandomSafePosition() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// EXTREME DIFFICULTY — EVENT SYSTEM
+// ═══════════════════════════════════════════════════════════════
+
+function _isOceanTile(r, c) {
+  return (r === 0 || r === gameMap.rows - 1 || c === 0 || c === gameMap.cols - 1);
+}
+
+function _spawnExtremeEvent() {
+  const eventTypes = ['warship', 'giant', 'frog'];
+  const type = eventTypes[Math.floor(Math.random() * eventTypes.length)];
+
+  if (type === 'warship') {
+    const oceanTiles = [];
+    for (let r = 0; r < gameMap.rows; r++) {
+      for (let c = 0; c < gameMap.cols; c++) {
+        if (gameMap.tiles[r][c] === TILE.WATER && _isOceanTile(r, c)) oceanTiles.push({ r, c });
+      }
+    }
+    const positions = oceanTiles.length > 0
+      ? oceanTiles
+      : [{ r: 0, c: 0 }, { r: 0, c: gameMap.cols - 1 }, { r: gameMap.rows - 1, c: 0 }, { r: gameMap.rows - 1, c: gameMap.cols - 1 }];
+    for (let i = 0; i < 2; i++) {
+      const tile = positions[Math.floor(Math.random() * positions.length)];
+      _extremeEvents.push({
+        type: 'warship',
+        x: (tile.c + 0.5) * GAME_TILE, y: (tile.r + 0.5) * GAME_TILE,
+        hp: 800, maxHp: 800, alive: true,
+        fireTimer: 2 + Math.random() * 2, fireRate: 3, duration: 30,
+        id: 'warship-' + Date.now() + '-' + i,
+      });
+    }
+    combatLog.push({ text: '\u{1F6A2} WARSHIPS INCOMING! Watch the ocean!', timer: 5, color: '#ff4444' });
+
+  } else if (type === 'giant') {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 8 * GAME_TILE;
+    const gx = Math.max(GAME_TILE, Math.min((gameMap.cols - 1) * GAME_TILE, localPlayer.x + Math.cos(angle) * dist));
+    const gy = Math.max(GAME_TILE, Math.min((gameMap.rows - 1) * GAME_TILE, localPlayer.y + Math.sin(angle) * dist));
+    _extremeEvents.push({
+      type: 'giant', x: gx, y: gy,
+      hp: 5000, maxHp: 5000, alive: true,
+      attackTimer: 0, attackRange: 2.5 * GAME_TILE, attackRate: 1.2,
+      damage: 100, speed: 1.5 * GAME_TILE,
+      id: 'giant-' + Date.now(),
+    });
+    combatLog.push({ text: '\u{1F479} A GIANT has appeared!', timer: 5, color: '#ff4444' });
+
+  } else if (type === 'frog') {
+    const pR = Math.floor(localPlayer.y / GAME_TILE);
+    const pC = Math.floor(localPlayer.x / GAME_TILE);
+    const lakeTiles = [];
+    const sr = 8;
+    for (let r = Math.max(0, pR - sr); r <= Math.min(gameMap.rows - 1, pR + sr); r++) {
+      for (let c = Math.max(0, pC - sr); c <= Math.min(gameMap.cols - 1, pC + sr); c++) {
+        if (gameMap.tiles[r][c] === TILE.WATER && !_isOceanTile(r, c)) lakeTiles.push({ r, c });
+      }
+    }
+    if (lakeTiles.length === 0) { _extremeEventTimer = 5; return; }
+    const count = 3 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < count; i++) {
+      const tile = lakeTiles[Math.floor(Math.random() * lakeTiles.length)];
+      _extremeEvents.push({
+        type: 'frog', x: (tile.c + 0.5) * GAME_TILE, y: (tile.r + 0.5) * GAME_TILE,
+        hp: 200, maxHp: 200, alive: true,
+        attackTimer: 0, attackRange: 1.5 * GAME_TILE, attackRate: 1.5,
+        damage: 40, speed: 2.8 * GAME_TILE,
+        jumpTimer: 0, jumpVx: 0, jumpVy: 0,
+        id: 'frog-' + Date.now() + '-' + i,
+      });
+    }
+    combatLog.push({ text: '\u{1F438} FROGS are emerging from the lake!', timer: 5, color: '#44ff88' });
+  }
+}
+
+function _updateExtremeEvents(dt) {
+  if (!localPlayer || !localPlayer.alive) return;
+  for (let i = _extremeEvents.length - 1; i >= 0; i--) {
+    const ev = _extremeEvents[i];
+    if (!ev.alive) { _extremeEvents.splice(i, 1); continue; }
+
+    if (ev.type === 'warship') {
+      ev.duration -= dt;
+      if (ev.duration <= 0) { ev.alive = false; continue; }
+      ev.fireTimer -= dt;
+      if (ev.fireTimer <= 0) {
+        ev.fireTimer = ev.fireRate;
+        let target = localPlayer;
+        const pdx = localPlayer.x - ev.x, pdy = localPlayer.y - ev.y;
+        if (Math.sqrt(pdx * pdx + pdy * pdy) > 20 * GAME_TILE) {
+          let bestDist = Infinity;
+          for (const p of gamePlayers) {
+            if (!p.alive || p.isSummon) continue;
+            const dx = p.x - ev.x, dy = p.y - ev.y;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            if (d < bestDist) { bestDist = d; target = p; }
+          }
+        }
+        if (target) {
+          const dx = target.x - ev.x, dy = target.y - ev.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const spd = 10 * GAME_TILE;
+          projectiles.push({
+            x: ev.x, y: ev.y,
+            vx: (dx / dist) * spd, vy: (dy / dist) * spd,
+            type: 'warship-shell', damage: 500, timer: 4,
+            ownerId: ev.id, color: '#ff6600', radius: GAME_TILE * 0.6,
+          });
+        }
+      }
+
+    } else if (ev.type === 'giant') {
+      let target = localPlayer;
+      const pdx = localPlayer.x - ev.x, pdy = localPlayer.y - ev.y;
+      if (Math.sqrt(pdx * pdx + pdy * pdy) > 25 * GAME_TILE) {
+        let bestDist = Infinity;
+        for (const p of gamePlayers) {
+          if (!p.alive || p.isSummon) continue;
+          const dx = p.x - ev.x, dy = p.y - ev.y;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < bestDist) { bestDist = d; target = p; }
+        }
+      }
+      if (target && target.alive) {
+        const dx = target.x - ev.x, dy = target.y - ev.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        if (dist > ev.attackRange) {
+          const nx = dx / dist, ny = dy / dist;
+          const mx = ev.x + nx * ev.speed * dt, my = ev.y + ny * ev.speed * dt;
+          const tR = Math.floor(my / GAME_TILE), tC = Math.floor(mx / GAME_TILE);
+          const blocked = tR < 0 || tR >= gameMap.rows || tC < 0 || tC >= gameMap.cols
+            || gameMap.tiles[tR][tC] === TILE.ROCK || gameMap.tiles[tR][tC] === TILE.WATER;
+          if (!blocked) { ev.x = mx; ev.y = my; }
+          else {
+            const mxR = Math.floor(ev.y / GAME_TILE), mxC = Math.floor(mx / GAME_TILE);
+            if (mxR >= 0 && mxR < gameMap.rows && mxC >= 0 && mxC < gameMap.cols
+              && gameMap.tiles[mxR][mxC] !== TILE.ROCK && gameMap.tiles[mxR][mxC] !== TILE.WATER) ev.x = mx;
+            const myR = Math.floor(my / GAME_TILE), myC = Math.floor(ev.x / GAME_TILE);
+            if (myR >= 0 && myR < gameMap.rows && myC >= 0 && myC < gameMap.cols
+              && gameMap.tiles[myR][myC] !== TILE.ROCK && gameMap.tiles[myR][myC] !== TILE.WATER) ev.y = my;
+          }
+        }
+        ev.attackTimer -= dt;
+        if (ev.attackTimer <= 0 && dist <= ev.attackRange * 1.2) {
+          ev.attackTimer = ev.attackRate;
+          dealDamage(null, target, ev.damage);
+          target.effects.push({ type: 'hit', timer: 0.2 });
+        }
+      }
+
+    } else if (ev.type === 'frog') {
+      const target = localPlayer;
+      if (!target || !target.alive) continue;
+      const dx = target.x - ev.x, dy = target.y - ev.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      ev.jumpTimer -= dt;
+      if (ev.jumpTimer <= 0) {
+        ev.jumpTimer = 0.6 + Math.random() * 0.4;
+        if (dist > ev.attackRange) {
+          const nx = dx / dist, ny = dy / dist;
+          ev.jumpVx = nx * ev.speed; ev.jumpVy = ny * ev.speed;
+        } else { ev.jumpVx = 0; ev.jumpVy = 0; }
+      }
+      if (ev.jumpVx !== 0 || ev.jumpVy !== 0) {
+        const nx2 = ev.x + ev.jumpVx * dt, ny2 = ev.y + ev.jumpVy * dt;
+        const tR = Math.floor(ny2 / GAME_TILE), tC = Math.floor(nx2 / GAME_TILE);
+        const ok = tR >= 0 && tR < gameMap.rows && tC >= 0 && tC < gameMap.cols
+          && gameMap.tiles[tR][tC] !== TILE.ROCK;
+        if (ok) { ev.x = nx2; ev.y = ny2; }
+        else { ev.jumpVx = 0; ev.jumpVy = 0; }
+      }
+      ev.attackTimer -= dt;
+      if (ev.attackTimer <= 0 && dist <= ev.attackRange * 1.1) {
+        ev.attackTimer = ev.attackRate;
+        dealDamage(null, target, ev.damage);
+        target.effects.push({ type: 'hit', timer: 0.2 });
+      }
+    }
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
 // PROJECTILES
 // ═══════════════════════════════════════════════════════════════
 function updateProjectiles(dt) {
@@ -3264,7 +3465,8 @@ function updateProjectiles(dt) {
     // Hit detection: host resolves ALL projectile hits; otherwise only local/CPU projectiles
     const isCpuProj = p.ownerId && p.ownerId.startsWith('cpu-');
     const isLocalProj = p.ownerId === localPlayerId;
-    if (isLocalProj || isCpuProj || isHostAuthority) {
+    const isWarshipProj = p.type === 'warship-shell';
+    if (isLocalProj || isCpuProj || isHostAuthority || isWarshipProj) {
       const owner = isLocalProj ? localPlayer : gamePlayers.find(pl => pl.id === p.ownerId);
       for (const target of gamePlayers) {
         if (target.id === p.ownerId || !target.alive) continue;
@@ -3286,6 +3488,7 @@ function updateProjectiles(dt) {
         const dist = Math.sqrt(dx * dx + dy * dy);
         const hitRadius = p.type === 'shockwave' ? radius + 12
                         : p.dndFireball ? (p.aoeRadius || 1.5 * GAME_TILE)
+                        : isWarshipProj ? (p.radius || GAME_TILE * 0.6) + radius
                         : radius + 4;
         if (dist < hitRadius) {
           // D&D Fireball: AoE explosion — damage ALL targets in radius, then remove
@@ -3378,6 +3581,23 @@ function updateProjectiles(dt) {
           // D&D Blur bolt: apply blur debuff to target
           if (p.dndBlurDuration && p.dndBlurDuration > 0) {
             target.dndBlurTimer = p.dndBlurDuration;
+          }
+          projectiles.splice(i, 1);
+          break;
+        }
+      }
+    }
+    // Player/CPU projectiles can damage extreme events
+    if (gameMode === 'fight-extreme' && (isLocalProj || isCpuProj || isHostAuthority) && p.type !== 'warship-shell') {
+      for (const ev of _extremeEvents) {
+        if (!ev.alive) continue;
+        const dx = ev.x - p.x, dy = ev.y - p.y;
+        const hitR = (ev.type === 'warship' ? GAME_TILE * 1.5 : GAME_TILE * 0.8) + (GAME_TILE * PLAYER_RADIUS_RATIO);
+        if (Math.sqrt(dx * dx + dy * dy) < hitR) {
+          ev.hp -= p.damage || 100;
+          if (ev.hp <= 0) {
+            ev.alive = false;
+            if (localPlayer) combatLog.push({ text: '\u{1F4A5} ' + ev.type.charAt(0).toUpperCase() + ev.type.slice(1) + ' defeated!', timer: 3, color: '#ffdd00' });
           }
           projectiles.splice(i, 1);
           break;
@@ -18560,6 +18780,89 @@ function renderGame() {
     gameCtx.restore();
   }
 
+  // Draw extreme difficulty events
+  if (gameMode === 'fight-extreme' && _extremeEvents.length > 0) {
+    for (const ev of _extremeEvents) {
+      if (!ev.alive) continue;
+      const ex = ev.x - camX, ey2 = ev.y - camY;
+      if (ex < -80 || ex > cw + 80 || ey2 < -80 || ey2 > ch + 80) continue;
+      gameCtx.save();
+      if (ev.type === 'warship') {
+        gameCtx.translate(ex, ey2);
+        gameCtx.fillStyle = '#5a5a6a';
+        gameCtx.strokeStyle = '#333'; gameCtx.lineWidth = 2;
+        gameCtx.beginPath(); gameCtx.ellipse(0, 0, GAME_TILE * 1.4, GAME_TILE * 0.6, 0, 0, Math.PI * 2); gameCtx.fill(); gameCtx.stroke();
+        gameCtx.fillStyle = '#333'; gameCtx.fillRect(-GAME_TILE * 0.2, -GAME_TILE * 0.8, GAME_TILE * 0.4, GAME_TILE * 0.7);
+        gameCtx.fillStyle = '#e94560'; gameCtx.fillRect(GAME_TILE * 0.8, -GAME_TILE * 0.8, GAME_TILE * 0.4, GAME_TILE * 0.25);
+        const hf1 = ev.hp / ev.maxHp;
+        gameCtx.fillStyle = '#333'; gameCtx.fillRect(-GAME_TILE, -GAME_TILE * 1.2, GAME_TILE * 2, 6);
+        gameCtx.fillStyle = hf1 > 0.5 ? '#2ecc71' : hf1 > 0.25 ? '#f5a623' : '#e94560';
+        gameCtx.fillRect(-GAME_TILE, -GAME_TILE * 1.2, GAME_TILE * 2 * hf1, 6);
+        gameCtx.fillStyle = '#fff'; gameCtx.font = 'bold 10px sans-serif'; gameCtx.textAlign = 'center';
+        gameCtx.fillText('\u{1F6A2} WARSHIP', 0, -GAME_TILE * 1.4);
+      } else if (ev.type === 'giant') {
+        gameCtx.translate(ex, ey2);
+        const gR = GAME_TILE * 0.9;
+        gameCtx.fillStyle = '#8b2020'; gameCtx.beginPath(); gameCtx.arc(0, 0, gR, 0, Math.PI * 2); gameCtx.fill();
+        gameCtx.strokeStyle = '#500'; gameCtx.lineWidth = 3; gameCtx.stroke();
+        gameCtx.fillStyle = '#ff4444';
+        gameCtx.beginPath(); gameCtx.arc(-gR * 0.35, -gR * 0.25, gR * 0.18, 0, Math.PI * 2); gameCtx.fill();
+        gameCtx.beginPath(); gameCtx.arc( gR * 0.35, -gR * 0.25, gR * 0.18, 0, Math.PI * 2); gameCtx.fill();
+        gameCtx.strokeStyle = '#c0c0c0'; gameCtx.lineWidth = 4;
+        gameCtx.beginPath(); gameCtx.moveTo(gR * 0.6, gR * 0.6); gameCtx.lineTo(gR * 1.6, -gR * 0.6); gameCtx.stroke();
+        const hf2 = ev.hp / ev.maxHp;
+        gameCtx.fillStyle = '#333'; gameCtx.fillRect(-GAME_TILE, -GAME_TILE * 1.4, GAME_TILE * 2, 7);
+        gameCtx.fillStyle = hf2 > 0.5 ? '#2ecc71' : hf2 > 0.25 ? '#f5a623' : '#e94560';
+        gameCtx.fillRect(-GAME_TILE, -GAME_TILE * 1.4, GAME_TILE * 2 * hf2, 7);
+        gameCtx.fillStyle = '#fff'; gameCtx.font = 'bold 10px sans-serif'; gameCtx.textAlign = 'center';
+        gameCtx.fillText('\u{1F479} GIANT  ' + Math.ceil(ev.hp) + '/' + ev.maxHp, 0, -GAME_TILE * 1.6);
+      } else if (ev.type === 'frog') {
+        gameCtx.translate(ex, ey2);
+        const fR = GAME_TILE * 0.45;
+        gameCtx.fillStyle = '#2d8a2d'; gameCtx.beginPath(); gameCtx.arc(0, 0, fR, 0, Math.PI * 2); gameCtx.fill();
+        gameCtx.strokeStyle = '#1a5c1a'; gameCtx.lineWidth = 2; gameCtx.stroke();
+        gameCtx.fillStyle = '#90ee40';
+        gameCtx.beginPath(); gameCtx.arc(-fR * 0.5, -fR * 0.8, fR * 0.3, 0, Math.PI * 2); gameCtx.fill();
+        gameCtx.beginPath(); gameCtx.arc( fR * 0.5, -fR * 0.8, fR * 0.3, 0, Math.PI * 2); gameCtx.fill();
+        gameCtx.fillStyle = '#000';
+        gameCtx.beginPath(); gameCtx.arc(-fR * 0.5, -fR * 0.8, fR * 0.13, 0, Math.PI * 2); gameCtx.fill();
+        gameCtx.beginPath(); gameCtx.arc( fR * 0.5, -fR * 0.8, fR * 0.13, 0, Math.PI * 2); gameCtx.fill();
+        const hf3 = ev.hp / ev.maxHp;
+        gameCtx.fillStyle = '#333'; gameCtx.fillRect(-fR, -fR * 1.8, fR * 2, 4);
+        gameCtx.fillStyle = hf3 > 0.5 ? '#2ecc71' : '#e94560';
+        gameCtx.fillRect(-fR, -fR * 1.8, fR * 2 * hf3, 4);
+      }
+      gameCtx.restore();
+    }
+  }
+
+  // Draw warship shells (larger orange projectiles)
+  for (const proj of projectiles) {
+    if (proj.type !== 'warship-shell') continue;
+    const px2 = proj.x - camX, py2 = proj.y - camY;
+    if (px2 < -80 || px2 > cw + 80 || py2 < -80 || py2 > ch + 80) continue;
+    gameCtx.save();
+    gameCtx.fillStyle = '#ff6600'; gameCtx.strokeStyle = '#ffaa00'; gameCtx.lineWidth = 2;
+    gameCtx.shadowColor = '#ff4400'; gameCtx.shadowBlur = 12;
+    gameCtx.beginPath(); gameCtx.arc(px2, py2, proj.radius || GAME_TILE * 0.6, 0, Math.PI * 2);
+    gameCtx.fill(); gameCtx.stroke();
+    gameCtx.shadowBlur = 0;
+    const angle = Math.atan2(proj.vy, proj.vx);
+    gameCtx.strokeStyle = 'rgba(255,100,0,0.5)'; gameCtx.lineWidth = 4;
+    gameCtx.beginPath(); gameCtx.moveTo(px2, py2); gameCtx.lineTo(px2 - Math.cos(angle) * 20, py2 - Math.sin(angle) * 20); gameCtx.stroke();
+    gameCtx.restore();
+  }
+
+  // Extreme HUD: next event countdown
+  if (gameMode === 'fight-extreme') {
+    gameCtx.save();
+    gameCtx.fillStyle = 'rgba(0,0,0,0.55)';
+    gameCtx.fillRect(cw - 210, 10, 200, 32);
+    gameCtx.fillStyle = '#ff4444'; gameCtx.font = 'bold 12px sans-serif'; gameCtx.textAlign = 'right';
+    gameCtx.fillText('\u{1F525} EXTREME  Next event: ' + Math.ceil(_extremeEventTimer) + 's', cw - 14, 31);
+    gameCtx.restore();
+  }
+
   // Draw projectiles (hidden when local player is in backrooms or Complex)
   if (!(localPlayer && (localPlayer.inBackrooms || localPlayer.dogtoothInComplex))) {
   for (const proj of projectiles) {
@@ -19346,7 +19649,7 @@ function showPopup(text) {
 
 function checkWinCondition() {
   if (!localPlayer) return;
-  if (gameMode === 'fight' || gameMode === 'fight-hard') {
+  if (gameMode === 'fight' || gameMode === 'fight-hard' || gameMode === 'fight-extreme') {
     const alive = gamePlayers.filter(p => p.alive && !p.isSummon);
     // When local player dies, show placement immediately
     if (!localPlayer.alive && gameRunning) {

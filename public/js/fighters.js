@@ -11,7 +11,7 @@ const FIGHTERS = {
     healDelay: 10,        
     healTick: 4,           
     speed: 3.2,            
-    description: 'A basic, plain, cool, and versatile fighter.',
+    description: 'An average fighter for a below average person like you',
     abilities: [
       {
         key: 'M1',
@@ -93,7 +93,7 @@ const FIGHTERS = {
     healDelay: 10,
     healTick: 4,
     speed: 2.8,
-    description: 'A ranged gambler who bets to control the fight.',
+    description: 'GAMBLE GAMBLE GAMBLE',
     abilities: [
       {
         key: 'M1',
@@ -173,7 +173,7 @@ const FIGHTERS = {
     healDelay: 10,
     healTick: 4,
     speed: 2.8,
-    description: 'A half human half chair who crafts, eats, and swings chairs — and summons Oddity companions. credits goes to oddity compendium + The Boiled One Phenomenon both by Doctor Nowhere YT',
+    description: 'bro filbism is not real *munch chair noises* trust me ',
     abilities: [
       {
         key: 'M1',
@@ -254,7 +254,7 @@ const FIGHTERS = {
     healDelay: 10,
     healTick: 4,
     speed: 1.2,
-    description: 'A 4th dimensional being who wields poison, entanglement, and rotting zombies. credits - Forsaken.',
+    description: 'not a reference at all trust',
     abilities: [
       {
         key: 'M1',
@@ -517,7 +517,7 @@ const FIGHTERS = {
     healDelay: 10,
     healTick: 4,
     speed: 3.6,
-    description: 'A forsaken killer who chains dashes, hurls void stars, and summons hallucinations of his enemies. credits - Forsaken.',
+    description: 'hmm i wonder where this guy is from',
     abilities: [
       {
         key: 'M1',
@@ -685,7 +685,7 @@ const FIGHTERS = {
     healDelay: 10,
     healTick: 4,
     speed: 2.8,
-    description: 'A legendary commander who leads cavalry charges, deploys cannons, and summons the Grande Armée.',
+    description: '* SUPERIOR TOULON NOISES *',
     abilities: [
       {
         key: 'M1',
@@ -776,7 +776,7 @@ const FIGHTERS = {
     healTick: 4,
     speed: 3.4,
     multiplayerOnly: true,
-    description: 'A server moderator who bans, bugs, and resets. Multiplayer only.',
+    description: 'you are not a moderator btw',
     abilities: [
       {
         key: 'M1',
@@ -856,7 +856,7 @@ const FIGHTERS = {
     healDelay: 10,
     healTick: 4,
     speed: 1.8,
-    description: 'An ancient ice dragon. Fear its Power.',
+    description: 'Sppoky dragon wow scary',
     abilities: [
       {
         key: 'M1',
@@ -925,7 +925,7 @@ const FIGHTERS = {
     healDelay: 10,
     healTick: 4,
     speed: 3.0,
-    description: 'A simple, classic adventurer.',
+    description: 'Jeremy amazing mage hand technique trust',
     abilities: [
       {
         key: 'M1',
@@ -1236,7 +1236,7 @@ const FIGHTERS = {
     healDelay: 12,
     healTick: 4,
     speed: 2.8,
-    description: 'A fire-obsessed maniac who burns everything in sight. Every touch ignites, every move scorches.',
+    description: 'Sounds like you',
     abilities: [
       {
         key: 'M1',
@@ -1335,7 +1335,7 @@ const FIGHTERS = {
     healDelay: 10,
     healTick: 4,
     speed: 2.0,
-    description: 'A heavy hitter who wields a massive rope as a weapon.',
+    description: 'Its just rope not that deep you cannot lose to *proceeds to take 950dmg and dies*',
     abilities: [
       {
         key: 'M1',
@@ -1414,7 +1414,7 @@ const FIGHTERS = {
     healTick: 4,
     speed: 3.4,
     hidden: true,           // hidden from all selection and CPU pools
-    description: 'A boy armed with a knife and his closest friends.',
+    description: 'Interesting',
     abilities: [
       {
         key: 'M1',
@@ -1511,7 +1511,7 @@ const FIGHTERS = {
     healTick: 4,
     speed: 3.8,
     adminOnly: true,
-    description: 'A cold professional who uses lots of weapons. Starts with Pistol equipped.',
+    description: 'The opposite and still more successful version of you.',
     abilities: [
       {
         key: 'M1',
