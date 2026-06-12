@@ -1280,6 +1280,15 @@ class ServerEKGame {
 // ── Start server ────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 
+// SPA fallback: serve index.html for any unmatched GET route so client-side
+// navigation / refresh on a sub-path doesn't return a hard 404.
+app.use((req, res, next) => {
+  if (req.method !== 'GET') return next();
+  // Let Socket.IO and asset-looking requests fall through to their handlers/404
+  if (req.path.startsWith('/socket.io') || req.path.includes('.')) return next();
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });

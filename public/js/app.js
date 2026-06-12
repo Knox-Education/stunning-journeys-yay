@@ -1286,6 +1286,37 @@ function drawFighterIcon(canvas, fighterId, customSize) {
     // Glass outline
     ctx.strokeStyle = '#999'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.arc(cx, bulbY, bulbR, 0, Math.PI * 2); ctx.stroke();
+  } else if (fighterId === 'hitman') {
+    // Hitman: gun icon
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Gun body (barrel + receiver)
+    const gunW = r * 1.4, gunH = r * 0.35;
+    const gunX = cx - gunW * 0.45, gunY = cy - gunH * 0.8;
+    ctx.fillStyle = '#888';
+    ctx.fillRect(gunX, gunY, gunW, gunH);
+    // Barrel tip (slightly narrower extension)
+    ctx.fillStyle = '#aaa';
+    ctx.fillRect(gunX + gunW, gunY + gunH * 0.15, r * 0.3, gunH * 0.7);
+    // Grip/handle (angled down)
+    ctx.fillStyle = '#555';
+    ctx.beginPath();
+    ctx.moveTo(gunX + gunW * 0.25, gunY + gunH);
+    ctx.lineTo(gunX + gunW * 0.5, gunY + gunH);
+    ctx.lineTo(gunX + gunW * 0.45, gunY + gunH + r * 0.7);
+    ctx.lineTo(gunX + gunW * 0.15, gunY + gunH + r * 0.65);
+    ctx.closePath();
+    ctx.fill();
+    // Trigger guard
+    ctx.strokeStyle = '#666'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(gunX + gunW * 0.38, gunY + gunH + r * 0.15, r * 0.12, 0, Math.PI);
+    ctx.stroke();
+    // Sight (small notch on top)
+    ctx.fillStyle = '#ccc';
+    ctx.fillRect(gunX + gunW * 0.7, gunY - r * 0.1, r * 0.08, r * 0.1);
+    // Outer ring
+    ctx.strokeStyle = '#f5c842'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.95, 0, Math.PI * 2); ctx.stroke();
   } else {
     // Fighter: sword icon
     ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();

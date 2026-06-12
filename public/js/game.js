@@ -737,6 +737,13 @@ function createPlayerState(p, spawn, fighter) {
     ropePowerHit: {},             // track who was hit by rope power
     ropeSecondGripTimer: 0,       // Second Grip buff timer
     ropeTraitTimer: 30,           // Hard Worker Breaks - heal timer
+    // Filbus chair linger zone
+    chairSwingTimer: 0,           // lingering hitbox timer
+    chairSwingAimNx: 0,           // swing aim direction X
+    chairSwingAimNy: 0,           // swing aim direction Y
+    chairSwingRange: 0,           // swing range in world units
+    chairSwingDmg: 0,             // linger damage per check
+    chairSwingHitIds: [],         // IDs already hit this swing
     // Hitman-specific state
     hitmanWeapon: 'pistol',       // current weapon: 'pistol'|'akm'|'sniper'
     hitmanAmmo: 20,               // current ammo
@@ -750,6 +757,7 @@ function createPlayerState(p, spawn, fighter) {
     hitmanBackupIds: [],          // ids of backup summons
     hitmanLockingIn: false,       // Locking In active
     hitmanLockingInTimer: 0,      // seconds remaining for Locking In
+    hitmanLockingFireTimer: 0,    // fire rate timer for locking in auto-fire
   };
 }
 
@@ -860,15 +868,15 @@ function gameLoop(now) {
       }
     }
     if (isHostAuthority) {
-      // HOST: broadcast full game state snapshot every ~20ms (50 Hz) for smoother remote play
-      if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 20) {
+      // HOST: broadcast full game state snapshot every ~33ms (30 Hz) to reduce bandwidth
+      if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 33) {
         gameLoop._lastBroadcast = now;
         const snapshot = buildGameStateSnapshot();
         socket.emit('game-state', snapshot);
       }
     } else if (gameMode === undefined || gameMode === 'teams') {
-      // NON-HOST: send ability inputs throttled to ~50 Hz (every 20ms)
-      if (!gameLoop._lastInputSend || now - gameLoop._lastInputSend > 20) {
+      // NON-HOST: send ability inputs throttled to ~30 Hz (every 33ms)
+      if (!gameLoop._lastInputSend || now - gameLoop._lastInputSend > 33) {
         gameLoop._lastInputSend = now;
         // Send world-space aim coordinates so host canvas size doesn't matter
         const cw = gameCanvas.width, ch = gameCanvas.height;
@@ -1122,6 +1130,28 @@ function updateGame(dt) {
           combatLog.push({ text: '🪑 Chair crafted! (' + p.chairCharges + ' chairs)', timer: 3, color: '#2ecc71' });
           showPopup('🪑 Chair crafted!');
         }
+      }
+    }
+    // Tick Filbus chair linger zone (host or local only)
+    if (p.chairSwingTimer > 0 && (p.id === localPlayerId || isHostAuthority || p.isCPU)) {
+      p.chairSwingTimer -= wallDt;
+      if (p.chairSwingTimer > 0) {
+        // Check every frame for new targets entering the arc
+        for (const t of gamePlayers) {
+          if (!t.alive || p.chairSwingHitIds.includes(t.id)) continue;
+          if (t.isSummon && t.summonOwner === p.id) continue;
+          if (gameMode === 'teams' && p.team && t.team === p.team) continue;
+          const dx = t.x - p.x; const dy = t.y - p.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist > p.chairSwingRange) continue;
+          const dot = (dx * p.chairSwingAimNx + dy * p.chairSwingAimNy) / (dist || 1);
+          if (dot < 0) continue;
+          dealDamage(p, t, p.chairSwingDmg);
+          p.chairSwingHitIds.push(t.id);
+        }
+      } else {
+        p.chairSwingTimer = 0;
+        p.chairSwingHitIds = [];
       }
     }
     if (p.isEatingChair) {
@@ -1551,40 +1581,39 @@ function updateGame(dt) {
     if (p.ropePowerTimer > 0) {
       p.ropePowerTimer -= wallDt;
       if (p.ropePowerTimer <= 0) { p.ropePowerTimer = 0; }
-      // Hit enemies in circle every frame
-      const spinRange = 3.5 * GAME_TILE;
-      const spinDmg = (p.fighter && p.fighter.abilities[4] ? p.fighter.abilities[4].damage : 500);
-      const spinKB = (p.fighter && p.fighter.abilities[4] ? p.fighter.abilities[4].knockback : 4) * GAME_TILE;
-      for (const t of gamePlayers) {
-        if (t.id === p.id || !t.alive) continue;
-        if (t.isSummon && t.summonOwner === p.id) continue;
-        if (gameMode === 'teams' && p.team && t.team === p.team) continue;
-        const dx = t.x - p.x; const dy = t.y - p.y;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < spinRange && !p.ropePowerHit[t.id]) {
-          // Deal damage, allow re-hit after knockback pushes them out
-          dealDamage(p, t, spinDmg);
-          p.ropePowerHit[t.id] = true;
-          t.effects.push({ type: 'hit', timer: 0.5 });
-          // Knockback
-          const kbNx = dx / (d || 1); const kbNy = dy / (d || 1);
-          let newTX = t.x + kbNx * spinKB; let newTY = t.y + kbNy * spinKB;
-          for (let s = 10; s >= 1; s--) {
-            const tryX = t.x + kbNx * spinKB * (s / 10);
-            const tryY = t.y + kbNy * spinKB * (s / 10);
-            if (canMoveTo(tryX, tryY, GAME_TILE * PLAYER_RADIUS_RATIO)) { newTX = tryX; newTY = tryY; break; }
-            if (s === 1) { newTX = t.x; newTY = t.y; }
+      // Only apply damage on host, local player, or CPU (authoritative sources)
+      if (p.id === localPlayerId || isHostAuthority || p.isCPU) {
+        const spinRange = 3.5 * GAME_TILE;
+        const spinDmg = (p.fighter && p.fighter.abilities[4] ? p.fighter.abilities[4].damage : 500);
+        const spinKB = (p.fighter && p.fighter.abilities[4] ? p.fighter.abilities[4].knockback : 4) * GAME_TILE;
+        for (const t of gamePlayers) {
+          if (t.id === p.id || !t.alive) continue;
+          if (t.isSummon && t.summonOwner === p.id) continue;
+          if (gameMode === 'teams' && p.team && t.team === p.team) continue;
+          const dx = t.x - p.x; const dy = t.y - p.y;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < spinRange && !p.ropePowerHit[t.id]) {
+            dealDamage(p, t, spinDmg);
+            p.ropePowerHit[t.id] = true;
+            t.effects.push({ type: 'hit', timer: 0.5 });
+            const kbNx = dx / (d || 1); const kbNy = dy / (d || 1);
+            let newTX = t.x + kbNx * spinKB; let newTY = t.y + kbNy * spinKB;
+            for (let s = 10; s >= 1; s--) {
+              const tryX = t.x + kbNx * spinKB * (s / 10);
+              const tryY = t.y + kbNy * spinKB * (s / 10);
+              if (canMoveTo(tryX, tryY, GAME_TILE * PLAYER_RADIUS_RATIO)) { newTX = tryX; newTY = tryY; break; }
+              if (s === 1) { newTX = t.x; newTY = t.y; }
+            }
+            t.x = newTX; t.y = newTY;
+          } else if (d >= spinRange && p.ropePowerHit[t.id]) {
+            delete p.ropePowerHit[t.id];
           }
-          t.x = newTX; t.y = newTY;
-        } else if (d >= spinRange && p.ropePowerHit[t.id]) {
-          // Clear hit flag when target leaves range so they can be hit again
-          delete p.ropePowerHit[t.id];
         }
-      }
+      } // end authoritative damage gate
     }
 
-    // Tick Rope Grab projectile
-    if (p.ropeGrabActive) {
+    // Tick Rope Grab projectile (only on host or local player)
+    if (p.ropeGrabActive && (p.id === localPlayerId || isHostAuthority || p.isCPU)) {
       const grabSpd = (p.fighter && p.fighter.abilities[3] ? p.fighter.abilities[3].speed : 40) * GAME_TILE;
       p.ropeGrabX += p.ropeGrabNx * grabSpd * wallDt;
       p.ropeGrabY += p.ropeGrabNy * grabSpd * wallDt;
@@ -1968,7 +1997,9 @@ function updateGame(dt) {
           } else {
             const safe = getRandomSafePosition(); p.x = safe.x; p.y = safe.y;
           }
-          if (p.id === localPlayerId) combatLog.push({ text: '⚔️ Room defeated! THE FINAL BATTLE WON! Teleported back.', timer: 5, color: '#ffd700' });
+          // Heal 500 HP for defeating the Love Letter room
+          p.hp = Math.min(p.hp + 500, p.maxHp);
+          if (p.id === localPlayerId) combatLog.push({ text: '⚔️ Room defeated! THE FINAL BATTLE WON! +500 HP! Teleported back.', timer: 5, color: '#ffd700' });
           p.effects.push({ type: 'complex-exit', timer: 2.0 });
         }
       }
@@ -2396,12 +2427,80 @@ function updateGame(dt) {
           if (p.id === localPlayerId) combatLog.push({ text: '🔄 Reloaded!', timer: 1.5, color: '#aaa' });
         }
       }
-      // Locking In: count down 10s timer then end
+      // Locking In: count down timer, auto-fire all 3 weapons toward mouse
       if (p.hitmanLockingIn) {
         p.hitmanLockingInTimer -= dt;
+        // Auto-fire all 3 weapons simultaneously at fastest rate (0.1s)
+        if (!p.hitmanLockingFireTimer) p.hitmanLockingFireTimer = 0;
+        p.hitmanLockingFireTimer -= dt;
+        if (p.hitmanLockingFireTimer <= 0) {
+          p.hitmanLockingFireTimer = 0.1; // fire every 0.1s
+          const wDefs = p.fighter.abilities[0].weapons || {};
+          // Calculate aim direction toward mouse (or random for CPU)
+          let aimNx, aimNy;
+          if (p.id === localPlayerId) {
+            const cw = gameCanvas.width; const ch = gameCanvas.height;
+            const camX = p.x - cw / 2; const camY = p.y - ch / 2;
+            const aimX = mouseX + camX; const aimY = mouseY + camY;
+            const aimDx = aimX - p.x; const aimDy = aimY - p.y;
+            const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+            aimNx = aimDx / aimDist; aimNy = aimDy / aimDist;
+          } else if (!p.isCPU && isHostAuthority && remoteInputs[p.id]) {
+            // Host: use remote player's real aim direction
+            const ri = remoteInputs[p.id];
+            const aimDx = (ri.aimWorldX || p.x) - p.x;
+            const aimDy = (ri.aimWorldY || p.y) - p.y;
+            const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+            aimNx = aimDx / aimDist; aimNy = aimDy / aimDist;
+          } else {
+            // CPU/remote: aim at closest enemy
+            let closest = null, closestD = Infinity;
+            for (const t of gamePlayers) {
+              if (t.id === p.id || !t.alive || t.isSummon) continue;
+              if (t.team && t.team === p.team) continue;
+              const d = Math.sqrt((t.x - p.x) ** 2 + (t.y - p.y) ** 2);
+              if (d < closestD) { closestD = d; closest = t; }
+            }
+            if (closest) {
+              const d = closestD || 1;
+              aimNx = (closest.x - p.x) / d; aimNy = (closest.y - p.y) / d;
+            } else {
+              aimNx = Math.cos(p.aimAngle || 0); aimNy = Math.sin(p.aimAngle || 0);
+            }
+          }
+          // Fire all 3 weapons
+          const weaponKeys = ['pistol', 'akm', 'sniper'];
+          for (const wKey of weaponKeys) {
+            const wDef = wDefs[wKey];
+            if (!wDef) continue;
+            const bulletSpeed = (wDef.speed || 28) * GAME_TILE / 10;
+            let dmg = wDef.damage || 100;
+            if (p.supportBuff > 0) dmg *= 1.5;
+            if (p.intimidated > 0) dmg *= 0.5;
+            // Slight spread for AKM
+            let nx = aimNx, ny = aimNy;
+            if (wKey === 'akm') {
+              const spread = (Math.random() - 0.5) * 0.15;
+              const cos = Math.cos(spread), sin = Math.sin(spread);
+              nx = aimNx * cos - aimNy * sin;
+              ny = aimNx * sin + aimNy * cos;
+            }
+            projectiles.push({
+              x: p.x, y: p.y,
+              vx: nx * bulletSpeed, vy: ny * bulletSpeed,
+              ownerId: p.id, damage: Math.round(dmg),
+              timer: 4, type: 'hitman-bullet',
+              weaponKey: wKey, color: wDef.color || '#f5c842',
+              traitRange: 6 * GAME_TILE,
+              spawnX: p.x, spawnY: p.y,
+            });
+          }
+          p.effects.push({ type: 'hitman-fire', timer: 0.1, aimNx, aimNy, wKey: 'pistol' });
+        }
       }
       if (p.hitmanLockingIn && p.hitmanLockingInTimer <= 0) {
         p.hitmanLockingIn = false;
+        p.hitmanLockingFireTimer = 0;
         if (p.id === localPlayerId) combatLog.push({ text: '🔓 Locking In ended.', timer: 2, color: '#ff4400' });
       }
       // Backup: prune dead backup summons
@@ -3228,10 +3327,10 @@ function updateProjectiles(dt) {
           }
           // Hitman bullet: Professional trait — 1.3× if beyond traitRange at spawn
           if (p.type === 'hitman-bullet') {
-            const spawnDx = p.x - (owner ? owner.x : p.x);
-            const spawnDy = p.y - (owner ? owner.y : p.y);
-            // Estimate travel distance from owner to current pos
-            const travelDist = Math.sqrt((target.x - (owner ? owner.x : p.x)) ** 2 + (target.y - (owner ? owner.y : p.y)) ** 2);
+            // Use stored spawn position for accurate range calculation
+            const spawnX = p.spawnX != null ? p.spawnX : (owner ? owner.x : p.x);
+            const spawnY = p.spawnY != null ? p.spawnY : (owner ? owner.y : p.y);
+            const travelDist = Math.sqrt((target.x - spawnX) ** 2 + (target.y - spawnY) ** 2);
             if (travelDist >= (p.traitRange || 6 * GAME_TILE)) {
               p.damage = Math.round(p.damage * 1.3);
             }
@@ -7022,10 +7121,11 @@ function cpuChairSwing(cpu, target, aimNx, aimNy) {
   cpu.eatTimer = 0;
 
   const isTable = Math.random() < (abil.tableChance || 0.05);
-  const range = (isTable ? (abil.tableRange || 2.5) : (abil.range || 1.8)) * GAME_TILE;
+  const range = (isTable ? (abil.tableRange || 3.2) : (abil.range || 2.5)) * GAME_TILE;
   let baseDmg = isTable ? (abil.tableDamage || 400) : (abil.damage || 250);
   if (cpu.supportBuff > 0) baseDmg *= 1.5;
   if (cpu.intimidated > 0) baseDmg *= 0.5;
+  const initialHitIds = [cpu.id];
   for (const t of gamePlayers) {
     if (t.id === cpu.id || !t.alive) continue;
     if (t.isSummon && t.summonOwner === cpu.id) continue;
@@ -7035,8 +7135,16 @@ function cpuChairSwing(cpu, target, aimNx, aimNy) {
     const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
     if (dot < 0) continue;
     dealDamage(cpu, t, baseDmg);
+    initialHitIds.push(t.id);
   }
-  cpu.effects.push({ type: isTable ? 'table-swing' : 'chair-swing', timer: 0.2, aimNx, aimNy });
+  cpu.effects.push({ type: isTable ? 'table-swing' : 'chair-swing', timer: 0.8, aimNx, aimNy });
+  if (!isTable) {
+    cpu.chairSwingTimer = 0.7;
+    cpu.chairSwingAimNx = aimNx; cpu.chairSwingAimNy = aimNy;
+    cpu.chairSwingRange = range;
+    cpu.chairSwingDmg = Math.round(baseDmg * 0.5);
+    cpu.chairSwingHitIds = initialHitIds.slice();
+  }
 }
 
 function cpuUseSpecialFilbus(cpu) {
@@ -7932,7 +8040,7 @@ function useAbility(key) {
     } else if (isFilbus) {
       // Filbus: Swing Chair (rare table chance)
       const isTable = Math.random() < (abil.tableChance || 0.05);
-      const range = (isTable ? (abil.tableRange || 2.5) : (abil.range || 1.8)) * GAME_TILE;
+      const range = (isTable ? (abil.tableRange || 3.2) : (abil.range || 2.5)) * GAME_TILE;
       let baseDmg = isTable ? (abil.tableDamage || 400) : (abil.damage || 250);
       if (lp.supportBuff > 0) baseDmg *= 1.5;
       if (lp.intimidated > 0) baseDmg *= 0.5;
@@ -7942,6 +8050,7 @@ function useAbility(key) {
       const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
       const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
       const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      const initialHitIds = [lp.id];
       for (const target of gamePlayers) {
         if (target.id === lp.id || !target.alive) continue;
         if (target.isSummon && target.summonOwner === lp.id) continue;
@@ -7951,12 +8060,21 @@ function useAbility(key) {
         const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
         if (dot < 0) continue;
         dealDamage(lp, target, baseDmg);
+        initialHitIds.push(target.id);
       }
       if (isTable) {
         combatLog.push({ text: '🪑 TABLE SWING! 400 dmg!', timer: 3, color: '#ff6600' });
-        lp.effects.push({ type: 'table-swing', timer: 0.3, aimNx, aimNy });
+        lp.effects.push({ type: 'table-swing', timer: 0.8, aimNx, aimNy });
       } else {
-        lp.effects.push({ type: 'chair-swing', timer: 0.2, aimNx, aimNy });
+        lp.effects.push({ type: 'chair-swing', timer: 0.8, aimNx, aimNy });
+        // Set linger zone (half damage, 0.7s window, only hits new targets)
+        if (!isTable) {
+          lp.chairSwingTimer = 0.7;
+          lp.chairSwingAimNx = aimNx; lp.chairSwingAimNy = aimNy;
+          lp.chairSwingRange = range;
+          lp.chairSwingDmg = Math.round(baseDmg * 0.5);
+          lp.chairSwingHitIds = initialHitIds.slice();
+        }
       }
     } else if (is1x) {
       // 1X1X1X1: Slash — melee + poison
@@ -8441,6 +8559,7 @@ function useAbility(key) {
         timer: 4, type: 'hitman-bullet',
         weaponKey: wKey, color: wDef.color || '#f5c842',
         traitRange: 6 * GAME_TILE, // range threshold for trait bonus
+        spawnX: lp.x, spawnY: lp.y,
       });
       if (typeof socket !== 'undefined' && socket.emit && !isHostAuthority) {
         socket.emit('projectile-spawn', { projectiles: [{ x: lp.x, y: lp.y, vx: aimNx * bulletSpeed, vy: aimNy * bulletSpeed, timer: 4, type: 'hitman-bullet', color: wDef.color || '#f5c842' }] });
@@ -10504,14 +10623,15 @@ function useAbility(key) {
       lp.effects.push({ type: 'igloo-aim', timer: aimTime + 2 });
       combatLog.push({ text: '🦌 IGLOO! Aim where to build!', timer: 3, color: '#87ceeb' });
     } else if (isHitman) {
-      // Hitman SPACE: Locking In — all 3 weapons, no reload, +50% fire rate; stun 5s on end
+      // Hitman SPACE: Locking In — all 3 weapons auto-fire simultaneously toward mouse for 20s
       lp.specialUsed = true;
       lp.hitmanLockingIn = true;
-      lp.hitmanLockingInTimer = 10;
+      lp.hitmanLockingInTimer = 20;
       lp.hitmanReloading = false;
       lp.hitmanReloadTimer = 0;
+      lp.hitmanLockingFireTimer = 0; // immediate first fire
       lp.effects.push({ type: 'hitman-lockin', timer: 99 });
-      combatLog.push({ text: '🔒 LOCKING IN! All weapons equipped, no reloading!', timer: 4, color: '#ff4400' });
+      combatLog.push({ text: '🔒 LOCKING IN! All weapons auto-firing for 20s!', timer: 4, color: '#ff4400' });
     } else if (isNoli) {
       // Noli SPACE: Hallucinations — clone the closest fighter as CPU ally
       lp.specialUsed = true;
@@ -17078,7 +17198,7 @@ function renderGame() {
     // Filbus: Chair swing arc effect
     const chairFx = p.effects.find((fx) => fx.type === 'chair-swing');
     if (chairFx) {
-      const swLen = GAME_TILE * 1.5;
+      const swLen = GAME_TILE * 2.2;
       gameCtx.strokeStyle = '#a0522d';
       gameCtx.lineWidth = 4;
       gameCtx.beginPath();
@@ -18718,21 +18838,24 @@ function renderGame() {
     }
   }
 
-  // Unstable Eye overlay: heavy blur + green tint (only visible to the 1x player, overridden by Boiled One)
+  // Unstable Eye overlay: pixelation (low-res redraw) + green tint (only visible to the 1x player, overridden by Boiled One)
   if (localPlayer && localPlayer.unstableEyeTimer > 0 && localPlayer.fighter.id === 'onexonexonex' && !anyBoiledOne) {
-    // Heavy blur pass - redraw canvas onto itself with blur filter to smear colours together
+    // Pixelation pass — draw the canvas at 1/8 resolution then scale back up without smoothing
+    const pixelBlock = 8;
+    const pw = Math.ceil(cw / pixelBlock);
+    const ph = Math.ceil(ch / pixelBlock);
+    if (!gameLoop._unstablePixelCanvas) {
+      gameLoop._unstablePixelCanvas = document.createElement('canvas');
+    }
+    const pCanvas = gameLoop._unstablePixelCanvas;
+    if (pCanvas.width !== pw) pCanvas.width = pw;
+    if (pCanvas.height !== ph) pCanvas.height = ph;
+    const pCtx = pCanvas.getContext('2d');
+    pCtx.imageSmoothingEnabled = false;
+    pCtx.drawImage(gameCanvas, 0, 0, pw, ph);
     gameCtx.save();
-    gameCtx.filter = 'blur(14px)';
-    gameCtx.drawImage(gameCanvas, 0, 0);
-    gameCtx.filter = 'none';
-    gameCtx.restore();
-    // Second lighter blur pass for extra smear
-    gameCtx.save();
-    gameCtx.filter = 'blur(8px)';
-    gameCtx.globalAlpha = 0.6;
-    gameCtx.drawImage(gameCanvas, 0, 0);
-    gameCtx.filter = 'none';
-    gameCtx.globalAlpha = 1.0;
+    gameCtx.imageSmoothingEnabled = false;
+    gameCtx.drawImage(pCanvas, 0, 0, cw, ch);
     gameCtx.restore();
     // Green colour wash to further obscure
     gameCtx.fillStyle = 'rgba(0, 50, 10, 0.25)';
@@ -19458,6 +19581,12 @@ function buildGameStateSnapshot() {
     craftTimer: p.craftTimer || 0,
     eatTimer: p.eatTimer || 0,
     eatHealPool: p.eatHealPool || 0,
+    // Filbus chair linger
+    chairSwingTimer: p.chairSwingTimer || 0,
+    chairSwingAimNx: p.chairSwingAimNx || 0,
+    chairSwingAimNy: p.chairSwingAimNy || 0,
+    chairSwingRange: p.chairSwingRange || 0,
+    chairSwingDmg: p.chairSwingDmg || 0,
     summonId: p.summonId || null,
     // Cricket
     gearUpTimer: p.gearUpTimer || 0,
@@ -19676,6 +19805,7 @@ function buildGameStateSnapshot() {
     hitmanBackupIds: p.hitmanBackupIds || [],
     hitmanLockingIn: p.hitmanLockingIn || false,
     hitmanLockingInTimer: p.hitmanLockingInTimer || 0,
+    hitmanLockingFireTimer: p.hitmanLockingFireTimer || 0,
     // fighter id so client knows what it is
     fighterId: p.fighter ? p.fighter.id : null,
   }));
@@ -19818,6 +19948,11 @@ function onRemoteGameState(snapshot) {
     p.craftTimer = sp.craftTimer || 0;
     p.eatTimer = sp.eatTimer || 0;
     p.eatHealPool = sp.eatHealPool || 0;
+    p.chairSwingTimer = sp.chairSwingTimer || 0;
+    p.chairSwingAimNx = sp.chairSwingAimNx || 0;
+    p.chairSwingAimNy = sp.chairSwingAimNy || 0;
+    p.chairSwingRange = sp.chairSwingRange || 0;
+    p.chairSwingDmg = sp.chairSwingDmg || 0;
     p.summonId = sp.summonId || null;
     p.gearUpTimer = sp.gearUpTimer || 0;
     p.driveReflectTimer = sp.driveReflectTimer || 0;
@@ -20042,6 +20177,7 @@ function onRemoteGameState(snapshot) {
     if (sp.hitmanBackupIds != null) p.hitmanBackupIds = sp.hitmanBackupIds;
     if (sp.hitmanLockingIn != null) p.hitmanLockingIn = sp.hitmanLockingIn;
     if (sp.hitmanLockingInTimer != null) p.hitmanLockingInTimer = sp.hitmanLockingInTimer;
+    if (sp.hitmanLockingFireTimer != null) p.hitmanLockingFireTimer = sp.hitmanLockingFireTimer;
     if (sp.effects) p.effects = sp.effects;
   }
 
