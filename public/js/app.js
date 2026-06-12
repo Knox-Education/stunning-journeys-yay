@@ -192,6 +192,10 @@ $('#btn-sp-fight-hard').addEventListener('click', () => {
   flowTarget = 'fight-hard';
   showScreen('screen-name');
 });
+$('#btn-sp-fight-extreme').addEventListener('click', () => {
+  flowTarget = 'fight-extreme';
+  showScreen('screen-name');
+});
 $('#btn-sp-training').addEventListener('click', () => {
   flowTarget = 'training';
   showScreen('screen-name');
@@ -1349,7 +1353,7 @@ function populateFighterScreen() {
     // Hide explicitly hidden fighters
     if (f.hidden) return;
     const locked = !isFighterUnlocked(fid);
-    const mpOnly = f.multiplayerOnly && (flowTarget === 'fight' || flowTarget === 'fight-hard' || flowTarget === 'training');
+    const mpOnly = f.multiplayerOnly && (flowTarget === 'fight' || flowTarget === 'fight-hard' || flowTarget === 'fight-extreme' || flowTarget === 'training');
     const btn = document.createElement('button');
     btn.className = 'fighter-select-btn' + (fid === selectedFighterId ? ' active' : '') + ((locked || mpOnly) ? ' locked' : '');
 
@@ -1446,10 +1450,10 @@ $('#btn-select-fighter').addEventListener('click', () => {
     const randomMap = Math.floor(Math.random() * MAPS.length);
     const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
     enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }], 'training');
-  } else if (flowTarget === 'fight' || flowTarget === 'fight-hard') {
+  } else if (flowTarget === 'fight' || flowTarget === 'fight-hard' || flowTarget === 'fight-extreme') {
     const randomMap = Math.floor(Math.random() * MAPS.length);
     const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
-    enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }], flowTarget === 'fight-hard' ? 'fight-hard' : 'fight');
+    enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }], flowTarget);
   }
 });
 
@@ -2468,7 +2472,7 @@ $('#btn-play-again').addEventListener('click', () => {
   const btn = $('#btn-play-again');
   const timerEl = $('#play-again-timer');
 
-  const isSP = (_lastGameMode === 'fight' || _lastGameMode === 'fight-hard' || _lastGameMode === 'training');
+  const isSP = (_lastGameMode === 'fight' || _lastGameMode === 'fight-hard' || _lastGameMode === 'fight-extreme' || _lastGameMode === 'training');
 
   if (isSP) {
     // Singleplayer: just restart immediately with same settings
