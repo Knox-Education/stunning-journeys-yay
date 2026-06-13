@@ -19146,7 +19146,7 @@ function renderGame() {
   // Unstable Eye overlay: pixelation (low-res redraw) + green tint (only visible to the 1x player, overridden by Boiled One)
   if (localPlayer && localPlayer.unstableEyeTimer > 0 && localPlayer.fighter.id === 'onexonexonex' && !anyBoiledOne) {
     // Pixelation pass — draw the canvas at 1/8 resolution then scale back up without smoothing
-    const pixelBlock = 8;
+    const pixelBlock = 22;
     const pw = Math.ceil(cw / pixelBlock);
     const ph = Math.ceil(ch / pixelBlock);
     if (!gameLoop._unstablePixelCanvas) {

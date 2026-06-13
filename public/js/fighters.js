@@ -1431,7 +1431,7 @@ const FIGHTERS = {
       {
         key: 'E',
         name: 'Party Friend',
-        description: 'Spawns Kel (ranged, 200 dmg), Aubrey (melee, 200 dmg), or Hero (melee, 100 dmg). All follow Omori. 40s CD.',
+        description: 'Spawns Kel (ranged, 200 dmg), Aubrey (melee, 200 dmg), or Hero (Healer, meele does 100 dmg). All follow Omori. 40s CD.',
         damage: 0,
         cooldown: 40,
         kelHp: 1000,
@@ -1452,7 +1452,7 @@ const FIGHTERS = {
         name: 'Party Skill',
         description: 'Requires a nearby party friend. Kel: +50% ATK 15s. Aubrey: 10% chance for 600 dmg hits for 20s. Hero: heals 700 HP over 1s. 40s CD.',
         damage: 0,
-        cooldown: 40,
+        cooldown: 20,
         kelBuffDuration: 15,
         kelBuffMult: 1.5,
         aubreyBuffDuration: 20,
