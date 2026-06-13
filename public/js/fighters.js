@@ -1502,6 +1502,67 @@ const FIGHTERS = {
     trait: { name: 'Plot Armour', description: 'First death: revive with 1 HP + 5s immunity. Survive 30s to recharge. Die within 30s = dead for good.' },
   },
 
+  gimkit: {
+    id: 'gimkit',
+    name: 'Gimkit',
+    color: '#f5a623',
+    hp: 1100,
+    speed: 2.0,    // overridden by energy: slow=1.0, medium=2.0, fast=3.2
+    adminOnly: false,
+    abilities: [
+      {
+        // M1: Energy Bolt
+        name: 'Energy Bolt',
+        description: 'Shoot a large yellow knockback bolt (300 dmg). Knocks farther when target is on low HP. Costs 2 energy.',
+        bind: 'click',
+        damage: 300,
+        projectileSpeed: 22,
+        projectileRadius: 2.0,   // multiplier on normal chip radius
+        cooldown: 1.5,
+        energyCost: 2,
+        type: 'projectile',
+      },
+      {
+        // E: Fish
+        name: 'Fish',
+        description: 'While touching water, fish for a heal (100–1000 HP). Costs 5 energy.',
+        bind: 'e',
+        energyCost: 5,
+        minHeal: 100,
+        maxHeal: 1000,
+        cooldown: 0,
+        type: 'self',
+      },
+      {
+        // R: Jump
+        name: 'Jump',
+        description: 'Leap into the air for 2s. Invincible while airborne, move freely. Landing on an obstacle deals 200 dmg and pushes you off.',
+        bind: 'r',
+        duration: 2.0,
+        landingDamage: 200,
+        cooldown: 6,
+        type: 'self',
+      },
+      {
+        // T: Answer Question
+        name: 'Answer Question',
+        description: 'Answer a science question. Correct answer grants +10 energy. 6s cooldown.',
+        bind: 't',
+        cooldown: 6,
+        energyReward: 10,
+        type: 'self',
+      },
+      {
+        // F / Special: placeholders
+        name: '(Coming Soon)',
+        description: 'F move coming soon.',
+        bind: 'f',
+        cooldown: 999,
+        type: 'self',
+      },
+    ],
+    trait: { name: '(Coming Soon)', description: 'Trait coming soon.' },
+  },
   hitman: {
     id: 'hitman',
     name: 'Hitman',

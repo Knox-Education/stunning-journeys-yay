@@ -791,6 +791,13 @@ function createPlayerState(p, spawn, fighter) {
     hitmanLockingIn: false,       // Locking In active
     hitmanLockingInTimer: 0,      // seconds remaining for Locking In
     hitmanLockingFireTimer: 0,    // fire rate timer for locking in auto-fire
+    // Gimkit-specific state
+    gimkitEnergy: 10,
+    gimkitJumping: false,
+    gimkitJumpTimer: 0,
+    gimkitShadowX: 0,
+    gimkitShadowY: 0,
+    gimkitQuestionActive: false,
   };
 }
 
@@ -1782,6 +1789,20 @@ function updateGame(dt) {
       if (p.dragonBreathActive && p.dragonBreathWindup > 0) {
         p.dragonBreathWindup -= wallDt;
         if (p.dragonBreathWindup < 0) p.dragonBreathWindup = 0;
+      }
+      // Gimkit: jump timer
+      if (p.fighter && p.fighter.id === 'gimkit' && p.gimkitJumping) {
+        p.gimkitJumpTimer -= wallDt;
+        if (p.gimkitJumpTimer <= 0) {
+          p.gimkitJumping = false; p.gimkitJumpTimer = 0;
+          const _gR = Math.floor(p.y / GAME_TILE), _gC = Math.floor(p.x / GAME_TILE);
+          const _gTile = (_gR>=0&&_gR<gameMap.rows&&_gC>=0&&_gC<gameMap.cols)?gameMap.tiles[_gR][_gC]:TILE.ROCK;
+          if (_gTile === TILE.ROCK || isStumpTile(_gC, _gR)) {
+            if (p.gimkitShadowX) { p.x = p.gimkitShadowX; p.y = p.gimkitShadowY; }
+            dealDamage(null, p, 200);
+            if (p.id === localPlayerId) combatLog.push({ text: 'Landed on obstacle! 200 dmg!', timer: 3, color: '#ff4444' });
+          }
+        }
       }
       // Fly timer
       if (p.dragonFlying) {
@@ -3010,6 +3031,13 @@ function updateMovement(dt) {
   }
 
   let speed = localPlayer.fighter.speed;
+  // Gimkit: energy-based speed override
+  if (localPlayer.fighter && localPlayer.fighter.id === 'gimkit') {
+    const _gEn = localPlayer.gimkitEnergy || 0;
+    if (_gEn >= 10) speed = 3.2;
+    else if (_gEn >= 3) speed = 2.0;
+    else speed = 1.0;
+  }
   // Unstable: use random speed
   if (localPlayer.unstableOriginalFighter && localPlayer.unstableRandomSpeed) speed = localPlayer.unstableRandomSpeed;  // Unstable Eye: speed boost (as fast as Deer)
   if (localPlayer.unstableEyeTimer > 0) speed *= 3.0;
@@ -3159,10 +3187,14 @@ function updateMovement(dt) {
   const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
 
   const prevX = localPlayer.x, prevY = localPlayer.y;
-  if (localPlayer.dragonFlying) {
-    // Flying: ignore obstacles but stay in map bounds
+  if (localPlayer.dragonFlying || localPlayer.gimkitJumping) {
+    // Flying/Jumping: ignore obstacles but stay in map bounds
     const nxClamped = Math.max(radius, Math.min(newX, gameMap.cols * GAME_TILE - radius));
     const nyClamped = Math.max(radius, Math.min(newY, gameMap.rows * GAME_TILE - radius));
+    if (localPlayer.gimkitJumping && canMoveTo(nxClamped, nyClamped, radius)) {
+      localPlayer.gimkitShadowX = nxClamped;
+      localPlayer.gimkitShadowY = nyClamped;
+    }
     localPlayer.x = nxClamped;
     localPlayer.y = nyClamped;
   } else {
@@ -3503,6 +3535,45 @@ function _updateExtremeEvents(dt) {
 }
 
 
+const _GIMKIT_QUESTIONS = [{"q": "What planet is closest to the Sun?", "a": ["Mars", "Venus", "Earth", "Mercury"], "correct": 3}, {"q": "How many bones are in the adult human body?", "a": ["220", "198", "206", "213"], "correct": 2}, {"q": "What gas do plants absorb from the air?", "a": ["Oxygen", "Hydrogen", "Nitrogen", "Carbon dioxide"], "correct": 3}, {"q": "What is the chemical symbol for water?", "a": ["CO2", "NaCl", "H2O", "O2"], "correct": 2}, {"q": "What force keeps planets in orbit around the Sun?", "a": ["Magnetism", "Friction", "Electricity", "Gravity"], "correct": 3}, {"q": "Which layer of Earth is the outermost?", "a": ["Mantle", "Atmosphere", "Core", "Crust"], "correct": 3}, {"q": "How many chambers does the human heart have?", "a": ["3", "2", "4", "6"], "correct": 2}, {"q": "What is the speed of light (approx)?", "a": ["150,000 km/s", "1,000 km/s", "300,000 km/s", "500,000 km/s"], "correct": 2}, {"q": "What organ produces insulin?", "a": ["Pancreas", "Kidney", "Liver", "Stomach"], "correct": 0}, {"q": "What is the powerhouse of the cell?", "a": ["Ribosome", "Cell wall", "Mitochondria", "Nucleus"], "correct": 2}, {"q": "Which gas makes up most of Earth's atmosphere?", "a": ["Carbon dioxide", "Oxygen", "Argon", "Nitrogen"], "correct": 3}, {"q": "How many legs does an insect have?", "a": ["10", "4", "8", "6"], "correct": 3}, {"q": "What is the freezing point of water in Celsius?", "a": ["100", "-10", "0", "32"], "correct": 2}, {"q": "Which planet has the most moons?", "a": ["Uranus", "Neptune", "Jupiter", "Saturn"], "correct": 3}, {"q": "What is the smallest planet in our solar system?", "a": ["Mercury", "Mars", "Pluto", "Venus"], "correct": 0}, {"q": "What is H2O?", "a": ["Oxygen", "Water", "Salt", "Hydrogen gas"], "correct": 1}, {"q": "What part of the eye controls how much light enters?", "a": ["Cornea", "Lens", "Retina", "Pupil"], "correct": 3}, {"q": "Which vitamin does sunlight provide?", "a": ["Vitamin C", "Vitamin B", "Vitamin D", "Vitamin A"], "correct": 2}, {"q": "How many teeth does an adult human typically have?", "a": ["24", "36", "28", "32"], "correct": 3}, {"q": "What is the chemical symbol for gold?", "a": ["Au", "Ag", "Fe", "Cu"], "correct": 0}];
+
+function _showGimkitQuestion(player, energyReward) {
+  if (player.gimkitQuestionActive) return;
+  player.gimkitQuestionActive = true;
+  const q = _GIMKIT_QUESTIONS[Math.floor(Math.random() * _GIMKIT_QUESTIONS.length)];
+  // Build overlay
+  const ov = document.createElement('div');
+  ov.id = 'gimkit-question-overlay';
+  ov.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);'
+    + 'background:rgba(20,20,30,0.97);border:3px solid #f5a623;border-radius:12px;'
+    + 'padding:24px 32px;z-index:9999;min-width:340px;max-width:480px;text-align:center;color:#fff;';
+  const qEl = document.createElement('div');
+  qEl.style.cssText = 'font-size:18px;font-weight:bold;margin-bottom:18px;color:#f5e642;';
+  qEl.textContent = q.q;
+  ov.appendChild(qEl);
+  q.a.forEach((ans, idx) => {
+    const btn = document.createElement('button');
+    btn.textContent = ans;
+    btn.style.cssText = 'display:block;width:100%;margin:6px 0;padding:10px;font-size:15px;'
+      + 'background:#2c3e50;color:#fff;border:2px solid #555;border-radius:8px;cursor:pointer;';
+    btn.onmouseenter = () => btn.style.background = '#3d5166';
+    btn.onmouseleave = () => btn.style.background = '#2c3e50';
+    btn.onclick = () => {
+      const correct = idx === q.correct;
+      if (correct) {
+        player.gimkitEnergy = Math.min(99, (player.gimkitEnergy || 0) + energyReward);
+        combatLog.push({ text: 'Correct! +' + energyReward + ' energy', timer: 3, color: '#2ecc71' });
+      } else {
+        combatLog.push({ text: 'Wrong! The answer was: ' + q.a[q.correct], timer: 4, color: '#e74c3c' });
+      }
+      player.gimkitQuestionActive = false;
+      document.body.removeChild(ov);
+    };
+    ov.appendChild(btn);
+  });
+  document.body.appendChild(ov);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // PROJECTILES
 // ═══════════════════════════════════════════════════════════════
@@ -3577,6 +3648,7 @@ function updateProjectiles(dt) {
         const hitRadius = p.type === 'shockwave' ? radius + 12
                         : p.dndFireball ? (p.aoeRadius || 1.5 * GAME_TILE)
                         : isWarshipProj ? (p.radius || GAME_TILE * 0.6) + radius
+                        : p.type === 'gimkit-bolt' ? (p.boltRadius || 2.0) * radius + radius
                         : radius + 4;
         if (dist < hitRadius) {
           // D&D Fireball: AoE explosion — damage ALL targets in radius, then remove
@@ -3665,6 +3737,21 @@ function updateProjectiles(dt) {
             if (!p.hitTargets) p.hitTargets = new Set();
             p.hitTargets.add(target.id);
             continue; // don't splice — shockwave passes through
+          }
+          // Gimkit bolt: knockback (stronger at low HP)
+          if (p.type === 'gimkit-bolt') {
+            const _hf = target.hp / (target.maxHp || target.hp || 1);
+            const _kb = (3 + (1 - _hf) * 5) * GAME_TILE;
+            const _bdx = target.x - p.x, _bdy = target.y - p.y;
+            const _bd = Math.sqrt(_bdx*_bdx + _bdy*_bdy) || 1;
+            const _bnx = _bdx/_bd, _bny = _bdy/_bd;
+            const _br = GAME_TILE * PLAYER_RADIUS_RATIO;
+            for (let _s = 10; _s >= 1; _s--) {
+              const _tx = target.x + _bnx*_kb*(_s/10), _ty = target.y + _bny*_kb*(_s/10);
+              if (canMoveTo(_tx, _ty, _br)) { target.x = _tx; target.y = _ty; break; }
+            }
+            if (typeof socket !== 'undefined' && socket.emit && !isHostAuthority)
+              socket.emit('player-knockback', { targetId: target.id, x: target.x, y: target.y });
           }
           // D&D Blur bolt: apply blur debuff to target
           if (p.dndBlurDuration && p.dndBlurDuration > 0) {
@@ -8324,6 +8411,7 @@ function useAbility(key) {
   const isHeavyRope = fighter.id === 'heavyrope';
   const isOmori = fighter.id === 'omori';
   const isHitman = fighter.id === 'hitman';
+  const isGimkit = fighter.id === 'gimkit';
 
   // Filbus: channeling interrupts
   if (isFilbus && (key !== 'E' && key !== 'R')) {
@@ -8903,6 +8991,25 @@ function useAbility(key) {
         socket.emit('projectile-spawn', { projectiles: [{ x: lp.x, y: lp.y, vx: aimNx * bulletSpeed, vy: aimNy * bulletSpeed, timer: 4, type: 'hitman-bullet', color: wDef.color || '#f5c842' }] });
       }
       lp.effects.push({ type: 'hitman-fire', timer: 0.15, aimNx, aimNy, wKey });
+    } else if (isGimkit) {
+      // Gimkit M1: Energy Bolt
+      const eCost = abil.energyCost || 2;
+      if ((lp.gimkitEnergy || 0) < eCost) {
+        combatLog.push({ text: 'Not enough energy! (need ' + eCost + ')', timer: 2, color: '#f5a623' });
+        lp.cdM1 = 0; return;
+      }
+      lp.gimkitEnergy = Math.max(0, (lp.gimkitEnergy || 0) - eCost);
+      lp.cdM1 = abil.cooldown || 1.5;
+      const _gcw = gameCanvas.width, _gch = gameCanvas.height;
+      const _gcx = lp.x - _gcw / 2, _gcy = lp.y - _gch / 2;
+      const _gax = mouseX + _gcx - lp.x, _gay = mouseY + _gcy - lp.y;
+      const _gad = Math.sqrt(_gax*_gax + _gay*_gay) || 1;
+      const _gnx = _gax/_gad, _gny = _gay/_gad;
+      const _bspd = (abil.projectileSpeed || 22) * GAME_TILE / 10;
+      projectiles.push({ x: lp.x, y: lp.y, vx: _gnx*_bspd, vy: _gny*_bspd,
+        ownerId: lp.id, damage: abil.damage || 300, timer: 1.5,
+        type: 'gimkit-bolt', color: '#f5e642', boltRadius: abil.projectileRadius || 2.0 });
+      lp.effects.push({ type: 'gimkit-bolt', timer: 0.2 });
     } else {
       // Fighter: Sword (original M1)
       const range = abil.range * GAME_TILE;
@@ -9473,6 +9580,33 @@ function useAbility(key) {
       lp.hitmanSenseTimer = abil.duration || 10;
       lp.effects.push({ type: 'hitman-sense', timer: abil.duration || 10 });
       combatLog.push({ text: '👁 Heightened Senses! All fighters revealed for ' + (abil.duration || 10) + 's!', timer: 3, color: '#60cfff' });
+    } else if (isGimkit) {
+      // Gimkit E: Fish — near water, heal 100-1000 hp, cost 5 energy
+      const fishCost = abil.energyCost || 5;
+      if ((lp.gimkitEnergy || 0) < fishCost) {
+        combatLog.push({ text: 'Not enough energy to fish! (need ' + fishCost + ')', timer: 2, color: '#f5a623' });
+        lp.cdE = 0; return;
+      }
+      // Check touching water (within 1 tile)
+      const _fR = Math.floor(lp.y / GAME_TILE), _fC = Math.floor(lp.x / GAME_TILE);
+      let _nearWater = false;
+      for (let dr = -1; dr <= 1 && !_nearWater; dr++) {
+        for (let dc = -1; dc <= 1 && !_nearWater; dc++) {
+          const _wR = _fR + dr, _wC = _fC + dc;
+          if (_wR >= 0 && _wR < gameMap.rows && _wC >= 0 && _wC < gameMap.cols
+              && gameMap.tiles[_wR][_wC] === TILE.WATER) _nearWater = true;
+        }
+      }
+      if (!_nearWater) {
+        combatLog.push({ text: 'You need to be near water to fish!', timer: 2, color: '#3498db' });
+        lp.cdE = 0; return;
+      }
+      lp.gimkitEnergy = Math.max(0, (lp.gimkitEnergy || 0) - fishCost);
+      lp.cdE = 0; // no cooldown
+      const _fishHeal = (abil.minHeal || 100) + Math.floor(Math.random() * ((abil.maxHeal || 1000) - (abil.minHeal || 100) + 1));
+      lp.hp = Math.min(lp.maxHp, lp.hp + _fishHeal);
+      lp.effects.push({ type: 'heal', timer: 1.5 });
+      combatLog.push({ text: 'Caught a fish! +' + _fishHeal + ' HP', timer: 3, color: '#3498db' });
     } else {
       // Fighter: Buff — damage boost + slow nearby enemies
       lp.supportBuff = abil.duration;
@@ -10002,6 +10136,16 @@ function useAbility(key) {
         combatLog.push({ text: '🪢 Rope Grip released.', timer: 2, color: '#8b4513' });
         lp.effects.push({ type: 'rope-grip-off', timer: 0.5 });
       }
+    } else if (isGimkit) {
+      // Gimkit R: Jump — airborne for 2s, invincible, free movement
+      if (lp.gimkitJumping) { lp.cdR = 0; return; } // already jumping
+      lp.gimkitJumping = true;
+      lp.gimkitJumpTimer = abil.duration || 2.0;
+      lp.gimkitShadowX = lp.x;
+      lp.gimkitShadowY = lp.y;
+      lp.cdR = abil.cooldown || 6;
+      lp.effects.push({ type: 'gimkit-jump', timer: (abil.duration || 2.0) + 0.5 });
+      combatLog.push({ text: 'Jump! Invincible for 2s!', timer: 2, color: '#f5a623' });
     } else {
       const range = abil.range * GAME_TILE;
       let baseDmgR = abil.damage;
@@ -10045,7 +10189,11 @@ function useAbility(key) {
     }
     const abil = fighter.abilities[3];
 
-    if (isPoker) {
+    if (isGimkit) {
+      // Gimkit T: Answer a science question
+      lp.cdT = abil.cooldown || 6;
+      _showGimkitQuestion(lp, abil.energyReward || 10);
+    } else if (isPoker) {
       lp.cdT = abil.cooldown;
       // Chip Change: randomize M1 damage for 30 seconds
       const options = [50, 100, 200, 300, 400];
@@ -12454,6 +12602,8 @@ function _emitDeathAndQueueRespawn(target, attacker) {
 
 function dealDamage(attacker, target, amount, viaSummon, allowFF) {
   if (!target.alive) return;
+  // Gimkit: invincible while jumping
+  if (target.gimkitJumping) return;
   // Team friendly fire prevention: same-team players/summons can't hurt each other
   if (!allowFF && attacker && attacker !== target && gameMode === 'teams') {
     const attackerTeam = attacker.isSummon
@@ -16642,6 +16792,64 @@ function renderGame() {
         gameCtx.arc(gsx, gsy, 4, 0, Math.PI * 2);
         gameCtx.fill();
       }
+    } else if (p.fighter && p.fighter.id === 'gimkit') {
+      // ── Gimkit: plain circle with two black oval eyes ──
+      // Shadow if jumping
+      if (p.gimkitJumping) {
+        const shadowX = (p.gimkitShadowX || p.x) - camX;
+        const shadowY = (p.gimkitShadowY || p.y) - camY;
+        gameCtx.fillStyle = 'rgba(0,0,0,0.3)';
+        gameCtx.beginPath();
+        gameCtx.ellipse(shadowX, shadowY + radius * 0.5, radius * 0.9, radius * 0.35, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Body
+      gameCtx.fillStyle = isDying ? '#555' : (p.color || '#f5a623');
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Outline
+      gameCtx.strokeStyle = isDying ? '#333' : '#e8890a';
+      gameCtx.lineWidth = 2;
+      gameCtx.stroke();
+      // Two black oval eyes
+      if (!isDying) {
+        gameCtx.fillStyle = '#000';
+        // Left eye
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx - radius * 0.28, sy - radius * 0.15, radius * 0.18, radius * 0.28, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Right eye
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx + radius * 0.28, sy - radius * 0.15, radius * 0.18, radius * 0.28, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Jumping glow ring
+      if (p.gimkitJumping) {
+        gameCtx.strokeStyle = 'rgba(255, 230, 66, 0.8)';
+        gameCtx.lineWidth = 3;
+        gameCtx.setLineDash([5, 4]);
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.4, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.setLineDash([]);
+      }
+      // Energy indicator bar below name tag
+      if (p.id === localPlayerId) {
+        const eBarW = radius * 2.2;
+        const eBarH = 5;
+        const eBarX = sx - eBarW / 2;
+        const eBarY = sy + radius + 16;
+        gameCtx.fillStyle = '#333';
+        gameCtx.fillRect(eBarX, eBarY, eBarW, eBarH);
+        const eFrac = Math.min(1, (p.gimkitEnergy || 0) / 10);
+        gameCtx.fillStyle = (p.gimkitEnergy || 0) >= 10 ? '#2ecc71' : (p.gimkitEnergy || 0) >= 3 ? '#f5a623' : '#e74c3c';
+        gameCtx.fillRect(eBarX, eBarY, eBarW * eFrac, eBarH);
+        gameCtx.fillStyle = '#fff';
+        gameCtx.font = '7px monospace';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText('E: ' + Math.floor(p.gimkitEnergy || 0), sx, eBarY + eBarH + 7);
+      }
     } else {
       const swordLen = radius * 1.3;
       const swordAngle = -Math.PI / 4;
@@ -18967,6 +19175,25 @@ function renderGame() {
   }
 
   // Draw warship shells (larger orange projectiles)
+  // Gimkit bolt render
+  for (const proj of projectiles) {
+    if (proj.type !== 'gimkit-bolt') continue;
+    const _bx = proj.x - camX, _by = proj.y - camY;
+    if (_bx < -80 || _bx > cw + 80 || _by < -80 || _by > ch + 80) continue;
+    const _br = (proj.boltRadius || 2.0) * (GAME_TILE * PLAYER_RADIUS_RATIO * 0.5);
+    gameCtx.save();
+    gameCtx.fillStyle = '#f5e642';
+    gameCtx.strokeStyle = '#f5a623';
+    gameCtx.lineWidth = 2;
+    gameCtx.shadowColor = '#ffe000';
+    gameCtx.shadowBlur = 14;
+    gameCtx.beginPath();
+    gameCtx.arc(_bx, _by, _br, 0, Math.PI * 2);
+    gameCtx.fill();
+    gameCtx.stroke();
+    gameCtx.shadowBlur = 0;
+    gameCtx.restore();
+  }
   for (const proj of projectiles) {
     if (proj.type !== 'warship-shell') continue;
     const px2 = proj.x - camX, py2 = proj.y - camY;
@@ -20252,6 +20479,9 @@ function buildGameStateSnapshot() {
     hitmanLockingIn: p.hitmanLockingIn || false,
     hitmanLockingInTimer: p.hitmanLockingInTimer || 0,
     hitmanLockingFireTimer: p.hitmanLockingFireTimer || 0,
+    // Gimkit state
+    gimkitEnergy: p.gimkitEnergy || 0,
+    gimkitJumping: p.gimkitJumping || false,
     // fighter id so client knows what it is
     fighterId: p.fighter ? p.fighter.id : null,
   }));
@@ -20624,6 +20854,8 @@ function onRemoteGameState(snapshot) {
     if (sp.hitmanLockingIn != null) p.hitmanLockingIn = sp.hitmanLockingIn;
     if (sp.hitmanLockingInTimer != null) p.hitmanLockingInTimer = sp.hitmanLockingInTimer;
     if (sp.hitmanLockingFireTimer != null) p.hitmanLockingFireTimer = sp.hitmanLockingFireTimer;
+    if (sp.gimkitEnergy != null) p.gimkitEnergy = sp.gimkitEnergy;
+    if (sp.gimkitJumping != null) p.gimkitJumping = sp.gimkitJumping;
     if (sp.effects) p.effects = sp.effects;
   }
 
