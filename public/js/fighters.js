@@ -1827,7 +1827,7 @@ const ACHIEVEMENTS = {
   },
   omoriSpecialAch: {
     id: 'omoriSpecialAch',
-    name: 'The next one is sunny',
+    name: 'Nothing will infiltrate the White Space',
     description: 'Kill 3 opponents in a single game as Omori.',
     forFighter: 'omori',
     unlocksSpecial: true,
@@ -1844,7 +1844,7 @@ const ACHIEVEMENTS = {
   },
   pokerTeamAch: {
     id: 'pokerTeamAch',
-    name: 'House Is Always Fair (psst hide the evidence)',
+    name: 'House Is Always Fair *hides the evidence*',
     description: 'Win 3 team mode games as Poker.',
     forFighter: 'poker',
     teamAch: true,
@@ -1883,7 +1883,7 @@ const ACHIEVEMENTS = {
   },
   noliTeamAch: {
     id: 'noliTeamAch',
-    name: 'United Under The Spectre',
+    name: 'Reborn',
     description: 'Win 3 team mode games as Noli.',
     forFighter: 'noli',
     teamAch: true,
@@ -1963,13 +1963,13 @@ const ACHIEVEMENTS = {
   },
   hitmanAchUnlock: {
     id: 'hitmanAchUnlock',
-    name: 'First Contract',
+    name: 'A Contract',
     description: 'Win 3 multiplayer games.',
     unlocks: 'hitman',
   },
   hitmanAch: {
     id: 'hitmanAch',
-    name: 'Ghost Protocol',
+    name: 'sneak',
     description: 'Kill 2 players while concealed in a single multiplayer game as Hitman.',
     forFighter: 'hitman',
     unlocksMove4: true,
@@ -1977,7 +1977,7 @@ const ACHIEVEMENTS = {
   },
   hitmanTeamAch: {
     id: 'hitmanTeamAch',
-    name: 'Silent Partners',
+    name: 'Assassins',
     description: 'Win 3 team mode games as Hitman.',
     forFighter: 'hitman',
     teamAch: true,

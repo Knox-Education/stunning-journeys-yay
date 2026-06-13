@@ -66,9 +66,12 @@ let respawnTeam1Kills = 0;
 let respawnTeam2Kills = 0;
 
 // Extreme difficulty event system
-let _extremeEventTimer = 40;   // seconds until next event
+let _extremeEventTimer = 25;   // seconds until next event
 let _extremeEvents = [];        // active event entities: { type, ... }
 let _extremeGameTimer = 0;      // elapsed seconds in extreme mode
+
+// Training mode infantry button tiles
+let _trainingInfantryButtons = [];   // [{r, c, active, infantryIds:[]}]
 
 // Animation frame ID for cancellation
 let _gameLoopFrameId = null;
@@ -268,6 +271,26 @@ function startGame(mapIndex, players, myId, mode) {
       lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false,
     };
     gamePlayers.push(bot);
+
+    // Training infantry buttons: find 2 ground tiles near map center
+    _trainingInfantryButtons = [];
+    const _ibCenterR = Math.floor(gameMap.rows / 2);
+    const _ibCenterC = Math.floor(gameMap.cols / 2);
+    let _ibFound = 0;
+    for (let radius = 2; radius <= 8 && _ibFound < 2; radius++) {
+      for (let dr = -radius; dr <= radius && _ibFound < 2; dr++) {
+        for (let dc = -radius; dc <= radius && _ibFound < 2; dc++) {
+          if (Math.abs(dr) !== radius && Math.abs(dc) !== radius) continue;
+          const br = _ibCenterR + dr, bc = _ibCenterC + dc;
+          if (br < 0 || br >= gameMap.rows || bc < 0 || bc >= gameMap.cols) continue;
+          if (gameMap.tiles[br][bc] !== TILE.GROUND && gameMap.tiles[br][bc] !== TILE.GRASS) continue;
+          // don't overlap existing buttons
+          if (_trainingInfantryButtons.some(b => b.r === br && b.c === bc)) continue;
+          _trainingInfantryButtons.push({ r: br, c: bc, active: true, infantryIds: [] });
+          _ibFound++;
+        }
+      }
+    }
   } else if (gameMode === 'fight' || gameMode === 'fight-hard' || gameMode === 'fight-extreme') {
     // Fight: CPU opponents
     const allFighters = getAllFighterIds().filter(f => f !== 'moderator' && f !== 'dogtooth' && f !== 'explodingcat' && f !== 'unstable' && f !== 'omori');
@@ -371,7 +394,7 @@ function startGame(mapIndex, players, myId, mode) {
   buildHUD();
 
   // Extreme difficulty: init event system
-  _extremeEventTimer = 40;
+  _extremeEventTimer = 25;
   _extremeEvents = [];
   _extremeGameTimer = 0;
   _extremeGameTimer = 0;
@@ -2805,6 +2828,57 @@ function updateGame(dt) {
     }
   }
 
+  // ── Training infantry button tiles ─────────────────────────
+  if (gameMode === 'training' && localPlayer && localPlayer.alive && _trainingInfantryButtons.length > 0) {
+    const lpR = Math.floor(localPlayer.y / GAME_TILE);
+    const lpC = Math.floor(localPlayer.x / GAME_TILE);
+    for (const btn of _trainingInfantryButtons) {
+      if (!btn.active) {
+        // Re-activate if all spawned infantry are dead
+        btn.infantryIds = btn.infantryIds.filter(id => {
+          const inf = gamePlayers.find(p => p.id === id);
+          return inf && inf.alive;
+        });
+        if (btn.infantryIds.length === 0) btn.active = true;
+      }
+      if (btn.active && lpR === btn.r && lpC === btn.c) {
+        btn.active = false;
+        btn.infantryIds = [];
+        const napFighter = getFighter('napoleon');
+        const napAbil = napFighter && napFighter.abilities && napFighter.abilities[4];
+        for (let i = 0; i < 10; i++) {
+          const infId = 'training-infantry-' + btn.r + '-' + btn.c + '-' + i + '-' + Date.now();
+          const angle = (i / 10) * Math.PI * 2;
+          const dist = (2 + Math.random() * 2) * GAME_TILE;
+          const ix = localPlayer.x + Math.cos(angle) * dist;
+          const iy = localPlayer.y + Math.sin(angle) * dist;
+          const inf = createPlayerState(
+            { id: infId, name: 'Infantryman', color: '#2c3e50', fighterId: 'napoleon' },
+            { r: Math.floor(iy / GAME_TILE), c: Math.floor(ix / GAME_TILE) },
+            napFighter
+          );
+          inf.x = ix; inf.y = iy;
+          const infR2 = GAME_TILE * PLAYER_RADIUS_RATIO;
+          if (!canMoveTo(inf.x, inf.y, infR2)) { inf.x = localPlayer.x; inf.y = localPlayer.y; }
+          inf.hp = (napAbil && napAbil.infantryHp) || 50;
+          inf.maxHp = inf.hp;
+          inf.isSummon = true;
+          inf.summonOwner = localPlayer.id;
+          inf.summonType = 'napoleon-infantry';
+          inf.summonSpeed = (napAbil && napAbil.infantrySpeed) || 2.0;
+          inf.summonDamage = (napAbil && napAbil.damage) || 100;
+          inf.summonAttackCD = (napAbil && napAbil.infantryFireCD) || 1;
+          inf.summonAttackTimer = 0;
+          inf.summonProjectileSpeed = (napAbil && napAbil.infantryProjectileSpeed) || 38;
+          inf.summonProjectileRange = (napAbil && napAbil.infantryRange) || 0.8;
+          gamePlayers.push(inf);
+          btn.infantryIds.push(infId);
+        }
+        combatLog.push({ text: '⚔ Infantry spawned! Kill them all to reset the button.', timer: 4, color: '#f39c12' });
+      }
+    }
+  }
+
   // ── Apple Tree update ──────────────────────────────────────
   if (appleTree) {
     if (appleTree.alive) {
@@ -3320,17 +3394,7 @@ function _updateExtremeEvents(dt) {
       ev.fireTimer -= dt;
       if (ev.fireTimer <= 0) {
         ev.fireTimer = ev.fireRate;
-        let target = localPlayer;
-        const pdx = localPlayer.x - ev.x, pdy = localPlayer.y - ev.y;
-        if (Math.sqrt(pdx * pdx + pdy * pdy) > 20 * GAME_TILE) {
-          let bestDist = Infinity;
-          for (const p of gamePlayers) {
-            if (!p.alive || p.isSummon) continue;
-            const dx = p.x - ev.x, dy = p.y - ev.y;
-            const d = Math.sqrt(dx * dx + dy * dy);
-            if (d < bestDist) { bestDist = d; target = p; }
-          }
-        }
+        const target = localPlayer;
         if (target) {
           const dx = target.x - ev.x, dy = target.y - ev.y;
           const dist = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -3345,17 +3409,7 @@ function _updateExtremeEvents(dt) {
       }
 
     } else if (ev.type === 'giant') {
-      let target = localPlayer;
-      const pdx = localPlayer.x - ev.x, pdy = localPlayer.y - ev.y;
-      if (Math.sqrt(pdx * pdx + pdy * pdy) > 25 * GAME_TILE) {
-        let bestDist = Infinity;
-        for (const p of gamePlayers) {
-          if (!p.alive || p.isSummon) continue;
-          const dx = p.x - ev.x, dy = p.y - ev.y;
-          const d = Math.sqrt(dx * dx + dy * dy);
-          if (d < bestDist) { bestDist = d; target = p; }
-        }
-      }
+      const target = localPlayer;
       if (target && target.alive) {
         const dx = target.x - ev.x, dy = target.y - ev.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -11409,6 +11463,7 @@ function useAbility(key) {
       combatLog.push({ text: '⚡ Release Energy! All friends attack ' + closestEnemy.name + '!', timer: 4, color: '#6c5ce7' });
     } else if (isPyro) {
       // Pyromaniac SPACE: roar charge (1s) → map-wide fire rain
+      lp.specialUsed = true;
       lp.pyroRoarTimer = abil.roarDuration || 1;
       lp.pyroSpecialRoarCharging = true;
       lp.stunned = abil.roarDuration || 1; // locked in place during roar
@@ -13563,6 +13618,34 @@ function renderGame() {
       gameCtx.beginPath();
       gameCtx.ellipse(ax + 3, ay - ar - 3, 3, 1.5, 0.5, 0, Math.PI * 2);
       gameCtx.fill();
+    }
+  }
+
+  // ── Training infantry button tiles ─────────────────────────
+  if (gameMode === 'training' && _trainingInfantryButtons.length > 0) {
+    for (const btn of _trainingInfantryButtons) {
+      const bx = (btn.c + 0.5) * GAME_TILE - camX;
+      const by = (btn.r + 0.5) * GAME_TILE - camY;
+      if (bx < -GAME_TILE || bx > cw + GAME_TILE || by < -GAME_TILE || by > ch + GAME_TILE) continue;
+      const half = GAME_TILE * 0.42;
+      // Button base
+      gameCtx.fillStyle = btn.active ? '#c0a020' : '#555';
+      gameCtx.strokeStyle = btn.active ? '#ffe066' : '#888';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.roundRect(bx - half, by - half, half * 2, half * 2, 5);
+      gameCtx.fill();
+      gameCtx.stroke();
+      // Infantry symbol ⚔ (crossed swords via text)
+      gameCtx.fillStyle = btn.active ? '#fff' : '#aaa';
+      gameCtx.font = `bold ${Math.round(GAME_TILE * 0.5)}px sans-serif`;
+      gameCtx.textAlign = 'center';
+      gameCtx.textBaseline = 'middle';
+      gameCtx.fillText('⚔', bx, by);
+      // "×10" label below
+      gameCtx.fillStyle = btn.active ? '#ffe066' : '#888';
+      gameCtx.font = `bold ${Math.round(GAME_TILE * 0.28)}px sans-serif`;
+      gameCtx.fillText('×10', bx, by + half * 0.72);
     }
   }
 
