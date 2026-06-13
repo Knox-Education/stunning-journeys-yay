@@ -1512,6 +1512,7 @@ const FIGHTERS = {
     abilities: [
       {
         // M1: Energy Bolt
+        key: 'M1',
         name: 'Energy Bolt',
         description: 'Shoot a large yellow knockback bolt (300 dmg). Knocks farther when target is on low HP. Costs 2 energy.',
         bind: 'click',
@@ -1524,6 +1525,7 @@ const FIGHTERS = {
       },
       {
         // E: Fish
+        key: 'E',
         name: 'Fish',
         description: 'While touching water, fish for a heal (100–1000 HP). Costs 5 energy.',
         bind: 'e',
@@ -1535,9 +1537,11 @@ const FIGHTERS = {
       },
       {
         // R: Jump
+        key: 'R',
         name: 'Jump',
         description: 'Leap into the air for 2s. Invincible while airborne, move freely. Landing on an obstacle deals 200 dmg and pushes you off.',
         bind: 'r',
+        range: 0,
         duration: 2.0,
         landingDamage: 200,
         cooldown: 6,
@@ -1545,6 +1549,7 @@ const FIGHTERS = {
       },
       {
         // T: Answer Question
+        key: 'T',
         name: 'Answer Question',
         description: 'Answer a science question. Correct answer grants +10 energy. 6s cooldown.',
         bind: 't',
@@ -1553,15 +1558,27 @@ const FIGHTERS = {
         type: 'self',
       },
       {
-        // F / Special: placeholders
-        name: '(Coming Soon)',
-        description: 'F move coming soon.',
+        // SPACE: GIMPOCALYPSE (special)
+        key: 'SPACE',
+        name: 'GIMPOCALYPSE',
+        description: 'Summon a fortified base in the center. Teleport to it. Heal 40 hp/s inside. Zombies attack the fort.',
+        bind: ' ',
+        cooldown: 0,
+        type: 'special',
+      },
+      {
+        // F: Crowd Control
+        key: 'F',
+        name: 'Crowd Control',
+        description: 'Spend 40 energy to upgrade Energy Bolt. On hit, bolts explode for 150 area damage.',
         bind: 'f',
         cooldown: 999,
+        energyCost: 40,
+        maxUses: 1,
         type: 'self',
       },
     ],
-    trait: { name: '(Coming Soon)', description: 'Trait coming soon.' },
+    trait: { name: 'Learning', description: 'After being hit 3 times by the same opponent, auto-dodge the next hit from them.' },
   },
   hitman: {
     id: 'hitman',

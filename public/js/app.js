@@ -1321,6 +1321,32 @@ function drawFighterIcon(canvas, fighterId, customSize) {
     // Outer ring
     ctx.strokeStyle = '#f5c842'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(cx, cy, r * 0.95, 0, Math.PI * 2); ctx.stroke();
+  } else if (fighterId === 'gimkit') {
+    // Gimkit: orange circle with G letter and energy bolt
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Orange body circle
+    ctx.fillStyle = '#f5a623';
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.78, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#e8890a'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.78, 0, Math.PI * 2); ctx.stroke();
+    // Two black eyes
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.ellipse(cx - r * 0.22, cy - r * 0.1, r * 0.13, r * 0.2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx + r * 0.22, cy - r * 0.1, r * 0.13, r * 0.2, 0, 0, Math.PI * 2); ctx.fill();
+    // Yellow bolt below eyes
+    ctx.fillStyle = '#f5e642';
+    ctx.shadowColor = '#ffe000'; ctx.shadowBlur = 6;
+    const bx = cx, by = cy + r * 0.25, bh = r * 0.35, bw = r * 0.18;
+    ctx.beginPath();
+    ctx.moveTo(bx + bw, by - bh * 0.3);
+    ctx.lineTo(bx - bw * 0.2, by);
+    ctx.lineTo(bx + bw * 0.3, by);
+    ctx.lineTo(bx - bw, by + bh * 0.3);
+    ctx.closePath(); ctx.fill();
+    ctx.shadowBlur = 0;
+    // Outer ring
+    ctx.strokeStyle = '#f5a623'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.95, 0, Math.PI * 2); ctx.stroke();
   } else {
     // Fighter: sword icon
     ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();

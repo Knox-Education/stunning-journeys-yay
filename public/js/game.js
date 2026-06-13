@@ -95,6 +95,9 @@ let _lastDealDamageWasM1 = false;
 const CPU_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Ghost', 'Havoc'];
 const CPU_COLORS = ['#e67e22', '#1abc9c', '#9b59b6', '#e74c3c', '#3498db', '#f1c40f'];
 
+// Gimkit fort state (GIMPOCALYPSE special)
+let _gimkitFort = null; // {active, x, y, radius, lives, zombies, zombieSpawnTimer, healTimer, flagAngle}
+
 // Special threshold: deal 1200 damage to unlock your special
 const SPECIAL_DAMAGE_THRESHOLD = 1200;
 function getSpecialThreshold(p) {
@@ -293,8 +296,10 @@ function startGame(mapIndex, players, myId, mode) {
     }
   } else if (gameMode === 'fight' || gameMode === 'fight-hard' || gameMode === 'fight-extreme') {
     // Fight: CPU opponents
-    const allFighters = getAllFighterIds().filter(f => f !== 'moderator' && f !== 'dogtooth' && f !== 'explodingcat' && f !== 'unstable' && f !== 'omori');
-    const difficulties = (gameMode === 'fight-hard' || gameMode === 'fight-extreme')
+    const allFighters = getAllFighterIds().filter(f => f !== 'moderator' && f !== 'dogtooth' && f !== 'explodingcat' && f !== 'unstable' && f !== 'omori' && f !== 'gimkit' && f !== 'hitman');
+    const difficulties = (gameMode === 'fight-extreme')
+      ? ['expert','expert','expert','expert','expert','expert','expert','expert','expert']
+      : (gameMode === 'fight-hard')
       ? ['expert', 'expert', 'expert', 'expert', 'expert', 'expert']
       : ['easy', 'medium', 'hard', 'hard'];
     const shuffledNames = CPU_NAMES.slice().sort(() => Math.random() - 0.5);
@@ -466,6 +471,7 @@ function cleanupGame() {
   deathOverlayTimer = 0;
   diedInOtherWorld = false;
   appleTree = null;
+  _gimkitFort = null;
   window._spikeEntities = [];
   _extremeEvents = [];
 
@@ -798,6 +804,9 @@ function createPlayerState(p, spawn, fighter) {
     gimkitShadowX: 0,
     gimkitShadowY: 0,
     gimkitQuestionActive: false,
+    gimkitCrowdControl: false,    // Crowd Control F: bolts explode
+    gimkitHitCounts: {},          // trait: hit counts by attackerId
+    gimkitDodgeTargetId: null,    // trait: dodge next hit from this id
   };
 }
 
@@ -892,8 +901,14 @@ function gameLoop(now) {
   const dt = Math.min((now - lastTime) / 1000, 0.1); // delta in seconds, capped
   lastTime = now;
 
-  updateGame(dt);
-  renderGame();
+  try { updateGame(dt); } catch(e) {
+    if (!window._gameLoopCrashReported) {
+      window._gameLoopCrashReported = true;
+      console.error('updateGame crash:', e);
+    }
+    const _ec = gameCanvas; if (_ec) { const _ex = _ec.getContext('2d'); _ex.fillStyle='rgba(0,0,0,0.7)'; _ex.fillRect(0,0,_ec.width,80); _ex.fillStyle='#e74c3c'; _ex.font='bold 14px monospace'; _ex.textAlign='center'; _ex.fillText('Game error: '+e.message, _ec.width/2, 40); }
+  }
+  try { renderGame(); } catch(e) { /* suppress render errors */ }
 
   // Check win condition: last player standing in multiplayer
   checkWinCondition();
@@ -2689,6 +2704,80 @@ function updateGame(dt) {
     _updateExtremeEvents(dt);
   }
 
+  // ── Gimkit Fort update (GIMPOCALYPSE) ──────────────────────
+  if (_gimkitFort && _gimkitFort.active) {
+    // Flag wave
+    _gimkitFort.flagAngle = (_gimkitFort.flagAngle || 0) + dt * 3.0;
+    // Heal Gimkit players inside fort: 40 HP/s
+    _gimkitFort.healTimer = (_gimkitFort.healTimer || 0) + dt;
+    if (_gimkitFort.healTimer >= 1.0) {
+      _gimkitFort.healTimer = 0;
+      for (const p of gamePlayers) {
+        if (!p.alive || p.isSummon || !p.fighter || p.fighter.id !== 'gimkit') continue;
+        const fdx = p.x - _gimkitFort.x, fdy = p.y - _gimkitFort.y;
+        if (Math.sqrt(fdx*fdx + fdy*fdy) < _gimkitFort.radius) {
+          p.hp = Math.min(p.maxHp, p.hp + 40);
+        }
+      }
+    }
+    // Spawn zombies every 4s
+    _gimkitFort.zombieSpawnTimer -= dt;
+    if (_gimkitFort.zombieSpawnTimer <= 0) {
+      _gimkitFort.zombieSpawnTimer = 4.0;
+      const angle = Math.random() * Math.PI * 2;
+      const spawnR = _gimkitFort.radius + GAME_TILE * 2;
+      _gimkitFort.zombies.push({
+        x: _gimkitFort.x + Math.cos(angle) * spawnR,
+        y: _gimkitFort.y + Math.sin(angle) * spawnR,
+        hp: 600, maxHp: 600, alive: true,
+      });
+    }
+    // Move zombies toward fort, deal damage to non-Gimkit players in path
+    const zr = GAME_TILE * 0.32;
+    for (let zi = _gimkitFort.zombies.length - 1; zi >= 0; zi--) {
+      const z = _gimkitFort.zombies[zi];
+      if (!z.alive) { _gimkitFort.zombies.splice(zi, 1); continue; }
+      const zdx = _gimkitFort.x - z.x, zdy = _gimkitFort.y - z.y;
+      const zdist = Math.sqrt(zdx*zdx + zdy*zdy) || 1;
+      const znx = zdx/zdist, zny = zdy/zdist;
+      z.x += znx * 1.5 * GAME_TILE * dt;
+      z.y += zny * 1.5 * GAME_TILE * dt;
+      // Hit non-Gimkit players it overlaps
+      for (const p of gamePlayers) {
+        if (!p.alive || p.isSummon) continue;
+        if (p.fighter && p.fighter.id === 'gimkit') continue;
+        const pzdx = p.x - z.x, pzdy = p.y - z.y;
+        if (Math.sqrt(pzdx*pzdx + pzdy*pzdy) < zr + GAME_TILE * PLAYER_RADIUS_RATIO) {
+          dealDamage(null, p, Math.round(80 * dt));
+        }
+      }
+      // Zombie reaches fort
+      if (zdist < _gimkitFort.radius) {
+        _gimkitFort.lives -= 1;
+        z.alive = false;
+        _gimkitFort.zombies.splice(zi, 1);
+        if (_gimkitFort.lives <= 0) {
+          _gimkitFort.active = false;
+          if (appleTree) { appleTree.alive = true; appleTree.hp = appleTree.maxHp; appleTree.regrowTimer = 0; }
+          combatLog.push({ text: 'FORT DESTROYED! The apple tree lives again...', timer: 5, color: '#e74c3c' });
+        }
+        continue;
+      }
+    }
+    // Push non-Gimkit players out of fort
+    for (const p of gamePlayers) {
+      if (!p.alive || p.isSummon) continue;
+      if (p.fighter && p.fighter.id === 'gimkit') continue;
+      const pdx = p.x - _gimkitFort.x, pdy = p.y - _gimkitFort.y;
+      const pdist = Math.sqrt(pdx*pdx + pdy*pdy) || 1;
+      if (pdist < _gimkitFort.radius) {
+        const push = _gimkitFort.radius + 2;
+        p.x = _gimkitFort.x + (pdx/pdist) * push;
+        p.y = _gimkitFort.y + (pdy/pdist) * push;
+      }
+    }
+  }
+
   // ── Move 4 ticks ──────────────────────────────────────────
   // Potion heal tick (Fighter F)
   for (const p of gamePlayers) {
@@ -2907,7 +2996,7 @@ function updateGame(dt) {
           combatLog.push({ text: '⚔ Infantry incoming! Kill them all to reset.', timer: 4, color: '#f39c12' });
         } else if (btn.type === 'cpu') {
           // Spawn a random easy CPU opponent
-          const cpuFighters = getAllFighterIds().filter(f => f !== 'moderator' && f !== 'unstable' && f !== 'omori');
+          const cpuFighters = getAllFighterIds().filter(f => f !== 'moderator' && f !== 'unstable' && f !== 'omori' && f !== 'gimkit' && f !== 'hitman');
           const cpuFighterId = cpuFighters[Math.floor(Math.random() * cpuFighters.length)];
           const cpuFighter = getFighter(cpuFighterId);
           const cpuId = 'training-cpu-btn-' + Date.now();
@@ -3596,6 +3685,18 @@ function updateProjectiles(dt) {
     }
     const tile = gameMap.tiles[row][col];
     if (tile === TILE.ROCK || isStumpTile(col, row)) {
+      if (p.type === 'gimkit-cc-bolt') {
+        // CC bolt explodes on wall hit
+        const _ccOwner = gamePlayers.find(pl => pl.id === p.ownerId);
+        const _ccWallR = 3.0 * GAME_TILE;
+        for (const t2 of gamePlayers) {
+          if (t2.id === p.ownerId || !t2.alive) continue;
+          if (t2.isSummon && t2.summonOwner === p.ownerId) continue;
+          const _ccdx = t2.x - p.x, _ccdy = t2.y - p.y;
+          if (Math.sqrt(_ccdx*_ccdx + _ccdy*_ccdy) < _ccWallR) dealDamage(_ccOwner, t2, 150);
+        }
+        projectiles.splice(i, 1); continue;
+      }
       if (!p.dndFireball) { projectiles.splice(i, 1); continue; }
     }
     // Fireball stops at water/sea
@@ -3648,7 +3749,7 @@ function updateProjectiles(dt) {
         const hitRadius = p.type === 'shockwave' ? radius + 12
                         : p.dndFireball ? (p.aoeRadius || 1.5 * GAME_TILE)
                         : isWarshipProj ? (p.radius || GAME_TILE * 0.6) + radius
-                        : p.type === 'gimkit-bolt' ? (p.boltRadius || 2.0) * radius + radius
+                        : (p.type === 'gimkit-bolt' || p.type === 'gimkit-cc-bolt') ? (p.boltRadius || 2.0) * radius + radius
                         : radius + 4;
         if (dist < hitRadius) {
           // D&D Fireball: AoE explosion — damage ALL targets in radius, then remove
@@ -3739,6 +3840,22 @@ function updateProjectiles(dt) {
             continue; // don't splice — shockwave passes through
           }
           // Gimkit bolt: knockback (stronger at low HP)
+          // Crowd Control: explode for 150 AoE damage on player hit
+          if (p.type === 'gimkit-cc-bolt') {
+            const _ccR = 3.0 * GAME_TILE;
+            for (const t2 of gamePlayers) {
+              if (t2.id === p.ownerId || !t2.alive) continue;
+              if (t2.isSummon && t2.summonOwner === p.ownerId) continue;
+              if (gameMode === 'teams' && owner) {
+                const oT = owner.team; const tT = t2.team;
+                if (oT && tT && oT === tT) continue;
+              }
+              const ccDx = t2.x - p.x, ccDy = t2.y - p.y;
+              if (Math.sqrt(ccDx*ccDx + ccDy*ccDy) < _ccR) dealDamage(owner, t2, 150);
+            }
+            projectiles.splice(i, 1);
+            break; // exit inner target loop
+          }
           if (p.type === 'gimkit-bolt') {
             const _hf = target.hp / (target.maxHp || target.hp || 1);
             const _kb = (3 + (1 - _hf) * 5) * GAME_TILE;
@@ -9006,9 +9123,10 @@ function useAbility(key) {
       const _gad = Math.sqrt(_gax*_gax + _gay*_gay) || 1;
       const _gnx = _gax/_gad, _gny = _gay/_gad;
       const _bspd = (abil.projectileSpeed || 22) * GAME_TILE / 10;
+      const _btype = lp.gimkitCrowdControl ? 'gimkit-cc-bolt' : 'gimkit-bolt';
       projectiles.push({ x: lp.x, y: lp.y, vx: _gnx*_bspd, vy: _gny*_bspd,
         ownerId: lp.id, damage: abil.damage || 300, timer: 1.5,
-        type: 'gimkit-bolt', color: '#f5e642', boltRadius: abil.projectileRadius || 2.0 });
+        type: _btype, color: '#f5e642', boltRadius: abil.projectileRadius || 2.0 });
       lp.effects.push({ type: 'gimkit-bolt', timer: 0.2 });
     } else {
       // Fighter: Sword (original M1)
@@ -10812,6 +10930,22 @@ function useAbility(key) {
       return;
     }
 
+    // ── Gimkit: GIMPOCALYPSE ──
+    if (isGimkit) {
+      lp.specialUsed = true;
+      // Despawn apple tree
+      if (appleTree) { appleTree.alive = false; appleTree.hp = 0; appleTree.apples = []; appleTree.regrowTimer = 999999; }
+      // Spawn fort at map center
+      const fortX = (gameMap.cols / 2) * GAME_TILE;
+      const fortY = (gameMap.rows / 2) * GAME_TILE;
+      _gimkitFort = { active: true, x: fortX, y: fortY, radius: GAME_TILE * 2.8, lives: 3,
+        zombies: [], zombieSpawnTimer: 3.0, healTimer: 0, flagAngle: 0 };
+      lp.x = fortX; lp.y = fortY;
+      lp.effects.push({ type: 'gimkit-fort-spawn', timer: 2.0 });
+      combatLog.push({ text: 'THE GIMPOCALYPSE! Fort spawned! Defend it!', timer: 5, color: '#f5a623' });
+      return;
+    }
+
     // ── Unstable: Unstablism (switch back) when swapped, or Domain when original ──
     if (lp.unstableSwapped && lp.unstableOriginalFighter) {
       // Unstablism: switch back to Unstable
@@ -11722,6 +11856,18 @@ function useAbility(key) {
   else if (key === 'F') {
     if (lp.fighter.abilities.length <= 5) return; // no F ability
     const fAbil = lp.fighter.abilities[5];
+    // Gimkit F: Crowd Control — energy purchase, not achievement-gated
+    if (isGimkit) {
+      if (lp.gimkitCrowdControl) { combatLog.push({ text: 'Crowd Control already active!', timer: 2, color: '#f5a623' }); return; }
+      const ccCost = fAbil.energyCost || 40;
+      if ((lp.gimkitEnergy || 0) < ccCost) { combatLog.push({ text: 'Need 40 energy for Crowd Control!', timer: 2, color: '#e74c3c' }); return; }
+      lp.gimkitEnergy = Math.max(0, (lp.gimkitEnergy || 0) - ccCost);
+      lp.gimkitCrowdControl = true;
+      lp.cdF = fAbil.cooldown || 999;
+      lp.effects.push({ type: 'gimkit-cc-unlock', timer: 2.0 });
+      combatLog.push({ text: 'CROWD CONTROL ACTIVE! Bolts explode on hit!', timer: 4, color: '#f5a623' });
+      return;
+    }
     // Check if unlocked via achievement (skip for CPUs — always unlocked)
     if (!lp.isCPU && typeof isMove4Unlocked === 'function' && !isMove4Unlocked(lp.fighter.id)) return;
     // Max uses per game (default 3)
@@ -12604,6 +12750,38 @@ function dealDamage(attacker, target, amount, viaSummon, allowFF) {
   if (!target.alive) return;
   // Gimkit: invincible while jumping
   if (target.gimkitJumping) return;
+  // Gimkit Fort immunity: Gimkit players inside the active fort take no damage
+  if (_gimkitFort && _gimkitFort.active && target.fighter && target.fighter.id === 'gimkit') {
+    const _fdx = target.x - _gimkitFort.x, _fdy = target.y - _gimkitFort.y;
+    if (Math.sqrt(_fdx*_fdx + _fdy*_fdy) < _gimkitFort.radius) return;
+  }
+  // Gimkit Trait: Learning — auto-dodge on 4th+ hit from same opponent
+  if (target.fighter && target.fighter.id === 'gimkit' && target.traitActive && attacker && attacker.id !== target.id && !attacker.isSummon) {
+    if (!target.gimkitHitCounts) target.gimkitHitCounts = {};
+    target.gimkitHitCounts[attacker.id] = (target.gimkitHitCounts[attacker.id] || 0) + 1;
+    if (target.gimkitDodgeTargetId === attacker.id) {
+      // Auto-dodge: cancel damage and teleport away
+      target.gimkitDodgeTargetId = null;
+      const _tr = GAME_TILE * PLAYER_RADIUS_RATIO;
+      let _jx = 0, _jy = 0;
+      const _adx = target.x - attacker.x, _ady = target.y - attacker.y;
+      const _ad = Math.sqrt(_adx*_adx + _ady*_ady) || 1;
+      const _side = Math.random() < 0.5 ? 1 : -1;
+      _jx = (-_ady/_ad) * _side; _jy = (_adx/_ad) * _side;
+      const _jd = GAME_TILE * 3;
+      for (let _s = 10; _s >= 1; _s--) {
+        const _tx = target.x + _jx * _jd * (_s / 10), _ty = target.y + _jy * _jd * (_s / 10);
+        if (canMoveTo(_tx, _ty, _tr)) { target.x = _tx; target.y = _ty; break; }
+      }
+      target.effects.push({ type: 'deer-dodge', timer: 0.4 });
+      if (target.id === localPlayerId) combatLog.push({ text: 'Learning: Auto-dodged!', timer: 2, color: '#f5a623' });
+      return; // damage fully negated
+    }
+    if (target.gimkitHitCounts[attacker.id] >= 3 && target.gimkitDodgeTargetId === null) {
+      target.gimkitDodgeTargetId = attacker.id;
+      if (target.id === localPlayerId) combatLog.push({ text: 'Learned their attack pattern! Next hit dodged!', timer: 3, color: '#f5a623' });
+    }
+  }
   // Team friendly fire prevention: same-team players/summons can't hurt each other
   if (!allowFF && attacker && attacker !== target && gameMode === 'teams') {
     const attackerTeam = attacker.isSummon
@@ -19177,7 +19355,7 @@ function renderGame() {
   // Draw warship shells (larger orange projectiles)
   // Gimkit bolt render
   for (const proj of projectiles) {
-    if (proj.type !== 'gimkit-bolt') continue;
+    if (proj.type !== 'gimkit-bolt' && proj.type !== 'gimkit-cc-bolt') continue;
     const _bx = proj.x - camX, _by = proj.y - camY;
     if (_bx < -80 || _bx > cw + 80 || _by < -80 || _by > ch + 80) continue;
     const _br = (proj.boltRadius || 2.0) * (GAME_TILE * PLAYER_RADIUS_RATIO * 0.5);
@@ -19207,6 +19385,82 @@ function renderGame() {
     const angle = Math.atan2(proj.vy, proj.vx);
     gameCtx.strokeStyle = 'rgba(255,100,0,0.5)'; gameCtx.lineWidth = 4;
     gameCtx.beginPath(); gameCtx.moveTo(px2, py2); gameCtx.lineTo(px2 - Math.cos(angle) * 20, py2 - Math.sin(angle) * 20); gameCtx.stroke();
+    gameCtx.restore();
+  }
+
+  // ── Gimkit Fort (GIMPOCALYPSE) renderer ──
+  if (_gimkitFort && _gimkitFort.active) {
+    const fsx = _gimkitFort.x - camX, fsy = _gimkitFort.y - camY;
+    const fr = _gimkitFort.radius;
+    // Fort wall: thick orange circle
+    gameCtx.save();
+    gameCtx.strokeStyle = '#f5a623';
+    gameCtx.lineWidth = 6;
+    gameCtx.shadowColor = '#f5a623';
+    gameCtx.shadowBlur = 16;
+    gameCtx.beginPath();
+    gameCtx.arc(fsx, fsy, fr, 0, Math.PI * 2);
+    gameCtx.stroke();
+    gameCtx.shadowBlur = 0;
+    // Fort fill: semi-transparent gold
+    gameCtx.fillStyle = 'rgba(245, 166, 35, 0.12)';
+    gameCtx.beginPath();
+    gameCtx.arc(fsx, fsy, fr, 0, Math.PI * 2);
+    gameCtx.fill();
+    // Flag pole in center
+    gameCtx.strokeStyle = '#8b6914';
+    gameCtx.lineWidth = 3;
+    gameCtx.beginPath();
+    gameCtx.moveTo(fsx, fsy + fr * 0.5);
+    gameCtx.lineTo(fsx, fsy - fr * 0.5);
+    gameCtx.stroke();
+    // Flag waving
+    const fa = _gimkitFort.flagAngle || 0;
+    const flagW = fr * 0.5, flagH = fr * 0.25;
+    gameCtx.fillStyle = '#f5e642';
+    gameCtx.beginPath();
+    gameCtx.moveTo(fsx, fsy - fr * 0.5);
+    gameCtx.lineTo(fsx + flagW * (0.8 + 0.2 * Math.cos(fa)), fsy - fr * 0.5 + flagH * 0.3 * Math.sin(fa));
+    gameCtx.lineTo(fsx + flagW * 0.5, fsy - fr * 0.5 + flagH);
+    gameCtx.closePath();
+    gameCtx.fill();
+    // Zombies
+    for (const z of _gimkitFort.zombies) {
+      const zsx = z.x - camX, zsy = z.y - camY;
+      const zr = GAME_TILE * 0.32;
+      gameCtx.fillStyle = '#2d5a1b';
+      gameCtx.beginPath();
+      gameCtx.arc(zsx, zsy, zr, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#6abf40';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.stroke();
+      // HP bar
+      const zhf = z.hp / z.maxHp;
+      gameCtx.fillStyle = '#222';
+      gameCtx.fillRect(zsx - zr, zsy - zr - 6, zr * 2, 4);
+      gameCtx.fillStyle = zhf > 0.5 ? '#2ecc71' : '#e74c3c';
+      gameCtx.fillRect(zsx - zr, zsy - zr - 6, zr * 2 * zhf, 4);
+    }
+    // Fort lives HUD (always shown at top-center)
+    gameCtx.restore();
+    gameCtx.save();
+    gameCtx.fillStyle = 'rgba(0,0,0,0.7)';
+    gameCtx.fillRect(cw / 2 - 80, 8, 160, 28);
+    gameCtx.fillStyle = '#f5a623';
+    gameCtx.font = 'bold 13px sans-serif';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText('FORT: ' + '♥'.repeat(Math.max(0, _gimkitFort.lives)) + ' ' + (_gimkitFort.lives <= 0 ? '(DESTROYED)' : ''), cw / 2, 28);
+    gameCtx.restore();
+  } else if (_gimkitFort && !_gimkitFort.active) {
+    // Fort was destroyed
+    gameCtx.save();
+    gameCtx.fillStyle = 'rgba(0,0,0,0.7)';
+    gameCtx.fillRect(cw / 2 - 100, 8, 200, 28);
+    gameCtx.fillStyle = '#e74c3c';
+    gameCtx.font = 'bold 12px sans-serif';
+    gameCtx.textAlign = 'center';
+    gameCtx.fillText('FORT DESTROYED', cw / 2, 28);
     gameCtx.restore();
   }
 
