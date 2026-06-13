@@ -1668,7 +1668,7 @@ const FIGHTERS = {
 };
 
 // ── Fighter unlock system ─────────────────────────────────────
-const FREE_FIGHTERS = ['fighter', 'poker', 'moderator'];
+const FREE_FIGHTERS = ['fighter', 'poker', 'moderator', 'gimkit'];
 
 const ACHIEVEMENTS = {
   firstWin: {

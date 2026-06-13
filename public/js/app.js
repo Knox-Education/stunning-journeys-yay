@@ -60,7 +60,7 @@ let _lastPlayerList = [];
 const _shuffledFighterIds = [
   'fighter', 'poker', 'onexonexonex', 'filbus', 'cricket', 'deer',
   'noli', 'explodingcat', 'napoleon', 'moderator', 'dnd', 'dragon',
-  'dogtooth', 'illusion', 'pyromaniac', 'heavyrope',
+  'dogtooth', 'illusion', 'pyromaniac', 'heavyrope', 'gimkit',
   // admin / hidden fighters at the end
   'hitman', 'unstable',
 ];
