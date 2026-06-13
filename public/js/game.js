@@ -92,12 +92,10 @@ let _lastDealDamageWasM1 = false;
 const CPU_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Ghost', 'Havoc'];
 const CPU_COLORS = ['#e67e22', '#1abc9c', '#9b59b6', '#e74c3c', '#3498db', '#f1c40f'];
 
-// Power Special threshold: 3× max HP if fighter has achievement unlocked, 2× otherwise
-// CPUs always use 2× (they cannot use Power Specials)
+// Special threshold: deal 1200 damage to unlock your special
+const SPECIAL_DAMAGE_THRESHOLD = 1200;
 function getSpecialThreshold(p) {
-  if (p.isCPU) return p.maxHp * 2;
-  const hasPower = typeof isMove4Unlocked === 'function' && isMove4Unlocked(p.fighter.id);
-  return p.maxHp * (hasPower ? 3 : 2);
+  return SPECIAL_DAMAGE_THRESHOLD;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -12633,21 +12631,10 @@ function dealDamage(attacker, target, amount, viaSummon, allowFF) {
     }
   }
 
-  // Track damage taken for special unlock (target's counter)
-  target.totalDamageTaken += amount;
-  if (!target.specialUnlocked && !target.specialUsed && target.totalDamageTaken >= getSpecialThreshold(target)) {
-    target.specialUnlocked = true;
-    target.specialGraceTimer = 3;  // 3s grace before decay starts
-    target.specialDecayTimer = 0;
-    if (target.id === localPlayerId) {
-      showPopup('⚡ SPECIAL UNLOCKED! [SPACE] (8s to use!)');
-    }
-  }
-
-  // Track damage dealt for attacker's special unlock too
+  // Track damage dealt for attacker's special unlock (deal 1200 damage → special)
   if (attacker && attacker.alive) {
     attacker.totalDamageTaken += amount;
-    if (!attacker.specialUnlocked && !attacker.specialUsed && attacker.totalDamageTaken >= getSpecialThreshold(attacker)) {
+    if (!attacker.specialUnlocked && !attacker.specialUsed && attacker.totalDamageTaken >= SPECIAL_DAMAGE_THRESHOLD) {
       attacker.specialUnlocked = true;
       attacker.specialGraceTimer = 3;
       attacker.specialDecayTimer = 0;
@@ -13074,13 +13061,6 @@ function onRemoteDamage(targetId, amount) {
       target.eatTimer = 0;
       target.eatHealPool = 0;
       combatLog.push({ text: '🪑 Chair eating interrupted!', timer: 2, color: '#e94560' });
-    }
-  }
-  target.totalDamageTaken += amount;
-  if (!target.specialUnlocked && target.totalDamageTaken >= getSpecialThreshold(target)) {
-    target.specialUnlocked = true;
-    if (target.id === localPlayerId) {
-      showPopup('⚡ SPECIAL UNLOCKED! [SPACE]');
     }
   }
   if (target.hp <= 0) {
@@ -19570,7 +19550,6 @@ function updateHUD() {
   document.querySelector('#hud-hp-text').textContent = Math.ceil(lp.hp) + '/' + lp.maxHp;
 
   // Special meter
-  const specThresh = getSpecialThreshold(lp);
   let specFrac;
   if (lp.specialUsed) {
     specFrac = 0; // used — empty
@@ -19581,7 +19560,7 @@ function updateHUD() {
       specFrac = Math.max(0, 1 - lp.specialDecayTimer / 5); // draining
     }
   } else {
-    specFrac = Math.min(1, lp.totalDamageTaken / specThresh); // charging
+    specFrac = Math.min(1, lp.totalDamageTaken / SPECIAL_DAMAGE_THRESHOLD); // charging: deal 1200 dmg
   }
   const specFill = document.querySelector('#hud-special-fill');
   specFill.style.width = (specFrac * 100) + '%';
