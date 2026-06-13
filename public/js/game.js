@@ -2756,28 +2756,33 @@ function updateGame(dt) {
       // Zombie reaches fort
       if (zdist < _gimkitFort.radius) {
         _gimkitFort.lives -= 1;
+        _gimkitFort.hitFlash = 1.0; // red flash
         z.alive = false;
         _gimkitFort.zombies.splice(zi, 1);
         if (_gimkitFort.lives <= 0) {
           _gimkitFort.active = false;
           if (appleTree) { appleTree.alive = true; appleTree.hp = appleTree.maxHp; appleTree.regrowTimer = 0; }
           combatLog.push({ text: 'FORT DESTROYED! The apple tree lives again...', timer: 5, color: '#e74c3c' });
+        } else {
+          combatLog.push({ text: 'Fort hit! ' + _gimkitFort.lives + ' lives remaining!', timer: 3, color: '#ff8c00' });
         }
         continue;
       }
     }
-    // Push non-Gimkit players out of fort
+    // Push ALL non-Gimkit players and summons out of fort
     for (const p of gamePlayers) {
-      if (!p.alive || p.isSummon) continue;
-      if (p.fighter && p.fighter.id === 'gimkit') continue;
+      if (!p.alive) continue;
+      if (p.fighter && p.fighter.id === 'gimkit' && !p.isSummon) continue;
       const pdx = p.x - _gimkitFort.x, pdy = p.y - _gimkitFort.y;
       const pdist = Math.sqrt(pdx*pdx + pdy*pdy) || 1;
       if (pdist < _gimkitFort.radius) {
-        const push = _gimkitFort.radius + 2;
+        const push = _gimkitFort.radius + 4;
         p.x = _gimkitFort.x + (pdx/pdist) * push;
         p.y = _gimkitFort.y + (pdy/pdist) * push;
       }
     }
+    // Decay hit flash
+    if (_gimkitFort.hitFlash > 0) _gimkitFort.hitFlash = Math.max(0, _gimkitFort.hitFlash - dt * 4);
   }
 
   // ── Move 4 ticks ──────────────────────────────────────────
@@ -10945,10 +10950,10 @@ function useAbility(key) {
       const fortX = (gameMap.cols / 2) * GAME_TILE;
       const fortY = (gameMap.rows / 2) * GAME_TILE;
       _gimkitFort = { active: true, x: fortX, y: fortY, radius: GAME_TILE * 2.8, lives: 3,
-        zombies: [], zombieSpawnTimer: 3.0, healTimer: 0, flagAngle: 0 };
-      lp.x = fortX; lp.y = fortY;
+        zombies: [], zombieSpawnTimer: 3.0, healTimer: 0, flagAngle: 0, hitFlash: 0 };
+      // Gimkit stays where he is — fort spawns at center
       lp.effects.push({ type: 'gimkit-fort-spawn', timer: 2.0 });
-      combatLog.push({ text: 'THE GIMPOCALYPSE! Fort spawned! Defend it!', timer: 5, color: '#f5a623' });
+      combatLog.push({ text: 'THE GIMPOCALYPSE! Fort spawned at map center!', timer: 5, color: '#f5a623' });
       return;
     }
 
@@ -19429,22 +19434,26 @@ function renderGame() {
   if (_gimkitFort && _gimkitFort.active) {
     const fsx = _gimkitFort.x - camX, fsy = _gimkitFort.y - camY;
     const fr = _gimkitFort.radius;
-    // Fort wall: thick orange circle
+    const _fHit = _gimkitFort.hitFlash || 0;
     gameCtx.save();
-    gameCtx.strokeStyle = '#f5a623';
-    gameCtx.lineWidth = 6;
-    gameCtx.shadowColor = '#f5a623';
-    gameCtx.shadowBlur = 16;
+    // Fort wall: flashes red when hit, orange normally
+    const _wallColor = _fHit > 0
+      ? 'rgb(' + Math.round(231 + _fHit * 14) + ',' + Math.round(76 * (1 - _fHit)) + ',' + Math.round(60 * (1 - _fHit)) + ')'
+      : '#f5a623';
+    gameCtx.strokeStyle = _wallColor;
+    gameCtx.lineWidth = 6 + _fHit * 3;
+    gameCtx.shadowColor = _wallColor;
+    gameCtx.shadowBlur = 16 + _fHit * 20;
     gameCtx.beginPath();
     gameCtx.arc(fsx, fsy, fr, 0, Math.PI * 2);
     gameCtx.stroke();
     gameCtx.shadowBlur = 0;
-    // Fort fill: semi-transparent gold
-    gameCtx.fillStyle = 'rgba(245, 166, 35, 0.12)';
+    // Fort fill
+    gameCtx.fillStyle = _fHit > 0 ? 'rgba(231,76,60,' + (0.12 + _fHit * 0.15) + ')' : 'rgba(245,166,35,0.12)';
     gameCtx.beginPath();
     gameCtx.arc(fsx, fsy, fr, 0, Math.PI * 2);
     gameCtx.fill();
-    // Flag pole in center
+    // Flag pole
     gameCtx.strokeStyle = '#8b6914';
     gameCtx.lineWidth = 3;
     gameCtx.beginPath();
@@ -19461,6 +19470,27 @@ function renderGame() {
     gameCtx.lineTo(fsx + flagW * 0.5, fsy - fr * 0.5 + flagH);
     gameCtx.closePath();
     gameCtx.fill();
+    // 3 individual hearts ON the fort wall, colored by lives remaining
+    const _liveColors = ['#e74c3c', '#f5a623', '#2ecc71'];
+    const _lc = _liveColors[Math.max(0, _gimkitFort.lives - 1)];
+    gameCtx.font = 'bold ' + Math.round(fr * 0.38) + 'px sans-serif';
+    gameCtx.textAlign = 'center';
+    gameCtx.textBaseline = 'middle';
+    const _heartSpacing = fr * 0.7;
+    const _heartY = fsy + fr * 0.75;
+    for (let _li = 0; _li < 3; _li++) {
+      const _hx = fsx + (_li - 1) * _heartSpacing;
+      gameCtx.fillStyle = _li < _gimkitFort.lives ? _lc : 'rgba(100,100,100,0.4)';
+      gameCtx.fillText('\u2665', _hx, _heartY);
+    }
+    gameCtx.textBaseline = 'alphabetic';
+    // Zombie next-spawn progress arc (clockwise arc around fort exterior)
+    const _zFrac = Math.max(0, 1 - (_gimkitFort.zombieSpawnTimer || 0) / 4.0);
+    gameCtx.strokeStyle = 'rgba(45,90,27,0.7)';
+    gameCtx.lineWidth = 4;
+    gameCtx.beginPath();
+    gameCtx.arc(fsx, fsy, fr + 10, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * _zFrac);
+    gameCtx.stroke();
     // Zombies
     for (const z of _gimkitFort.zombies) {
       const zsx = z.x - camX, zsy = z.y - camY;
@@ -19472,32 +19502,39 @@ function renderGame() {
       gameCtx.strokeStyle = '#6abf40';
       gameCtx.lineWidth = 1.5;
       gameCtx.stroke();
-      // HP bar
       const zhf = z.hp / z.maxHp;
       gameCtx.fillStyle = '#222';
       gameCtx.fillRect(zsx - zr, zsy - zr - 6, zr * 2, 4);
       gameCtx.fillStyle = zhf > 0.5 ? '#2ecc71' : '#e74c3c';
       gameCtx.fillRect(zsx - zr, zsy - zr - 6, zr * 2 * zhf, 4);
     }
-    // Fort lives HUD (always shown at top-center)
     gameCtx.restore();
+    // Fort HUD at top-center: 3 individual colored hearts
     gameCtx.save();
-    gameCtx.fillStyle = 'rgba(0,0,0,0.7)';
-    gameCtx.fillRect(cw / 2 - 80, 8, 160, 28);
+    gameCtx.fillStyle = 'rgba(0,0,0,0.78)';
+    gameCtx.fillRect(cw / 2 - 90, 6, 180, 36);
     gameCtx.fillStyle = '#f5a623';
-    gameCtx.font = 'bold 13px sans-serif';
+    gameCtx.font = 'bold 11px sans-serif';
     gameCtx.textAlign = 'center';
-    gameCtx.fillText('FORT: ' + '♥'.repeat(Math.max(0, _gimkitFort.lives)) + ' ' + (_gimkitFort.lives <= 0 ? '(DESTROYED)' : ''), cw / 2, 28);
+    gameCtx.fillText('FORT', cw / 2, 19);
+    const _hudLiveColors = ['#e74c3c', '#f5a623', '#2ecc71'];
+    const _hudLc = _hudLiveColors[Math.max(0, _gimkitFort.lives - 1)];
+    gameCtx.font = 'bold 17px sans-serif';
+    for (let _li = 0; _li < 3; _li++) {
+      const _hx = cw / 2 + (_li - 1) * 24;
+      gameCtx.fillStyle = _li < _gimkitFort.lives ? _hudLc : 'rgba(120,120,120,0.45)';
+      gameCtx.fillText('\u2665', _hx, 35);
+    }
     gameCtx.restore();
   } else if (_gimkitFort && !_gimkitFort.active) {
-    // Fort was destroyed
+    // Fort destroyed banner
     gameCtx.save();
-    gameCtx.fillStyle = 'rgba(0,0,0,0.7)';
-    gameCtx.fillRect(cw / 2 - 100, 8, 200, 28);
+    gameCtx.fillStyle = 'rgba(0,0,0,0.78)';
+    gameCtx.fillRect(cw / 2 - 110, 6, 220, 36);
     gameCtx.fillStyle = '#e74c3c';
-    gameCtx.font = 'bold 12px sans-serif';
+    gameCtx.font = 'bold 13px sans-serif';
     gameCtx.textAlign = 'center';
-    gameCtx.fillText('FORT DESTROYED', cw / 2, 28);
+    gameCtx.fillText('\u{1F480} FORT DESTROYED', cw / 2, 29);
     gameCtx.restore();
   }
 
