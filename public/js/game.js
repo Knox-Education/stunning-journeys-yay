@@ -801,6 +801,7 @@ function createPlayerState(p, spawn, fighter) {
     gimkitEnergy: 10,
     gimkitJumping: false,
     gimkitJumpTimer: 0,
+    gimkitJumpDuration: 2.0,
     gimkitShadowX: 0,
     gimkitShadowY: 0,
     gimkitQuestionActive: false,
@@ -1810,9 +1811,10 @@ function updateGame(dt) {
         p.gimkitJumpTimer -= wallDt;
         if (p.gimkitJumpTimer <= 0) {
           p.gimkitJumping = false; p.gimkitJumpTimer = 0;
+          p.effects.push({ type: 'gimkit-land', timer: 0.5 });
           const _gR = Math.floor(p.y / GAME_TILE), _gC = Math.floor(p.x / GAME_TILE);
           const _gTile = (_gR>=0&&_gR<gameMap.rows&&_gC>=0&&_gC<gameMap.cols)?gameMap.tiles[_gR][_gC]:TILE.ROCK;
-          if (_gTile === TILE.ROCK || isStumpTile(_gC, _gR)) {
+          if (_gTile === TILE.ROCK || _gTile === TILE.WATER || isStumpTile(_gC, _gR)) {
             if (p.gimkitShadowX) { p.x = p.gimkitShadowX; p.y = p.gimkitShadowY; }
             dealDamage(null, p, 200);
             if (p.id === localPlayerId) combatLog.push({ text: 'Landed on obstacle! 200 dmg!', timer: 3, color: '#ff4444' });
@@ -3280,7 +3282,8 @@ function updateMovement(dt) {
     // Flying/Jumping: ignore obstacles but stay in map bounds
     const nxClamped = Math.max(radius, Math.min(newX, gameMap.cols * GAME_TILE - radius));
     const nyClamped = Math.max(radius, Math.min(newY, gameMap.rows * GAME_TILE - radius));
-    if (localPlayer.gimkitJumping && canMoveTo(nxClamped, nyClamped, radius)) {
+    // Shadow always tracks directly below Gimkit
+    if (localPlayer.gimkitJumping) {
       localPlayer.gimkitShadowX = nxClamped;
       localPlayer.gimkitShadowY = nyClamped;
     }
@@ -9720,7 +9723,7 @@ function useAbility(key) {
         lp.cdE = 0; return;
       }
       lp.gimkitEnergy = Math.max(0, (lp.gimkitEnergy || 0) - fishCost);
-      lp.cdE = 0; // no cooldown
+      lp.cdE = 2.0; // cooldown prevents multi-heal per cast
       const _fishHeal = (abil.minHeal || 100) + Math.floor(Math.random() * ((abil.maxHeal || 1000) - (abil.minHeal || 100) + 1));
       lp.hp = Math.min(lp.maxHp, lp.hp + _fishHeal);
       lp.effects.push({ type: 'heal', timer: 1.5 });
@@ -10257,12 +10260,15 @@ function useAbility(key) {
     } else if (isGimkit) {
       // Gimkit R: Jump — airborne for 2s, invincible, free movement
       if (lp.gimkitJumping) { lp.cdR = 0; return; } // already jumping
+      const _jDur = abil.duration || 2.0;
       lp.gimkitJumping = true;
-      lp.gimkitJumpTimer = abil.duration || 2.0;
+      lp.gimkitJumpTimer = _jDur;
+      lp.gimkitJumpDuration = _jDur;
       lp.gimkitShadowX = lp.x;
       lp.gimkitShadowY = lp.y;
       lp.cdR = abil.cooldown || 6;
-      lp.effects.push({ type: 'gimkit-jump', timer: (abil.duration || 2.0) + 0.5 });
+      lp.effects.push({ type: 'gimkit-jump-start', timer: 0.3 });
+      lp.effects.push({ type: 'gimkit-jump', timer: _jDur + 0.5 });
       combatLog.push({ text: 'Jump! Invincible for 2s!', timer: 2, color: '#f5a623' });
     } else {
       const range = abil.range * GAME_TILE;
@@ -16971,44 +16977,75 @@ function renderGame() {
         gameCtx.fill();
       }
     } else if (p.fighter && p.fighter.id === 'gimkit') {
-      // ── Gimkit: plain circle with two black oval eyes ──
-      // Shadow if jumping
+      // ── Gimkit: arc-jump with shadow, launch/land animations ──
+      const _jDur = p.gimkitJumpDuration || 2.0;
+      const _jT = p.gimkitJumpTimer || 0;
+      const _jProgress = p.gimkitJumping ? (_jDur - _jT) / _jDur : 0;
+      const _jHeight = p.gimkitJumping ? Math.sin(Math.PI * _jProgress) * radius * 3.2 : 0;
+      const _bsy = sy - _jHeight;
+      // Ground shadow: at player ground position, shrinks as Gimkit rises
       if (p.gimkitJumping) {
-        const shadowX = (p.gimkitShadowX || p.x) - camX;
-        const shadowY = (p.gimkitShadowY || p.y) - camY;
-        gameCtx.fillStyle = 'rgba(0,0,0,0.3)';
+        const _sScale = Math.max(0.35, 1.0 - (_jHeight / (radius * 3.2)) * 0.65);
+        gameCtx.fillStyle = 'rgba(0,0,0,' + (0.28 * _sScale) + ')';
         gameCtx.beginPath();
-        gameCtx.ellipse(shadowX, shadowY + radius * 0.5, radius * 0.9, radius * 0.35, 0, 0, Math.PI * 2);
+        gameCtx.ellipse(sx, sy + radius * 0.4, radius * _sScale * 0.85, radius * 0.28 * _sScale, 0, 0, Math.PI * 2);
         gameCtx.fill();
       }
-      // Body
+      // Body drawn at arc height
+      gameCtx.save();
+      gameCtx.translate(sx, _bsy);
       gameCtx.fillStyle = isDying ? '#555' : (p.color || '#f5a623');
       gameCtx.beginPath();
-      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.arc(0, 0, radius, 0, Math.PI * 2);
       gameCtx.fill();
-      // Outline
       gameCtx.strokeStyle = isDying ? '#333' : '#e8890a';
       gameCtx.lineWidth = 2;
       gameCtx.stroke();
-      // Two black oval eyes
       if (!isDying) {
         gameCtx.fillStyle = '#000';
-        // Left eye
         gameCtx.beginPath();
-        gameCtx.ellipse(sx - radius * 0.28, sy - radius * 0.15, radius * 0.18, radius * 0.28, 0, 0, Math.PI * 2);
+        gameCtx.ellipse(-radius * 0.28, -radius * 0.15, radius * 0.18, radius * 0.28, 0, 0, Math.PI * 2);
         gameCtx.fill();
-        // Right eye
         gameCtx.beginPath();
-        gameCtx.ellipse(sx + radius * 0.28, sy - radius * 0.15, radius * 0.18, radius * 0.28, 0, 0, Math.PI * 2);
+        gameCtx.ellipse(radius * 0.28, -radius * 0.15, radius * 0.18, radius * 0.28, 0, 0, Math.PI * 2);
         gameCtx.fill();
       }
-      // Jumping glow ring
-      if (p.gimkitJumping) {
-        gameCtx.strokeStyle = 'rgba(255, 230, 66, 0.8)';
+      gameCtx.restore();
+      // Launch burst ring
+      if (p.effects.some((fx) => fx.type === 'gimkit-jump-start')) {
+        const _jsFx = p.effects.find((fx) => fx.type === 'gimkit-jump-start');
+        const _jsA = _jsFx.timer / 0.3;
+        const _jsR = radius + (1 - _jsA) * radius * 1.8;
+        gameCtx.strokeStyle = 'rgba(245,230,66,' + (_jsA * 0.9) + ')';
         gameCtx.lineWidth = 3;
+        gameCtx.shadowColor = '#ffe000'; gameCtx.shadowBlur = 8;
+        gameCtx.beginPath(); gameCtx.arc(sx, sy, _jsR, 0, Math.PI * 2); gameCtx.stroke();
+        gameCtx.shadowBlur = 0;
+      }
+      // Landing impact ring
+      if (p.effects.some((fx) => fx.type === 'gimkit-land')) {
+        const _jlFx = p.effects.find((fx) => fx.type === 'gimkit-land');
+        const _jlA = _jlFx.timer / 0.5;
+        const _jlR = radius + (1 - _jlA) * radius * 2.5;
+        gameCtx.strokeStyle = 'rgba(245,166,35,' + (_jlA * 0.85) + ')';
+        gameCtx.lineWidth = 4;
+        gameCtx.beginPath(); gameCtx.arc(sx, sy, _jlR, 0, Math.PI * 2); gameCtx.stroke();
+        gameCtx.fillStyle = 'rgba(200,160,80,' + (_jlA * 0.5) + ')';
+        for (let _di = 0; _di < 4; _di++) {
+          const _da = (_di / 4) * Math.PI * 2;
+          const _dr = (1 - _jlA) * radius * 2;
+          gameCtx.beginPath();
+          gameCtx.ellipse(sx + Math.cos(_da) * _dr, sy + Math.sin(_da) * _dr, radius * 0.25, radius * 0.12, _da, 0, Math.PI * 2);
+          gameCtx.fill();
+        }
+      }
+      // Jumping glow ring (follows body in air)
+      if (p.gimkitJumping) {
+        gameCtx.strokeStyle = 'rgba(255, 230, 66, 0.65)';
+        gameCtx.lineWidth = 2;
         gameCtx.setLineDash([5, 4]);
         gameCtx.beginPath();
-        gameCtx.arc(sx, sy, radius * 1.4, 0, Math.PI * 2);
+        gameCtx.arc(sx, _bsy, radius * 1.35, 0, Math.PI * 2);
         gameCtx.stroke();
         gameCtx.setLineDash([]);
       }
@@ -20736,6 +20773,8 @@ function buildGameStateSnapshot() {
     // Gimkit state
     gimkitEnergy: p.gimkitEnergy || 0,
     gimkitJumping: p.gimkitJumping || false,
+    gimkitJumpTimer: p.gimkitJumpTimer || 0,
+    gimkitJumpDuration: p.gimkitJumpDuration || 2.0,
     // fighter id so client knows what it is
     fighterId: p.fighter ? p.fighter.id : null,
   }));
@@ -21110,6 +21149,8 @@ function onRemoteGameState(snapshot) {
     if (sp.hitmanLockingFireTimer != null) p.hitmanLockingFireTimer = sp.hitmanLockingFireTimer;
     if (sp.gimkitEnergy != null) p.gimkitEnergy = sp.gimkitEnergy;
     if (sp.gimkitJumping != null) p.gimkitJumping = sp.gimkitJumping;
+    if (sp.gimkitJumpTimer != null) p.gimkitJumpTimer = sp.gimkitJumpTimer;
+    if (sp.gimkitJumpDuration != null) p.gimkitJumpDuration = sp.gimkitJumpDuration;
     if (sp.effects) p.effects = sp.effects;
   }
 

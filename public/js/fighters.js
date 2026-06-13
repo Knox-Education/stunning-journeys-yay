@@ -1513,11 +1513,11 @@ const FIGHTERS = {
       {
         // M1: Energy Bolt
         key: 'M1',
-        name: 'Energy Bolt',
+        name: 'Knockback projectile',
         description: 'Shoot a large yellow knockback bolt (300 dmg). Knocks farther when target is on low HP. Costs 2 energy.',
         bind: 'click',
         damage: 300,
-        projectileSpeed: 22,
+        projectileSpeed: 70,
         projectileRadius: 2.0,   // multiplier on normal chip radius
         cooldown: 1.5,
         energyCost: 2,
