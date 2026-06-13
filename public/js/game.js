@@ -286,7 +286,7 @@ function startGame(mapIndex, players, myId, mode) {
           if (gameMap.tiles[br][bc] !== TILE.GROUND && gameMap.tiles[br][bc] !== TILE.GRASS) continue;
           // don't overlap existing buttons
           if (_trainingInfantryButtons.some(b => b.r === br && b.c === bc)) continue;
-          _trainingInfantryButtons.push({ r: br, c: bc, active: true, infantryIds: [] });
+          _trainingInfantryButtons.push({ r: br, c: bc, active: true, infantryIds: [], type: _ibFound === 0 ? 'infantry' : 'cpu', cpuId: null });
           _ibFound++;
         }
       }
@@ -2834,47 +2834,81 @@ function updateGame(dt) {
     const lpC = Math.floor(localPlayer.x / GAME_TILE);
     for (const btn of _trainingInfantryButtons) {
       if (!btn.active) {
-        // Re-activate if all spawned infantry are dead
-        btn.infantryIds = btn.infantryIds.filter(id => {
-          const inf = gamePlayers.find(p => p.id === id);
-          return inf && inf.alive;
-        });
-        if (btn.infantryIds.length === 0) btn.active = true;
+        if (btn.type === 'infantry') {
+          // Re-activate when all infantry are dead
+          btn.infantryIds = btn.infantryIds.filter(id => {
+            const inf = gamePlayers.find(p => p.id === id);
+            return inf && inf.alive;
+          });
+          if (btn.infantryIds.length === 0) btn.active = true;
+        } else if (btn.type === 'cpu') {
+          // Re-activate when spawned CPU is dead
+          const spawnedCpu = btn.cpuId ? gamePlayers.find(p => p.id === btn.cpuId) : null;
+          if (!spawnedCpu || !spawnedCpu.alive) { btn.active = true; btn.cpuId = null; }
+        }
       }
       if (btn.active && lpR === btn.r && lpC === btn.c) {
         btn.active = false;
-        btn.infantryIds = [];
-        const napFighter = getFighter('napoleon');
-        const napAbil = napFighter && napFighter.abilities && napFighter.abilities[4];
-        for (let i = 0; i < 10; i++) {
-          const infId = 'training-infantry-' + btn.r + '-' + btn.c + '-' + i + '-' + Date.now();
-          const angle = (i / 10) * Math.PI * 2;
-          const dist = (2 + Math.random() * 2) * GAME_TILE;
-          const ix = localPlayer.x + Math.cos(angle) * dist;
-          const iy = localPlayer.y + Math.sin(angle) * dist;
-          const inf = createPlayerState(
-            { id: infId, name: 'Infantryman', color: '#2c3e50', fighterId: 'napoleon' },
-            { r: Math.floor(iy / GAME_TILE), c: Math.floor(ix / GAME_TILE) },
-            napFighter
+        if (btn.type === 'infantry') {
+          btn.infantryIds = [];
+          const napFighter = getFighter('napoleon');
+          const napAbil = napFighter && napFighter.abilities && napFighter.abilities[4];
+          for (let i = 0; i < 10; i++) {
+            const infId = 'training-infantry-' + btn.r + '-' + btn.c + '-' + i + '-' + Date.now();
+            const angle = (i / 10) * Math.PI * 2;
+            const spawnDist = (2 + Math.random() * 2) * GAME_TILE;
+            const ix = localPlayer.x + Math.cos(angle) * spawnDist;
+            const iy = localPlayer.y + Math.sin(angle) * spawnDist;
+            const inf = createPlayerState(
+              { id: infId, name: 'Infantryman', color: '#2c3e50', fighterId: 'napoleon' },
+              { r: Math.floor(iy / GAME_TILE), c: Math.floor(ix / GAME_TILE) },
+              napFighter
+            );
+            inf.x = ix; inf.y = iy;
+            const infR2 = GAME_TILE * PLAYER_RADIUS_RATIO;
+            if (!canMoveTo(inf.x, inf.y, infR2)) { inf.x = localPlayer.x; inf.y = localPlayer.y; }
+            inf.hp = (napAbil && napAbil.infantryHp) || 50;
+            inf.maxHp = inf.hp;
+            inf.isSummon = true;
+            inf.summonOwner = 'none';            // not owned by player
+            inf.summonType = 'training-infantry'; // custom type → targets player
+            inf.summonTargetId = localPlayerId;   // always chase the player
+            inf.summonSpeed = (napAbil && napAbil.infantrySpeed) || 2.0;
+            inf.summonDamage = (napAbil && napAbil.damage) || 100;
+            inf.summonAttackCD = (napAbil && napAbil.infantryFireCD) || 1;
+            inf.summonAttackTimer = 0;
+            inf.summonProjectileSpeed = (napAbil && napAbil.infantryProjectileSpeed) || 38;
+            inf.summonProjectileRange = (napAbil && napAbil.infantryRange) || 0.8;
+            inf.isCPU = true;
+            gamePlayers.push(inf);
+            btn.infantryIds.push(infId);
+          }
+          combatLog.push({ text: '⚔ Infantry incoming! Kill them all to reset.', timer: 4, color: '#f39c12' });
+        } else if (btn.type === 'cpu') {
+          // Spawn a random easy CPU opponent
+          const cpuFighters = getAllFighterIds().filter(f => f !== 'moderator' && f !== 'unstable' && f !== 'omori');
+          const cpuFighterId = cpuFighters[Math.floor(Math.random() * cpuFighters.length)];
+          const cpuFighter = getFighter(cpuFighterId);
+          const cpuId = 'training-cpu-btn-' + Date.now();
+          const spawnAngle = Math.random() * Math.PI * 2;
+          const spawnDist2 = 5 * GAME_TILE;
+          const cpuR = Math.max(0, Math.min(gameMap.rows - 1, Math.floor((localPlayer.y + Math.sin(spawnAngle) * spawnDist2) / GAME_TILE)));
+          const cpuC = Math.max(0, Math.min(gameMap.cols - 1, Math.floor((localPlayer.x + Math.cos(spawnAngle) * spawnDist2) / GAME_TILE)));
+          const cpu = createPlayerState(
+            { id: cpuId, name: 'Sparring Bot', color: '#e74c3c', fighterId: cpuFighterId },
+            { r: cpuR, c: cpuC },
+            cpuFighter
           );
-          inf.x = ix; inf.y = iy;
-          const infR2 = GAME_TILE * PLAYER_RADIUS_RATIO;
-          if (!canMoveTo(inf.x, inf.y, infR2)) { inf.x = localPlayer.x; inf.y = localPlayer.y; }
-          inf.hp = (napAbil && napAbil.infantryHp) || 50;
-          inf.maxHp = inf.hp;
-          inf.isSummon = true;
-          inf.summonOwner = localPlayer.id;
-          inf.summonType = 'napoleon-infantry';
-          inf.summonSpeed = (napAbil && napAbil.infantrySpeed) || 2.0;
-          inf.summonDamage = (napAbil && napAbil.damage) || 100;
-          inf.summonAttackCD = (napAbil && napAbil.infantryFireCD) || 1;
-          inf.summonAttackTimer = 0;
-          inf.summonProjectileSpeed = (napAbil && napAbil.infantryProjectileSpeed) || 38;
-          inf.summonProjectileRange = (napAbil && napAbil.infantryRange) || 0.8;
-          gamePlayers.push(inf);
-          btn.infantryIds.push(infId);
+          cpu.isCPU = true;
+          cpu.difficulty = 'easy';
+          cpu.aiState = {
+            moveTarget: null, attackTarget: null, thinkTimer: 0, abilityTimer: 0,
+            lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false,
+          };
+          gamePlayers.push(cpu);
+          btn.cpuId = cpuId;
+          combatLog.push({ text: '🤖 Sparring Bot spawned! (' + cpuFighter.name + ')', timer: 4, color: '#e74c3c' });
         }
-        combatLog.push({ text: '⚔ Infantry spawned! Kill them all to reset the button.', timer: 4, color: '#f39c12' });
       }
     }
   }
@@ -4108,6 +4142,36 @@ function updateSummons(dt) {
         s.summonAttackTimer = s.summonAttackCD || 5;
         s.effects.push({ type: 'cannon-fire', timer: 0.5 });
         combatLog.push({ text: '💣 Cannon fired!', timer: 2, color: '#555' });
+      }
+    } else if (s.summonType === 'training-infantry') {
+      // Training Infantry: always chase the local player (summonTargetId)
+      if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
+      const trainTarget = s.summonTargetId ? gamePlayers.find(p => p.id === s.summonTargetId && p.alive) : null;
+      if (trainTarget) {
+        const dx = trainTarget.x - s.x; const dy = trainTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 2.0) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        const stopRange = 1.5 * GAME_TILE;
+        if (dist > stopRange) {
+          if (canMoveTo(s.x + nx * moveSpeed, s.y, radius)) s.x += nx * moveSpeed;
+          if (canMoveTo(s.x, s.y + ny * moveSpeed, radius)) s.y += ny * moveSpeed;
+        }
+        if (s.summonAttackTimer <= 0) {
+          const speed = (s.summonProjectileSpeed || 38) * GAME_TILE / 10;
+          projectiles.push({
+            x: s.x, y: s.y,
+            vx: nx * speed, vy: ny * speed,
+            ownerId: s.id,
+            damage: s.summonDamage || 100,
+            timer: s.summonProjectileRange || 0.8,
+            type: 'infantry-bullet',
+            color: '#e74c3c',
+            fromSummon: true,
+          });
+          s.summonAttackTimer = s.summonAttackCD || 1;
+          s.effects.push({ type: 'infantry-fire', timer: 0.2 });
+        }
       }
     } else if (s.summonType === 'napoleon-infantry') {
       // Napoleon Infantry: chase nearest enemy, fire ranged bullets
@@ -13628,24 +13692,25 @@ function renderGame() {
       const by = (btn.r + 0.5) * GAME_TILE - camY;
       if (bx < -GAME_TILE || bx > cw + GAME_TILE || by < -GAME_TILE || by > ch + GAME_TILE) continue;
       const half = GAME_TILE * 0.42;
+      const isInf = btn.type === 'infantry';
       // Button base
-      gameCtx.fillStyle = btn.active ? '#c0a020' : '#555';
-      gameCtx.strokeStyle = btn.active ? '#ffe066' : '#888';
+      gameCtx.fillStyle = btn.active ? (isInf ? '#c0a020' : '#1a6e3c') : '#555';
+      gameCtx.strokeStyle = btn.active ? (isInf ? '#ffe066' : '#44ff88') : '#888';
       gameCtx.lineWidth = 2;
       gameCtx.beginPath();
       gameCtx.roundRect(bx - half, by - half, half * 2, half * 2, 5);
       gameCtx.fill();
       gameCtx.stroke();
-      // Infantry symbol ⚔ (crossed swords via text)
+      // Symbol
       gameCtx.fillStyle = btn.active ? '#fff' : '#aaa';
       gameCtx.font = `bold ${Math.round(GAME_TILE * 0.5)}px sans-serif`;
       gameCtx.textAlign = 'center';
       gameCtx.textBaseline = 'middle';
-      gameCtx.fillText('⚔', bx, by);
-      // "×10" label below
-      gameCtx.fillStyle = btn.active ? '#ffe066' : '#888';
+      gameCtx.fillText(isInf ? '⚔' : '🤖', bx, by);
+      // Label
+      gameCtx.fillStyle = btn.active ? (isInf ? '#ffe066' : '#44ff88') : '#888';
       gameCtx.font = `bold ${Math.round(GAME_TILE * 0.28)}px sans-serif`;
-      gameCtx.fillText('×10', bx, by + half * 0.72);
+      gameCtx.fillText(isInf ? '×10' : 'CPU', bx, by + half * 0.72);
     }
   }
 
