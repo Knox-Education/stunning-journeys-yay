@@ -1578,7 +1578,7 @@ const FIGHTERS = {
         type: 'self',
       },
     ],
-    trait: { name: 'Learning', description: 'After being hit 3 times by the same opponent, auto-dodge the next hit from them.' },
+    trait: { name: 'Learning', description: 'Answer Question rewards +2 extra energy for every minute the game has been going on.' },
   },
   hitman: {
     id: 'hitman',

@@ -10327,7 +10327,10 @@ function useAbility(key) {
     if (isGimkit) {
       // Gimkit T: Answer a science question
       lp.cdT = abil.cooldown || 6;
-      _showGimkitQuestion(lp, abil.energyReward || 10);
+      // Learning trait: base reward + 2 per minute elapsed
+      const _learnMins = Math.floor(_extremeGameTimer / 60);
+      const _learnReward = (abil.energyReward || 10) + _learnMins * 2;
+      _showGimkitQuestion(lp, _learnReward);
     } else if (isPoker) {
       lp.cdT = abil.cooldown;
       // Chip Change: randomize M1 damage for 30 seconds
@@ -12772,33 +12775,7 @@ function dealDamage(attacker, target, amount, viaSummon, allowFF) {
     const _fdx = target.x - _gimkitFort.x, _fdy = target.y - _gimkitFort.y;
     if (Math.sqrt(_fdx*_fdx + _fdy*_fdy) < _gimkitFort.radius) return;
   }
-  // Gimkit Trait: Learning — auto-dodge on 4th+ hit from same opponent
-  if (target.fighter && target.fighter.id === 'gimkit' && target.traitActive && attacker && attacker.id !== target.id && !attacker.isSummon) {
-    if (!target.gimkitHitCounts) target.gimkitHitCounts = {};
-    target.gimkitHitCounts[attacker.id] = (target.gimkitHitCounts[attacker.id] || 0) + 1;
-    if (target.gimkitDodgeTargetId === attacker.id) {
-      // Auto-dodge: cancel damage and teleport away
-      target.gimkitDodgeTargetId = null;
-      const _tr = GAME_TILE * PLAYER_RADIUS_RATIO;
-      let _jx = 0, _jy = 0;
-      const _adx = target.x - attacker.x, _ady = target.y - attacker.y;
-      const _ad = Math.sqrt(_adx*_adx + _ady*_ady) || 1;
-      const _side = Math.random() < 0.5 ? 1 : -1;
-      _jx = (-_ady/_ad) * _side; _jy = (_adx/_ad) * _side;
-      const _jd = GAME_TILE * 3;
-      for (let _s = 10; _s >= 1; _s--) {
-        const _tx = target.x + _jx * _jd * (_s / 10), _ty = target.y + _jy * _jd * (_s / 10);
-        if (canMoveTo(_tx, _ty, _tr)) { target.x = _tx; target.y = _ty; break; }
-      }
-      target.effects.push({ type: 'deer-dodge', timer: 0.4 });
-      if (target.id === localPlayerId) combatLog.push({ text: 'Learning: Auto-dodged!', timer: 2, color: '#f5a623' });
-      return; // damage fully negated
-    }
-    if (target.gimkitHitCounts[attacker.id] >= 3 && target.gimkitDodgeTargetId === null) {
-      target.gimkitDodgeTargetId = attacker.id;
-      if (target.id === localPlayerId) combatLog.push({ text: 'Learned their attack pattern! Next hit dodged!', timer: 3, color: '#f5a623' });
-    }
-  }
+  // Gimkit Trait: Learning — handled in Answer Question (scales energy reward by minutes played)
   // Team friendly fire prevention: same-team players/summons can't hurt each other
   if (!allowFF && attacker && attacker !== target && gameMode === 'teams') {
     const attackerTeam = attacker.isSummon
