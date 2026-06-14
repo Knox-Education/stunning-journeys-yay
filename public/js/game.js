@@ -2723,10 +2723,13 @@ function updateGame(dt) {
         }
       }
     }
-    // Spawn zombies every 4s
+    // Increment fort age
+    _gimkitFort.age = (_gimkitFort.age || 0) + dt;
+    // Spawn zombies: interval decreases from 4s to 1s over first 2 minutes
     _gimkitFort.zombieSpawnTimer -= dt;
+    const _zInterval = Math.max(1.0, 4.0 - (_gimkitFort.age / 30));
     if (_gimkitFort.zombieSpawnTimer <= 0) {
-      _gimkitFort.zombieSpawnTimer = 4.0;
+      _gimkitFort.zombieSpawnTimer = _zInterval;
       const angle = Math.random() * Math.PI * 2;
       const spawnR = _gimkitFort.radius + GAME_TILE * 7;
       _gimkitFort.zombies.push({
@@ -3903,6 +3906,30 @@ function updateProjectiles(dt) {
           projectiles.splice(i, 1);
           break;
         }
+      }
+    }
+    // Fort zombie hit detection: Gimkit's bolts (and any projectile from Gimkit) can damage fort zombies
+    if (_gimkitFort && _gimkitFort.active && _gimkitFort.zombies.length > 0) {
+      const _pOwner = gamePlayers.find(pl => pl.id === p.ownerId);
+      if (_pOwner && _pOwner.fighter && _pOwner.fighter.id === 'gimkit') {
+        const _zHitR = GAME_TILE * 0.32 + (p.boltRadius || 1.0) * GAME_TILE * PLAYER_RADIUS_RATIO;
+        for (let _zhi = _gimkitFort.zombies.length - 1; _zhi >= 0; _zhi--) {
+          const _zh = _gimkitFort.zombies[_zhi];
+          if (!_zh.alive) continue;
+          const _zhdx = _zh.x - p.x, _zhdy = _zh.y - p.y;
+          if (Math.sqrt(_zhdx*_zhdx + _zhdy*_zhdy) < _zHitR) {
+            _zh.hp -= p.damage || 0;
+            _zh.hitFlash = 0.3;
+            if (_zh.hp <= 0) {
+              _zh.alive = false;
+              _gimkitFort.zombies.splice(_zhi, 1);
+              combatLog.push({ text: 'Zombie slain!', timer: 2, color: '#2ecc71' });
+            }
+            projectiles.splice(i, 1);
+            break;
+          }
+        }
+        if (i >= projectiles.length) continue; // spliced inside zombie loop
       }
     }
   }
@@ -10959,7 +10986,7 @@ function useAbility(key) {
       const fortX = (gameMap.cols / 2) * GAME_TILE;
       const fortY = (gameMap.rows / 2) * GAME_TILE;
       _gimkitFort = { active: true, x: fortX, y: fortY, radius: GAME_TILE * 2.8, lives: 3,
-        zombies: [], zombieSpawnTimer: 3.0, healTimer: 0, flagAngle: 0, hitFlash: 0 };
+        zombies: [], zombieSpawnTimer: 3.0, healTimer: 0, flagAngle: 0, hitFlash: 0, age: 0 };
       // Gimkit stays where he is — fort spawns at center
       lp.effects.push({ type: 'gimkit-fort-spawn', timer: 2.0 });
       combatLog.push({ text: 'THE GIMPOCALYPSE! Fort spawned at map center!', timer: 5, color: '#f5a623' });
