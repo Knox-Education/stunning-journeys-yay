@@ -2728,7 +2728,7 @@ function updateGame(dt) {
     if (_gimkitFort.zombieSpawnTimer <= 0) {
       _gimkitFort.zombieSpawnTimer = 4.0;
       const angle = Math.random() * Math.PI * 2;
-      const spawnR = _gimkitFort.radius + GAME_TILE * 2;
+      const spawnR = _gimkitFort.radius + GAME_TILE * 7;
       _gimkitFort.zombies.push({
         x: _gimkitFort.x + Math.cos(angle) * spawnR,
         y: _gimkitFort.y + Math.sin(angle) * spawnR,
@@ -16997,7 +16997,7 @@ function renderGame() {
       // Ground shadow: at player ground position, shrinks as Gimkit rises
       if (p.gimkitJumping) {
         const _sScale = Math.max(0.35, 1.0 - (_jHeight / (radius * 3.2)) * 0.65);
-        gameCtx.fillStyle = 'rgba(0,0,0,' + (0.28 * _sScale) + ')';
+        gameCtx.fillStyle = 'rgba(0,0,0,' + (0.55 * _sScale + 0.15) + ')';
         gameCtx.beginPath();
         gameCtx.ellipse(sx, sy + radius * 0.4, radius * _sScale * 0.85, radius * 0.28 * _sScale, 0, 0, Math.PI * 2);
         gameCtx.fill();
