@@ -1407,7 +1407,7 @@ const FIGHTERS = {
 
   omori: {
     id: 'omori',
-    name: 'Omori',
+    name: 'Unknown',
     hp: 1250,
     healAmount: 100,
     healDelay: 10,
@@ -1430,7 +1430,7 @@ const FIGHTERS = {
       },
       {
         key: 'E',
-        name: 'Party Friend',
+        name: 'Only',
         description: 'Spawns Kel (ranged, 200 dmg), Aubrey (melee, 200 dmg), or Hero (Healer, meele does 100 dmg). All follow Omori. 40s CD.',
         damage: 0,
         cooldown: 40,
