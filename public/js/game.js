@@ -1806,21 +1806,6 @@ function updateGame(dt) {
         p.dragonBreathWindup -= wallDt;
         if (p.dragonBreathWindup < 0) p.dragonBreathWindup = 0;
       }
-      // Gimkit: jump timer
-      if (p.fighter && p.fighter.id === 'gimkit' && p.gimkitJumping) {
-        p.gimkitJumpTimer -= wallDt;
-        if (p.gimkitJumpTimer <= 0) {
-          p.gimkitJumping = false; p.gimkitJumpTimer = 0;
-          p.effects.push({ type: 'gimkit-land', timer: 0.5 });
-          const _gR = Math.floor(p.y / GAME_TILE), _gC = Math.floor(p.x / GAME_TILE);
-          const _gTile = (_gR>=0&&_gR<gameMap.rows&&_gC>=0&&_gC<gameMap.cols)?gameMap.tiles[_gR][_gC]:TILE.ROCK;
-          if (_gTile === TILE.ROCK || _gTile === TILE.WATER || isStumpTile(_gC, _gR)) {
-            if (p.gimkitShadowX) { p.x = p.gimkitShadowX; p.y = p.gimkitShadowY; }
-            dealDamage(null, p, 200);
-            if (p.id === localPlayerId) combatLog.push({ text: 'Landed on obstacle! 200 dmg!', timer: 3, color: '#ff4444' });
-          }
-        }
-      }
       // Fly timer
       if (p.dragonFlying) {
         p.dragonFlyTimer -= wallDt;
@@ -1983,7 +1968,23 @@ function updateGame(dt) {
       }
     }
 
-    // ── Dog Tooth timers ──
+    // Gimkit: jump timer (runs for all players, not inside dragon block)
+    if (p.fighter && p.fighter.id === 'gimkit' && p.gimkitJumping) {
+      p.gimkitJumpTimer -= wallDt;
+      if (p.gimkitJumpTimer <= 0) {
+        p.gimkitJumping = false; p.gimkitJumpTimer = 0;
+        p.effects.push({ type: 'gimkit-land', timer: 0.5 });
+        const _gR = Math.floor(p.y / GAME_TILE), _gC = Math.floor(p.x / GAME_TILE);
+        const _gTile = (_gR>=0&&_gR<gameMap.rows&&_gC>=0&&_gC<gameMap.cols)?gameMap.tiles[_gR][_gC]:TILE.ROCK;
+        if (_gTile === TILE.ROCK || _gTile === TILE.WATER || isStumpTile(_gC, _gR)) {
+          if (p.gimkitShadowX) { p.x = p.gimkitShadowX; p.y = p.gimkitShadowY; }
+          dealDamage(null, p, 200);
+          if (p.id === localPlayerId) combatLog.push({ text: 'Landed on obstacle! 200 dmg!', timer: 3, color: '#ff4444' });
+        }
+      }
+    }
+
+        // ── Dog Tooth timers ──
     if (p.fighter && p.fighter.id === 'dogtooth' && p.alive) {
       // Smile Tapes: auto-chase nearest enemy + timer countdown
       if (p.dogtoothSmileTimer > 0) {
@@ -3705,7 +3706,7 @@ function updateProjectiles(dt) {
         }
         projectiles.splice(i, 1); continue;
       }
-      if (!p.dndFireball) { projectiles.splice(i, 1); continue; }
+      if (!p.dndFireball && p.type !== 'cannonball') { projectiles.splice(i, 1); continue; }
     }
     // Fireball stops at water/sea
     if (p.dndFireball && tile === TILE.WATER) {
@@ -10265,6 +10266,11 @@ function useAbility(key) {
     } else if (isGimkit) {
       // Gimkit R: Jump — airborne for 2s, invincible, free movement
       if (lp.gimkitJumping) { lp.cdR = 0; return; } // already jumping
+      if ((lp.gimkitEnergy || 0) < 5) {
+        combatLog.push({ text: 'Jump needs 5 energy!', timer: 2, color: '#e74c3c' });
+        lp.cdR = 0; return;
+      }
+      lp.gimkitEnergy = (lp.gimkitEnergy || 0) - 5;
       const _jDur = abil.duration || 2.0;
       lp.gimkitJumping = true;
       lp.gimkitJumpTimer = _jDur;
