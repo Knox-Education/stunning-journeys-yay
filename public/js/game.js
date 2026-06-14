@@ -16456,11 +16456,13 @@ function renderGame() {
       gameCtx.fillStyle = '#600'; gameCtx.fillRect(sx - radius * 0.6, sy - radius * 1.4, radius * 1.2, 3);
       gameCtx.fillStyle = '#0f0'; gameCtx.fillRect(sx - radius * 0.6, sy - radius * 1.4, radius * 1.2 * hHpFrac, 3);
     } else {
-      // Normal player dot
-      gameCtx.fillStyle = isDying ? '#8b0000' : (p.boiledOneActive ? '#8b0000' : p.color);
-      gameCtx.beginPath();
-      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
-      gameCtx.fill();
+      // Normal player dot — skip for Gimkit while jumping (body is in the air; shadow replaces it)
+      if (!(p.fighter && p.fighter.id === 'gimkit' && p.gimkitJumping)) {
+        gameCtx.fillStyle = isDying ? '#8b0000' : (p.boiledOneActive ? '#8b0000' : p.color);
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
 
     // Outline
     gameCtx.strokeStyle = 'rgba(0,0,0,0.4)';
@@ -17001,7 +17003,7 @@ function renderGame() {
       // Ground shadow: at player ground position, shrinks as Gimkit rises
       if (p.gimkitJumping) {
         const _sScale = Math.max(0.35, 1.0 - (_jHeight / (radius * 3.2)) * 0.65);
-        gameCtx.fillStyle = 'rgba(0,0,0,' + (0.55 * _sScale + 0.15) + ')';
+        gameCtx.fillStyle = 'rgba(0,0,0,0.82)';
         gameCtx.beginPath();
         gameCtx.ellipse(sx, sy + radius * 0.4, radius * _sScale * 0.85, radius * 0.28 * _sScale, 0, 0, Math.PI * 2);
         gameCtx.fill();
