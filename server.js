@@ -19,6 +19,9 @@ const io = new Server(server, {
 });
 
 app.get('/', (req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
