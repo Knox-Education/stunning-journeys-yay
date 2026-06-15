@@ -18,14 +18,6 @@ const io = new Server(server, {
   pingInterval: 10000,
 });
 
-app.get('/', (req, res) => {
-  const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Disposition', 'inline');
-  res.send(html);
-});
-
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Lobby state ─────────────────────────────────────────────
