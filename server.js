@@ -2,26 +2,31 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' },
+  cors: {
+    origin: (origin, cb) => cb(null, true),
+    credentials: true,
+  },
   transports: ['polling', 'websocket'],
   allowEIO3: true,
   pingTimeout: 30000,
   pingInterval: 10000,
 });
 
-app.use(express.static(path.join(__dirname, 'public'), {
-  etag: false,
-  maxAge: 0,
-  setHeaders: (res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-  }
-}));
+app.get('/', (req, res) => {
+  const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Disposition', 'inline');
+  res.send(html);
+});
+
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Lobby state ─────────────────────────────────────────────
 // lobbies Map:  code -> { host, mapIndex, players: Map<socketId, {name, color}> }

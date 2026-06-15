@@ -808,6 +808,12 @@ function createPlayerState(p, spawn, fighter) {
     gimkitCrowdControl: false,    // Crowd Control F: bolts explode
     gimkitHitCounts: {},          // trait: hit counts by attackerId
     gimkitDodgeTargetId: null,    // trait: dodge next hit from this id
+    // Toy Lover state
+    toyCarId: null, toyCarControlling: false, toyCarHoldTimer: 0,
+    toyLegoWallId: null,
+    toyTankActive: false, toyTankHp: 0,
+    toyRubikTraps: [], toyRubikPlacing: false, toyRubikPlaceTimer: 0,
+    toyRubikPlaceX: 0, toyRubikPlaceY: 0, toyTrackingArrow: null,
   };
 }
 
@@ -2585,6 +2591,80 @@ function updateGame(dt) {
       }
     }
 
+    // Toy Lover per-frame timers
+    // Gimkit CPU: passive energy gain + auto-quiz answers + Locking In timeout
+    if (p.isCPU && p.fighter && p.fighter.id === 'gimkit' && p.alive) {
+      p.gimkitEnergy = Math.min(100, (p.gimkitEnergy || 0) + 3 * wallDt); // ~3/s passive
+      if (p.hitmanLockingIn) { // won't be set but guard anyway
+        p.hitmanLockingInTimer -= wallDt;
+        if (p.hitmanLockingInTimer <= 0) { p.hitmanLockingIn = false; }
+      }
+    }
+    // Hitman CPU: Locking In countdown + reload countdown
+    if (p.isCPU && p.fighter && p.fighter.id === 'hitman' && p.alive) {
+      if (p.hitmanLockingIn) {
+        p.hitmanLockingInTimer -= wallDt;
+        if (p.hitmanLockingInTimer <= 0) { p.hitmanLockingIn = false; p.hitmanLockingFireTimer = 0; }
+      }
+      if (p.hitmanEquipping) {
+        p.hitmanEquipTimer -= wallDt;
+        if (p.hitmanEquipTimer <= 0) { p.hitmanEquipping = false; }
+      }
+      if (p.hitmanReloading) {
+        p.hitmanReloadTimer -= wallDt;
+        if (p.hitmanReloadTimer <= 0) {
+          p.hitmanReloading = false;
+          const wDef = p.fighter.abilities[0].weapons[p.hitmanWeapon || 'pistol'];
+          p.hitmanAmmo = wDef ? wDef.maxAmmo : 20;
+        }
+      }
+    }
+    if (p.fighter && p.fighter.id === 'toylover' && p.alive) {
+      // Tank form: revert when tank HP hits 0
+      if (p.toyTankActive && (p.toyTankHp || 0) <= 0) {
+        p.toyTankActive = false; p.hp = p.maxHp; p.toyTankHp = 0;
+        p.effects.push({ type: 'tank-destroyed', timer: 1.5 });
+        if (p.id === localPlayerId) combatLog.push({ text: '🛡 Tank destroyed! Reverted to full HP.', timer: 4, color: '#c0a000' });
+      }
+      // Rubik's Cube placement countdown
+      if (p.toyRubikPlacing) {
+        p.toyRubikPlaceTimer -= wallDt;
+        if (p.toyRubikPlaceTimer <= 0) {
+          p.toyRubikPlacing = false; p.cdF = 0;
+          if (!p.toyRubikTraps) p.toyRubikTraps = [];
+          const _tid = 'rubik-' + p.id + '-' + Date.now();
+          p.toyRubikTraps.push({ x: p.toyRubikPlaceX, y: p.toyRubikPlaceY, trapId: _tid, triggered: false });
+          p.effects.push({ type: 'rubik-armed', timer: 1.0 });
+          if (p.id === localPlayerId) combatLog.push({ text: "🧩 Rubik's Cube trap armed!", timer: 3, color: '#9b59b6' });
+        }
+      }
+      // Rubik traps: trigger on enemy contact
+      if (p.toyRubikTraps && p.toyRubikTraps.length > 0) {
+        const _tR2 = GAME_TILE * 0.7;
+        for (const _trap of p.toyRubikTraps) {
+          if (_trap.triggered) continue;
+          for (const _tgt of gamePlayers) {
+            if (_tgt.id === p.id || !_tgt.alive || _tgt.isSummon) continue;
+            if (gameMode === 'teams' && p.team && _tgt.team === p.team) continue;
+            const _tdx2 = _tgt.x - _trap.x, _tdy2 = _tgt.y - _trap.y;
+            if (_tdx2*_tdx2 + _tdy2*_tdy2 < _tR2*_tR2) {
+              _trap.triggered = true;
+              dealDamage(p, _tgt, 700);
+              _tgt.stunned = Math.max(_tgt.stunned || 0, 3);
+              if (_tgt.effects) _tgt.effects.push({ type: 'stun', timer: 1 });
+              p.toyTrackingArrow = { targetId: _tgt.id, timer: 10 };
+              if (p.id === localPlayerId) combatLog.push({ text: "🧩 Rubik's Cube triggered! 700dmg + 3s stun!", timer: 4, color: '#9b59b6' });
+              break;
+            }
+          }
+        }
+      }
+      // Tracking arrow timer
+      if (p.toyTrackingArrow) {
+        p.toyTrackingArrow.timer -= wallDt;
+        if (p.toyTrackingArrow.timer <= 0) p.toyTrackingArrow = null;
+      }
+    }
     // Cricket: check if wickets are still alive (both must survive)
     if (p.wicketIds && p.wicketIds.length === 2) {
       const w0 = gamePlayers.find(x => x.id === p.wicketIds[0]);
@@ -3007,7 +3087,7 @@ function updateGame(dt) {
           combatLog.push({ text: '⚔ Infantry incoming! Kill them all to reset.', timer: 4, color: '#f39c12' });
         } else if (btn.type === 'cpu') {
           // Spawn a random easy CPU opponent
-          const cpuFighters = getAllFighterIds().filter(f => f !== 'moderator' && f !== 'unstable' && f !== 'omori' && f !== 'gimkit' && f !== 'hitman');
+          const cpuFighters = getAllFighterIds().filter(f => f !== 'moderator' && f !== 'unstable' && f !== 'omori');
           const cpuFighterId = cpuFighters[Math.floor(Math.random() * cpuFighters.length)];
           const cpuFighter = getFighter(cpuFighterId);
           const cpuId = 'training-cpu-btn-' + Date.now();
@@ -3222,6 +3302,19 @@ function updateMovement(dt) {
     const dot = dx * awayX + dy * awayY;
     if (dot > 0) speed *= 1.5;
   }
+  // Toy Lover: Expert Tag Player — +10% speed when enemy within 5 tiles; slow in tank
+  if (localPlayer.fighter && localPlayer.fighter.id === 'toylover') {
+    const _tlR = GAME_TILE * 5;
+    let _tlClose = false;
+    for (const _p of gamePlayers) {
+      if (_p.id === localPlayer.id || !_p.alive || _p.isSummon) continue;
+      if (gameMode === 'teams' && _p.team && _p.team === localPlayer.team) continue;
+      const _ddx = _p.x - localPlayer.x, _ddy = _p.y - localPlayer.y;
+      if (_ddx*_ddx + _ddy*_ddy < _tlR*_tlR) { _tlClose = true; break; }
+    }
+    if (_tlClose) speed *= 1.1;
+    if (localPlayer.toyTankActive) speed = (localPlayer.fighter.abilities[4].tankSpeed || 1.2) * speed / (localPlayer.fighter.speed || 3.0);
+  }
   // Noli: 50% speed boost when no fighter is within 5 tiles
   if (localPlayer.fighter && localPlayer.fighter.id === 'noli') {
     const fiveTiles = GAME_TILE * 5;
@@ -3299,8 +3392,8 @@ function updateMovement(dt) {
     localPlayer.x = nxClamped;
     localPlayer.y = nyClamped;
   } else {
-    if (canMoveTo(newX, localPlayer.y, radius)) localPlayer.x = newX;
-    if (canMoveTo(localPlayer.x, newY, radius)) localPlayer.y = newY;
+    if (canMoveTo(newX, localPlayer.y, radius) && !_blockedByLegoWall(newX, localPlayer.y, radius, localPlayer.id)) localPlayer.x = newX;
+    if (canMoveTo(localPlayer.x, newY, radius) && !_blockedByLegoWall(localPlayer.x, newY, radius, localPlayer.id)) localPlayer.y = newY;
   }
 
   // Spike collision (John Doe spikes): push player out of spike radius, but allow sliding
@@ -3379,6 +3472,36 @@ function pushPlayersOffStump() {
   }
 }
 
+function _toyCarExplode(car, owner) {
+  const _eR = GAME_TILE * 1.5;
+  for (const _et of gamePlayers) {
+    if (!_et.alive || _et.isSummon) continue;
+    if (owner && _et.id === owner.id) continue;
+    if (gameMode === 'teams' && owner && owner.team && _et.team === owner.team) continue;
+    const _edx = _et.x - car.x, _edy = _et.y - car.y;
+    if (_edx*_edx + _edy*_edy < _eR*_eR) {
+      dealDamage(owner, _et, 450);
+      _applyPyroBurn(_et, 100, 5);
+      if (_et.effects) _et.effects.push({ type: 'hit', timer: 0.5 });
+    }
+  }
+  car.alive = false; car.hp = 0;
+  if (car.effects) car.effects.push({ type: 'car-explode', timer: 0.8 });
+  if (owner) {
+    owner.toyCarId = null; owner.toyCarControlling = false;
+    if (owner.id === localPlayerId) combatLog.push({ text: '🚗 Toy Car exploded! 450dmg + burn!', timer: 3, color: '#e74c3c' });
+  }
+}
+function _blockedByLegoWall(px, py, radius, moverId) {
+  for (const _lw of gamePlayers) {
+    if (!_lw.alive || !_lw.isSummon || _lw.summonType !== 'toylover-lego-wall') continue;
+    if (_lw.summonOwner === moverId) continue;
+    const _halfW = (_lw.wallW || GAME_TILE) / 2 + radius;
+    const _halfH = (_lw.wallH || GAME_TILE * 3) / 2 + radius;
+    if (Math.abs(px - _lw.x) < _halfW && Math.abs(py - _lw.y) < _halfH) return true;
+  }
+  return false;
+}
 function canMoveTo(px, py, radius) {
   const offsets = [
     { x: -radius, y: -radius }, { x: radius, y: -radius },
@@ -3689,13 +3812,39 @@ function updateProjectiles(dt) {
     p.x += p.vx * dt;
     p.y += p.vy * dt;
 
+    // Toy Lover ball: bounce off walls
+    if (p.type === 'toylover-ball') {
+      const _bc = Math.floor(p.x / GAME_TILE), _br = Math.floor(p.y / GAME_TILE);
+      let _bounced = false;
+      if (_bc < 0 || _bc >= gameMap.cols) { p.vx = -p.vx; p.x = Math.max(4, Math.min(gameMap.cols*GAME_TILE-4, p.x)); _bounced = true; }
+      if (_br < 0 || _br >= gameMap.rows) { p.vy = -p.vy; p.y = Math.max(4, Math.min(gameMap.rows*GAME_TILE-4, p.y)); _bounced = true; }
+      if (!_bounced && _bc >= 0 && _bc < gameMap.cols && _br >= 0 && _br < gameMap.rows) {
+        const _bt = gameMap.tiles[_br][_bc];
+        if (_bt === TILE.ROCK || _bt === TILE.WATER || isStumpTile(_bc, _br)) {
+          p.x -= p.vx*dt; p.y -= p.vy*dt;
+          const _hc = Math.floor((p.x + Math.sign(p.vx)*8) / GAME_TILE);
+          const _vr = Math.floor((p.y + Math.sign(p.vy)*8) / GAME_TILE);
+          const _hB = _hc < 0 || _hc >= gameMap.cols || gameMap.tiles[_br] === undefined || (gameMap.tiles[_br][_hc] !== undefined && (gameMap.tiles[_br][_hc] === TILE.ROCK || gameMap.tiles[_br][_hc] === TILE.WATER));
+          const _vB = _vr < 0 || _vr >= gameMap.rows || gameMap.tiles[_vr] === undefined || (gameMap.tiles[_vr][_bc] !== undefined && (gameMap.tiles[_vr][_bc] === TILE.ROCK || gameMap.tiles[_vr][_bc] === TILE.WATER));
+          if (_hB) p.vx = -p.vx; if (_vB) p.vy = -p.vy;
+          if (!_hB && !_vB) { p.vx = -p.vx; p.vy = -p.vy; }
+          _bounced = true;
+        }
+      }
+      if (_bounced) {
+        p.bouncesLeft = (p.bouncesLeft || 0) - 1;
+        if (p.hitIds) p.hitIds.length = 0;
+        if (p.bouncesLeft < 0) { projectiles.splice(i, 1); continue; }
+      }
+    }
+
     // Wall collision (rock blocks, out of bounds = sea destroys)
     const col = Math.floor(p.x / GAME_TILE);
     const row = Math.floor(p.y / GAME_TILE);
     if (col < 0 || col >= gameMap.cols || row < 0 || row >= gameMap.rows) {
-      projectiles.splice(i, 1); continue;
+      if (p.type !== 'toylover-ball') { projectiles.splice(i, 1); continue; }
     }
-    const tile = gameMap.tiles[row][col];
+    const tile = (col>=0&&col<gameMap.cols&&row>=0&&row<gameMap.rows) ? gameMap.tiles[row][col] : TILE.GROUND;
     if (tile === TILE.ROCK || isStumpTile(col, row)) {
       if (p.type === 'gimkit-cc-bolt') {
         // CC bolt explodes on wall hit
@@ -3709,7 +3858,7 @@ function updateProjectiles(dt) {
         }
         projectiles.splice(i, 1); continue;
       }
-      if (!p.dndFireball && p.type !== 'cannonball') { projectiles.splice(i, 1); continue; }
+      if (!p.dndFireball && p.type !== 'cannonball' && p.type !== 'toylover-ball') { projectiles.splice(i, 1); continue; }
     }
     // Fireball stops at water/sea
     if (p.dndFireball && tile === TILE.WATER) {
@@ -3755,6 +3904,7 @@ function updateProjectiles(dt) {
         }
         // Shockwave: skip already-hit targets
         if (p.hitTargets && p.hitTargets.has(target.id)) continue;
+        if (p.type === 'toylover-ball' && p.hitIds && p.hitIds.includes(target.id)) continue;
         const dx = target.x - p.x;
         const dy = target.y - p.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
@@ -3812,6 +3962,12 @@ function updateProjectiles(dt) {
             }
           }
           dealDamage(owner, target, Math.round(p.damage), !!p.fromSummon);
+          if (p.type === 'toylover-ball') {
+            if (!p.hitIds) p.hitIds = [];
+            p.hitIds.push(target.id);
+            if (target.effects) target.effects.push({ type: 'hit', timer: 0.4 });
+            continue;
+          }
           // Log gamble card hits
           if (p.type === 'card') {
             combatLog.push({ text: '🎲 Gamble hit ' + target.name + ' for ' + p.damage + '!', timer: 4, color: '#f5a623' });
@@ -4459,6 +4615,42 @@ function updateSummons(dt) {
           continue;
         }
       }
+    } else if (s.summonType === 'toylover-lego-wall') {
+      if (s.wallTimer !== undefined) {
+        s.wallTimer -= dt;
+        if (s.wallTimer <= 0) {
+          s.alive = false; s.hp = 0;
+          s.effects.push({ type: 'death', timer: 2 });
+          if (owner) owner.toyLegoWallId = null;
+          continue;
+        }
+      }
+    } else if (s.summonType === 'toylover-car') {
+      const _cR = GAME_TILE * 0.4;
+      if (owner && owner.toyCarControlling && owner.id === localPlayerId) {
+        const _cSpd = 5.0 * GAME_TILE;
+        let _cdx = 0, _cdy = 0;
+        if (keys['w'] || keys['W'] || keys['ArrowUp']) _cdy -= 1;
+        if (keys['s'] || keys['S'] || keys['ArrowDown']) _cdy += 1;
+        if (keys['a'] || keys['A'] || keys['ArrowLeft']) _cdx -= 1;
+        if (keys['d'] || keys['D'] || keys['ArrowRight']) _cdx += 1;
+        const _cLen = Math.sqrt(_cdx*_cdx + _cdy*_cdy);
+        if (_cLen > 0) {
+          _cdx /= _cLen; _cdy /= _cLen;
+          const nx = s.x + _cdx*_cSpd*dt, ny = s.y + _cdy*_cSpd*dt;
+          if (!canMoveTo(nx, ny, _cR)) { _toyCarExplode(s, owner); continue; }
+          s.x = nx; s.y = ny;
+        }
+      }
+      for (const _ct of gamePlayers) {
+        if (!_ct.alive || _ct.isSummon || (owner && _ct.id === owner.id)) continue;
+        if (gameMode === 'teams' && owner && owner.team && _ct.team === owner.team) continue;
+        const _ex = _ct.x - s.x, _ey = _ct.y - s.y;
+        if (_ex*_ex + _ey*_ey < (_cR + GAME_TILE*PLAYER_RADIUS_RATIO)*(_cR + GAME_TILE*PLAYER_RADIUS_RATIO)) {
+          _toyCarExplode(s, owner); break;
+        }
+      }
+      if (!s.alive) continue;
     } else if (s.summonType === 'dnd-orc') {
       // D&D Orc: chase the summoner (its target), melee attack
       if (s.summonAttackTimer > 0) s.summonAttackTimer -= dt;
@@ -5688,6 +5880,9 @@ function cpuAttack(cpu, params) {
   const isPyro = fighter.id === 'pyromaniac';
   const isHeavyRope = fighter.id === 'heavyrope';
   const isOmori = fighter.id === 'omori';
+  const isHitman = fighter.id === 'hitman';
+  const isGimkit = fighter.id === 'gimkit';
+  const isToylover = fighter.id === 'toylover';
 
   // Add aim error based on difficulty
   const errorAngle = (Math.random() - 0.5) * params.aimError * 2;
@@ -5951,6 +6146,35 @@ function cpuAttack(cpu, params) {
           t.effects.push({ type: 'fear', timer: fearDur });
         }
         cpu.effects.push({ type: 'pyro-roar', timer: 1.5 });
+        return;
+      }
+    } else if (isHitman) {
+      // Hitman SPACE: Locking In — fire rapidly for 20s at target
+      if (dist < 20 * GAME_TILE) {
+        cpu.specialUsed = true;
+        const abil = fighter.abilities[4];
+        cpu.hitmanLockingIn = true;
+        cpu.hitmanLockingInTimer = abil.duration || 20;
+        cpu.hitmanLockingFireTimer = 0;
+        cpu.effects.push({ type: 'hitman-lockin', timer: 1.5 });
+        return;
+      }
+    } else if (isGimkit) {
+      // Gimkit SPACE: Jump boost — use when energy >= 10 and enemy in range
+      if ((cpu.gimkitEnergy || 0) >= 10 && dist < 10 * GAME_TILE) {
+        cpu.specialUsed = true;
+        cpu.gimkitJumping = true;
+        cpu.gimkitJumpTimer = fighter.abilities[4].jumpDuration || 2.0;
+        cpu.gimkitEnergy = Math.max(0, (cpu.gimkitEnergy || 0) - 10);
+        cpu.effects.push({ type: 'gimkit-jump', timer: 2.0 });
+        return;
+      }
+    } else if (isToylover) {
+      // Toylover SPACE: Life-Sized Tank — when not already tanking and enemy nearby
+      if (!cpu.toyTankActive && dist < 15 * GAME_TILE) {
+        cpu.toyTankActive = true;
+        cpu.toyTankHp = 2000;
+        cpu.effects.push({ type: 'tank-transform', timer: 1.5 });
         return;
       }
     } else if (fighter.id === 'heavyrope') {
@@ -6252,6 +6476,74 @@ function cpuAttack(cpu, params) {
         gamePlayers.push(fr);
         cpu.omoriPartyIds.push(fid2);
         cpu.effects.push({ type: 'omori-party-spawn', timer: 1.5 });
+        return;
+      }
+    } else if (isHitman) {
+      // Hitman E: Swap Weapon — cycle through weapons strategically
+      cpu.cdE = fighter.abilities[1].cooldown;
+      const weapons = ['pistol', 'akm', 'sniper'];
+      const cur = cpu.hitmanWeapon || 'pistol';
+      let next;
+      if (isHardPlus) {
+        // Smart: sniper at range, akm at mid, pistol when low ammo or close
+        if (dist > 10 * GAME_TILE) next = 'sniper';
+        else if (dist > 4 * GAME_TILE) next = 'akm';
+        else next = 'pistol';
+      } else {
+        const opts = weapons.filter(w => w !== cur);
+        next = opts[Math.floor(Math.random() * opts.length)];
+      }
+      if (next !== cur) {
+        cpu.hitmanWeapon = next;
+        const wDef = fighter.abilities[0].weapons[next];
+        cpu.hitmanAmmo = wDef.maxAmmo;
+        cpu.hitmanEquipping = true;
+        cpu.hitmanEquipTimer = 1.0;
+        cpu.effects.push({ type: 'hitman-swap', timer: 0.5 });
+        return;
+      }
+    } else if (isGimkit) {
+      // Gimkit E: Fish for heal — use when near water and low HP
+      const eAbil = fighter.abilities[1];
+      const eCostE = eAbil.energyCost || 5;
+      if ((cpu.gimkitEnergy || 0) >= eCostE && hpFrac < 0.6) {
+        // Check if on/near water tile
+        const tileR = Math.floor(cpu.y / GAME_TILE);
+        const tileC = Math.floor(cpu.x / GAME_TILE);
+        const neighbors = [[0,0],[0,1],[0,-1],[1,0],[-1,0]];
+        const onWater = neighbors.some(([dr,dc]) => {
+          const row = gameMap.tiles[tileR+dr]; if (!row) return false;
+          return row[tileC+dc] === 'WATER';
+        });
+        if (onWater) {
+          cpu.cdE = 0;
+          cpu.gimkitFishing = true;
+          cpu.gimkitFishTimer = 3.0;
+          cpu.gimkitEnergy = Math.max(0, (cpu.gimkitEnergy || 0) - eCostE);
+          cpu.effects.push({ type: 'gimkit-fish', timer: 3.0 });
+          return;
+        }
+      }
+    } else if (isToylover) {
+      // Toylover E: Spawn Toy Car — spawn when no car exists
+      const eAbil = fighter.abilities[1];
+      const hasCar = cpu.toyCarId && gamePlayers.find(p => p.id === cpu.toyCarId && p.alive);
+      if (!hasCar && dist < 15 * GAME_TILE) {
+        const _cid = 'toylover-car-cpu-' + cpu.id + '-' + Date.now();
+        const _car = createPlayerState(
+          { id: _cid, name: 'Toy Car', color: '#e74c3c', fighterId: 'toylover' },
+          { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) }, cpu.fighter
+        );
+        _car.x = cpu.x + aimNx * GAME_TILE * 1.5;
+        _car.y = cpu.y + aimNy * GAME_TILE * 1.5;
+        if (!canMoveTo(_car.x, _car.y, GAME_TILE * 0.4)) { _car.x = cpu.x; _car.y = cpu.y; }
+        _car.hp = eAbil.carHp || 300; _car.maxHp = eAbil.carHp || 300;
+        _car.isSummon = true; _car.summonOwner = cpu.id; _car.summonType = 'toylover-car';
+        _car.wallW = GAME_TILE * 0.8; _car.wallH = GAME_TILE * 0.8;
+        gamePlayers.push(_car);
+        cpu.toyCarId = _cid;
+        cpu.cdE = eAbil.cooldown || 20;
+        cpu.effects.push({ type: 'toy-car-spawn', timer: 0.5 });
         return;
       }
     } else if (isPyro) {
@@ -6562,6 +6854,51 @@ function cpuAttack(cpu, params) {
     }
   }
 
+  // Hitman/Gimkit/Toylover R abilities handled in M1 sections via inlined logic
+  // (R handled here for these fighters)
+  if (cpu.cdR <= 0) {
+    if (isHitman) {
+      // Hitman R: Explosive Round — use when target in range
+      const rAbil = fighter.abilities[2];
+      if (dist < 25 * GAME_TILE) {
+        cpu.cdR = rAbil.cooldown || 40;
+        const spd = 35 * GAME_TILE / 10;
+        projectiles.push({ x: cpu.x, y: cpu.y, vx: aimNx*spd, vy: aimNy*spd,
+          type: 'hitman-explosive', ownerId: cpu.id, timer: 3,
+          damage: rAbil.damage || 100, radius: GAME_TILE * 0.3, color: '#ff8800' });
+        cpu.effects.push({ type: 'hitman-fire', timer: 0.2, aimNx, aimNy, wKey: 'explosive' });
+      }
+    } else if (isGimkit) {
+      // Gimkit R: Energy Surge — AoE stun + damage around self when enemies close
+      const rAbil = fighter.abilities[2];
+      const eCostR = rAbil.energyCost || 8;
+      if ((cpu.gimkitEnergy || 0) >= eCostR && dist < 4 * GAME_TILE) {
+        cpu.cdR = rAbil.cooldown || 6;
+        cpu.gimkitEnergy = Math.max(0, (cpu.gimkitEnergy || 0) - eCostR);
+        const surgeRadius = (rAbil.radius || 3) * GAME_TILE;
+        for (const t of gamePlayers) {
+          if (t.id === cpu.id || !t.alive) continue;
+          if (gameMode === 'teams' && cpu.team && t.team === cpu.team) continue;
+          const d2 = Math.sqrt((t.x-cpu.x)**2+(t.y-cpu.y)**2);
+          if (d2 < surgeRadius) { dealDamage(cpu, t, rAbil.damage||150); t.stunned = rAbil.stunDuration||1.5; }
+        }
+        cpu.effects.push({ type: 'gimkit-surge', timer: 0.8 });
+      }
+    } else if (isToylover) {
+      // Toylover R: Ball throw — always throw when off CD
+      if (dist < 30 * GAME_TILE) {
+        const rAbil = fighter.abilities[2];
+        cpu.cdR = rAbil.cooldown || 30;
+        const spd = 20 * GAME_TILE / 10;
+        projectiles.push({ x: cpu.x, y: cpu.y, vx: aimNx*spd, vy: aimNy*spd,
+          type: 'toylover-ball', ownerId: cpu.id, timer: rAbil.ballDuration||5,
+          damage: rAbil.damage||100, radius: GAME_TILE*0.25, color: '#3498db',
+          bouncesLeft: rAbil.bounces||5, hitIds: [] });
+        cpu.effects.push({ type: 'ball-throw', timer: 0.3 });
+      }
+    }
+  }
+
   // T ability — per-fighter strategic conditions
   const tAbilityChance = cpu.difficulty === 'expert' ? 0.65 : cpu.difficulty === 'hard' ? 0.55 : cpu.difficulty === 'medium' ? 0.3 : 0.15;
   if (cpu.cdT <= 0 && Math.random() < tAbilityChance) {
@@ -6787,6 +7124,52 @@ function cpuAttack(cpu, params) {
       cpu.stunned = fighter.abilities[3].pauseDuration || 1;
       cpu.effects.push({ type: 'omori-sad-poem', timer: 1.5 });
       return;
+    } else if (isHitman) {
+      // Hitman T: Answer a question — always do it (grants +10 energy)
+      cpu.cdT = fighter.abilities[3].cooldown || 6;
+      cpu.hitmanEnergy = Math.min(100, (cpu.hitmanEnergy || 0) + (fighter.abilities[3].energyReward || 10));
+      cpu.effects.push({ type: 'hitman-answer', timer: 0.5 });
+      return;
+    } else if (isGimkit) {
+      // Gimkit T: Kit Mode — toggle when energy is high
+      const tAbil4 = fighter.abilities[3];
+      const eCostT = tAbil4.energyCost || 5;
+      if ((cpu.gimkitEnergy || 0) >= eCostT) {
+        cpu.cdT = tAbil4.cooldown || 6;
+        cpu.gimkitEnergy = Math.max(0, (cpu.gimkitEnergy || 0) - eCostT);
+        cpu.gimkitCrowdControl = !cpu.gimkitCrowdControl;
+        cpu.effects.push({ type: 'gimkit-mode', timer: 0.5 });
+        return;
+      }
+    } else if (isToylover) {
+      // Toylover T: Lego Wall — place between self and enemy when medium range
+      if (dist > 2 * GAME_TILE && dist < 12 * GAME_TILE) {
+        const tAbil5 = fighter.abilities[3];
+        // Remove old wall if exists
+        if (cpu.toyLegoWallId) {
+          const oldW = gamePlayers.find(p => p.id === cpu.toyLegoWallId);
+          if (oldW) { oldW.alive = false; oldW.hp = 0; }
+          cpu.toyLegoWallId = null;
+        }
+        // Place wall between cpu and target
+        const wallX = cpu.x + aimNx * GAME_TILE * 1.5;
+        const wallY = cpu.y + aimNy * GAME_TILE * 1.5;
+        const wid = 'toylover-lego-' + cpu.id + '-' + Date.now();
+        const wall = createPlayerState(
+          { id: wid, name: 'Lego Wall', color: '#ff6600', fighterId: 'toylover' },
+          { r: Math.floor(wallY/GAME_TILE), c: Math.floor(wallX/GAME_TILE) }, cpu.fighter
+        );
+        wall.x = wallX; wall.y = wallY;
+        wall.hp = 999999; wall.maxHp = 999999;
+        wall.isSummon = true; wall.summonOwner = cpu.id; wall.summonType = 'toylover-lego-wall';
+        wall.wallW = GAME_TILE; wall.wallH = GAME_TILE * 3;
+        wall.wallTimer = tAbil5.wallDuration || 40;
+        gamePlayers.push(wall);
+        cpu.toyLegoWallId = wid;
+        cpu.cdT = tAbil5.cooldown || 60;
+        cpu.effects.push({ type: 'lego-wall', timer: 0.5 });
+        return;
+      }
     } else if (isPyro) {
       // Pyromaniac T: RAIN RAIN RAIN
       cpu.cdT = fighter.abilities[3].cooldown;
@@ -7105,6 +7488,75 @@ function cpuAttack(cpu, params) {
           t.effects.push({ type: 'hit', timer: 0.3 });
         }
         cpu.effects.push({ type: 'rope-hit', timer: 0.25, aimNx, aimNy });
+      }
+    } else if (isHitman) {
+      // Hitman M1: fire current weapon
+      const wKey = cpu.hitmanWeapon || 'pistol';
+      const wDef = fighter.abilities[0].weapons[wKey];
+      if (!wDef) return;
+      if (cpu.hitmanEquipping || cpu.hitmanReloading) return;
+      if (!cpu.hitmanAmmo || cpu.hitmanAmmo <= 0) {
+        cpu.hitmanReloading = true;
+        cpu.hitmanReloadTimer = cpu.hitmanLockingIn ? 0 : (wDef.reloadTime || 1);
+        return;
+      }
+      const fireRange = wKey === 'sniper' ? 50 : wKey === 'akm' ? 25 : 18;
+      if (dist < fireRange * GAME_TILE) {
+        cpu.cdM1 = cpu.hitmanLockingIn ? wDef.fireRate / 1.5 : wDef.fireRate;
+        cpu.hitmanAmmo--;
+        const spd = (wDef.speed || 28) * GAME_TILE / 10;
+        projectiles.push({ x: cpu.x, y: cpu.y, vx: aimNx*spd, vy: aimNy*spd,
+          type: 'hitman-bullet', ownerId: cpu.id, timer: 4,
+          damage: wDef.damage || 100, radius: GAME_TILE * 0.15, color: '#ffee00',
+          wKey, piercesArmor: wKey === 'sniper' });
+        _lastDealDamageWasM1 = false;
+        cpu.effects.push({ type: 'hitman-fire', timer: 0.15, aimNx, aimNy, wKey });
+      }
+    } else if (isGimkit) {
+      // Gimkit M1: Energy Bolt
+      const gAbil = fighter.abilities[0];
+      const eCostG = gAbil.energyCost || 2;
+      if ((cpu.gimkitEnergy || 0) < eCostG) {
+        // Gain energy passively each frame via R/T quiz answers — just wait
+        return;
+      }
+      if (dist < 20 * GAME_TILE) {
+        cpu.cdM1 = gAbil.cooldown || 1.5;
+        cpu.gimkitEnergy = Math.max(0, (cpu.gimkitEnergy || 0) - eCostG);
+        const spd = (gAbil.speed || 15) * GAME_TILE / 10;
+        const btype = cpu.gimkitCrowdControl ? 'gimkit-cc-bolt' : 'gimkit-bolt';
+        projectiles.push({ x: cpu.x, y: cpu.y, vx: aimNx*spd, vy: aimNy*spd,
+          type: btype, ownerId: cpu.id, timer: 4,
+          damage: gAbil.damage || 300, radius: GAME_TILE * 0.3, color: '#ffe600' });
+        _lastDealDamageWasM1 = false;
+        cpu.effects.push({ type: 'gimkit-bolt', timer: 0.2 });
+      }
+    } else if (isToylover) {
+      // Toylover M1: Bat swing (or tank shell if in tank)
+      if (cpu.toyTankActive) {
+        // Tank shell — ranged
+        if (dist < 30 * GAME_TILE) {
+          cpu.cdM1 = 0.5;
+          const spd = 40 * GAME_TILE / 10;
+          projectiles.push({ x: cpu.x, y: cpu.y, vx: aimNx*spd, vy: aimNy*spd,
+            type: 'toylover-shell', ownerId: cpu.id, timer: 3,
+            damage: 400, radius: GAME_TILE * 0.5, color: '#c0a000' });
+          _lastDealDamageWasM1 = false;
+          cpu.effects.push({ type: 'tank-fire', timer: 0.2 });
+        }
+      } else {
+        // Bat swing — melee
+        const toyAbil = fighter.abilities[0];
+        if (dist < (toyAbil.range || 1.5) * GAME_TILE) {
+          cpu.cdM1 = toyAbil.cooldown || 0.7;
+          let dmg = toyAbil.damage || 150;
+          if (cpu.supportBuff > 0) dmg *= 1.5;
+          dealDamage(cpu, target, dmg, false);
+          _lastDealDamageWasM1 = true;
+          target.vx = (target.vx || 0) + aimNx * (toyAbil.knockback || 1.5) * GAME_TILE;
+          target.vy = (target.vy || 0) + aimNy * (toyAbil.knockback || 1.5) * GAME_TILE;
+          cpu.effects.push({ type: 'bat-swing', timer: 0.2, aimNx, aimNy });
+        }
       }
     } else {
       if (dist < fighter.abilities[0].range * GAME_TILE) {
@@ -8564,6 +9016,7 @@ function useAbility(key) {
   const isHeavyRope = fighter.id === 'heavyrope';
   const isOmori = fighter.id === 'omori';
   const isHitman = fighter.id === 'hitman';
+  const isToylover = fighter.id === 'toylover';
   const isGimkit = fighter.id === 'gimkit';
 
   // Filbus: channeling interrupts
@@ -8586,6 +9039,43 @@ function useAbility(key) {
     const abil = fighter.abilities[0];
     lp.cdM1 = abil.cooldown;
 
+    if (isToylover) {
+      const _cw = gameCanvas.width, _ch = gameCanvas.height;
+      const _cx = lp.x - _cw/2, _cy = lp.y - _ch/2;
+      const _ax = mouseX + _cx, _ay = mouseY + _cy;
+      const _dx = _ax - lp.x, _dy = _ay - lp.y;
+      const _dd = Math.sqrt(_dx*_dx + _dy*_dy) || 1;
+      const _nx = _dx/_dd, _ny = _dy/_dd;
+      if (lp.toyTankActive) {
+        lp.cdM1 = 0.5;
+        const _spd = (abil.projectileSpeed || 40) * GAME_TILE / 10;
+        projectiles.push({ x: lp.x + _nx*GAME_TILE, y: lp.y + _ny*GAME_TILE,
+          vx: _nx*_spd, vy: _ny*_spd, damage: 400, ownerId: lp.id,
+          type: 'toylover-shell', radius: GAME_TILE*0.5, color: '#c0a000', timer: 3 });
+      } else {
+        const _range = (abil.range || 1.5) * GAME_TILE;
+        let _dmg = abil.damage || 150;
+        if (lp.supportBuff > 0) _dmg *= 1.5;
+        if (lp.intimidated > 0) _dmg *= 0.5;
+        for (const _t of gamePlayers) {
+          if (_t.id === lp.id || !_t.alive) continue;
+          if (_t.isSummon && _t.summonOwner === lp.id) continue;
+          const _tdx = _t.x - lp.x, _tdy = _t.y - lp.y;
+          const _td = Math.sqrt(_tdx*_tdx + _tdy*_tdy);
+          if (_td > _range) continue;
+          dealDamage(lp, _t, Math.round(_dmg));
+          const _kb = (abil.knockback || 1.5) * GAME_TILE;
+          const _kNx = _tdx/(_td||1), _kNy = _tdy/(_td||1);
+          for (let _s = 10; _s >= 1; _s--) {
+            const _tx2 = _t.x + _kNx*_kb*(_s/10), _ty2 = _t.y + _kNy*_kb*(_s/10);
+            if (canMoveTo(_tx2, _ty2, GAME_TILE*PLAYER_RADIUS_RATIO)) { _t.x = _tx2; _t.y = _ty2; break; }
+          }
+        }
+        combatLog.push({ text: 'Swing!', timer: 1.5, color: '#e67e22' });
+      }
+      lp.effects.push({ type: 'bat-swing', timer: 0.25, aimNx: _nx, aimNy: _ny });
+      return;
+    }
     if (isPoker) {
       // Chip Throw: fire 3 projectiles toward mouse
       const cw = gameCanvas.width; const ch = gameCanvas.height;
@@ -9234,6 +9724,29 @@ function useAbility(key) {
     const abil = fighter.abilities[1];
     lp.cdE = abil.cooldown;
 
+    if (isToylover) {
+      const _existing = lp.toyCarId ? gamePlayers.find(s => s.id === lp.toyCarId && s.alive) : null;
+      if (!_existing) {
+        const _cid = 'toycar-' + lp.id + '-' + Date.now();
+        const _car = createPlayerState({ id: _cid, name: 'Toy Car', color: '#e74c3c', fighterId: 'toylover' },
+          { r: Math.floor(lp.y/GAME_TILE), c: Math.floor(lp.x/GAME_TILE) }, lp.fighter);
+        _car.x = lp.x; _car.y = lp.y;
+        _car.hp = abil.carHp || 300; _car.maxHp = abil.carHp || 300;
+        _car.isSummon = true; _car.summonOwner = lp.id; _car.summonType = 'toylover-car';
+        _car.summonSpeed = 0; _car.summonDamage = 0; _car.summonAttackCD = 0; _car.summonAttackTimer = 0;
+        _car.toyCarVx = 0; _car.toyCarVy = -1;
+        _car.wallW = GAME_TILE * 0.8; _car.wallH = GAME_TILE * 0.8;
+        gamePlayers.push(_car);
+        lp.toyCarId = _cid; lp.toyCarControlling = false;
+        lp.cdE = abil.cooldown || 20;
+        combatLog.push({ text: '🚗 Toy Car spawned! Press E again to drive.', timer: 3, color: '#e74c3c' });
+      } else {
+        lp.toyCarControlling = !lp.toyCarControlling;
+        lp.cdE = 0;
+        combatLog.push({ text: lp.toyCarControlling ? '🚗 Driving! (WASD)' : '🚗 Car parked.', timer: 2, color: '#e74c3c' });
+      }
+      return;
+    }
     if (isPoker) {
       // Gamble: throw a card with weighted random damage
       const cw = gameCanvas.width; const ch = gameCanvas.height;
@@ -9806,6 +10319,26 @@ function useAbility(key) {
     const abil = fighter.abilities[2];
     lp.cdR = abil.cooldown;
 
+    if (isToylover) {
+      const _cw = gameCanvas.width, _ch = gameCanvas.height;
+      const _cx = lp.x - _cw/2, _cy = lp.y - _ch/2;
+      const _ax = mouseX + _cx, _ay = mouseY + _cy;
+      const _dx = _ax - lp.x, _dy = _ay - lp.y;
+      const _dd = Math.sqrt(_dx*_dx + _dy*_dy) || 1;
+      const _nx = _dx/_dd, _ny = _dy/_dd;
+      const _spd = (abil.projectileSpeed || 20) * GAME_TILE / 10;
+      let _dmg = abil.damage || 100;
+      if (lp.supportBuff > 0) _dmg *= 1.5;
+      if (lp.intimidated > 0) _dmg *= 0.5;
+      projectiles.push({ x: lp.x + _nx*GAME_TILE*0.6, y: lp.y + _ny*GAME_TILE*0.6,
+        vx: _nx*_spd, vy: _ny*_spd, ownerId: lp.id,
+        damage: Math.round(_dmg), timer: abil.ballDuration || 5,
+        type: 'toylover-ball', bouncesLeft: abil.bounces || 5,
+        color: '#3498db', radius: GAME_TILE*0.25, hitIds: [] });
+      lp.effects.push({ type: 'ball-throw', timer: 0.3, aimNx: _nx, aimNy: _ny });
+      combatLog.push({ text: '🏀 Ball thrown!', timer: 2, color: '#3498db' });
+      return;
+    }
     if (isPoker) {
       // Blinds: random outcome
       const roll = Math.random();
@@ -10351,6 +10884,30 @@ function useAbility(key) {
     }
     const abil = fighter.abilities[3];
 
+    if (isToylover) {
+      lp.cdT = abil.cooldown || 60;
+      if (lp.toyLegoWallId) {
+        const _oi = gamePlayers.findIndex(s => s.id === lp.toyLegoWallId);
+        if (_oi >= 0) { gamePlayers[_oi].alive = false; gamePlayers[_oi].hp = 0; }
+        lp.toyLegoWallId = null;
+      }
+      const _wid = 'legowall-' + lp.id + '-' + Date.now();
+      const _wf = (typeof getFighter === 'function' ? getFighter('toylover') : null) || lp.fighter;
+      const _wall = createPlayerState({ id: _wid, name: 'Lego Wall', color: '#e67e22', fighterId: 'toylover' },
+        { r: Math.floor(lp.y/GAME_TILE), c: Math.floor(lp.x/GAME_TILE) }, _wf);
+      _wall.x = lp.x; _wall.y = lp.y;
+      _wall.hp = 999999; _wall.maxHp = 999999;
+      _wall.isSummon = true; _wall.summonOwner = lp.id; _wall.summonType = 'toylover-lego-wall';
+      _wall.summonSpeed = 0; _wall.summonDamage = 0; _wall.summonAttackCD = 0; _wall.summonAttackTimer = 0;
+      _wall.wallTimer = abil.wallDuration || 40;
+      _wall.wallW = (abil.wallWidth || 1) * GAME_TILE;
+      _wall.wallH = (abil.wallHeight || 3) * GAME_TILE;
+      gamePlayers.push(_wall);
+      lp.toyLegoWallId = _wid;
+      lp.effects.push({ type: 'wall-place', timer: 0.5 });
+      combatLog.push({ text: '🧱 Lego Wall placed! (40s, only you pass through)', timer: 3, color: '#e67e22' });
+      return;
+    }
     if (isGimkit) {
       // Gimkit T: Answer a science question
       lp.cdT = abil.cooldown || 6;
@@ -10970,6 +11527,23 @@ function useAbility(key) {
   }
 
   else if (key === 'SPACE') {
+    if (isToylover) {
+      // Toy Lover: Life-Sized Toy Tank (no special lock)
+      const tankAbil = lp.fighter.abilities[4];
+      if (lp.toyTankActive) { combatLog.push({ text: 'Already in tank!', timer: 2, color: '#c0a000' }); return; }
+      const tankR = GAME_TILE * 0.9;
+      const offsets = [[-tankR,-tankR],[tankR,-tankR],[-tankR,tankR],[tankR,tankR]];
+      for (const [ox,oy] of offsets) {
+        if (!canMoveTo(lp.x+ox, lp.y+oy, GAME_TILE*PLAYER_RADIUS_RATIO)) {
+          combatLog.push({ text: 'Not enough room for tank!', timer: 2, color: '#e74c3c' }); return;
+        }
+      }
+      lp.toyTankActive = true;
+      lp.toyTankHp = tankAbil.tankHp || 2000;
+      lp.effects.push({ type: 'tank-transform', timer: 1.5 });
+      combatLog.push({ text: '?? TANK FORM! 2000 HP, M1 = shell (400 dmg)', timer: 4, color: '#c0a000' });
+      return;
+    }
     if (!lp.specialUnlocked || lp.specialUsed) return;
     // Bug Fixing: check if Special (slot 4) is disabled
     if (lp.modDisabledAbilities && lp.modDisabledAbilities.includes(4)) {
@@ -11903,6 +12477,18 @@ function useAbility(key) {
   else if (key === 'F') {
     if (lp.fighter.abilities.length <= 5) return; // no F ability
     const fAbil = lp.fighter.abilities[5];
+    if (isToylover) {
+      if (lp.toyRubikPlacing) { combatLog.push({ text: "Already placing Rubik\'s Cube!", timer: 2, color: '#9b59b6' }); return; }
+      const liveTraps = (lp.toyRubikTraps || []).filter(t => !t.triggered).length;
+      if (liveTraps >= (fAbil.maxTraps || 1)) { combatLog.push({ text: 'Max traps placed!', timer: 2, color: '#9b59b6' }); return; }
+      lp.toyRubikPlacing = true;
+      lp.toyRubikPlaceTimer = fAbil.placementTime || 10;
+      lp.toyRubikPlaceX = lp.x; lp.toyRubikPlaceY = lp.y;
+      lp.cdF = 999;
+      lp.effects.push({ type: 'rubik-placing', timer: (fAbil.placementTime || 10) + 0.5 });
+      combatLog.push({ text: "?? Placing Rubik\'s Cube trap... 10s", timer: 3, color: '#9b59b6' });
+      return;
+    }
     // Gimkit F: Crowd Control — energy purchase, not achievement-gated
     if (isGimkit) {
       if (lp.gimkitCrowdControl) { combatLog.push({ text: 'Crowd Control already active!', timer: 2, color: '#f5a623' }); return; }
@@ -12958,6 +13544,7 @@ function dealDamage(attacker, target, amount, viaSummon, allowFF) {
   if (attacker && attacker.dndRace === 'elf') amount += 50;
   // Napoleon Defensive Tactics wall: invincible — absorbs no damage itself
   if (target.isSummon && target.summonType === 'napoleon-wall') return;
+  if (target.isSummon && target.summonType === 'toylover-lego-wall') return;
   // Napoleon Defensive Tactics: anyone inside a wall area takes half damage
   if (!target.isSummon) {
     const walls = gamePlayers.filter(w => w.alive && w.summonType === 'napoleon-wall');
@@ -13061,6 +13648,13 @@ function dealDamage(attacker, target, amount, viaSummon, allowFF) {
   // Ouriel-Room: only the Dogtooth owner can kill it
   if (target.isSummon && target.summonType === 'ouriel-room') {
     if (!attacker || attacker.id !== target.summonOwner) return;
+  }
+  if (!target.isSummon && target.toyTankActive) {
+    target.toyTankHp = (target.toyTankHp || 0) - amount;
+    target.noDamageTimer = 0;
+    if (target.effects) target.effects.push({ type: 'hit', timer: 0.3 });
+    if (target.toyTankHp < 0) target.toyTankHp = 0;
+    return;
   }
   target.hp -= amount;
   // Reset heal state on damage
@@ -14882,6 +15476,40 @@ function renderGame() {
           gameCtx.textAlign = 'center';
           gameCtx.fillText(tSec + 's', sx, wy - 13);
         }
+      } else if (p.summonType === 'toylover-lego-wall') {
+        // Toy Lover Lego Wall: 1x3 orange brick wall
+        const _lw = p.wallW || GAME_TILE;
+        const _lh = p.wallH || GAME_TILE * 3;
+        const _lwx = sx - _lw / 2, _lwy = sy - _lh / 2;
+        gameCtx.fillStyle = isDying ? '#8b2200' : '#e67e22';
+        gameCtx.fillRect(_lwx, _lwy, _lw, _lh);
+        // Brick pattern
+        gameCtx.strokeStyle = isDying ? '#500' : '#c0651a';
+        gameCtx.lineWidth = 1;
+        const _brickH = _lh / 3;
+        for (let _bi = 0; _bi < 3; _bi++) {
+          gameCtx.strokeRect(_lwx + 1, _lwy + _bi * _brickH, _lw - 2, _brickH - 1);
+        }
+        // Timer bar
+        if (p.wallTimer !== undefined) {
+          const _wt = Math.max(0, p.wallTimer / 40);
+          gameCtx.fillStyle = '#333'; gameCtx.fillRect(_lwx, _lwy - 8, _lw, 3);
+          gameCtx.fillStyle = '#e67e22'; gameCtx.fillRect(_lwx, _lwy - 8, _lw * _wt, 3);
+        }
+      } else if (p.summonType === 'toylover-car') {
+        // Toy Lover Toy Car: red car shape
+        const _cr = GAME_TILE * 0.4;
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#e74c3c';
+        gameCtx.fillRect(sx - _cr, sy - _cr * 0.6, _cr * 2, _cr * 1.2);
+        // Wheels
+        gameCtx.fillStyle = isDying ? '#555' : '#2c3e50';
+        const _wR = _cr * 0.28;
+        for (const [_wx2, _wy2] of [[sx - _cr*0.55, sy + _cr*0.45],[sx + _cr*0.55, sy + _cr*0.45],[sx - _cr*0.55, sy - _cr*0.35],[sx + _cr*0.55, sy - _cr*0.35]]) {
+          gameCtx.beginPath(); gameCtx.arc(_wx2, _wy2, _wR, 0, Math.PI*2); gameCtx.fill();
+        }
+        // Windshield
+        gameCtx.fillStyle = isDying ? '#aaa' : 'rgba(100,200,255,0.6)';
+        gameCtx.fillRect(sx - _cr*0.35, sy - _cr*0.55, _cr*0.7, _cr*0.32);
       } else if (p.summonType === 'dnd-orc') {
         // ── D&D Orc: green-brown circle with tusks + axe ──
         gameCtx.fillStyle = isDying ? '#8b0000' : '#4a6b2a';
@@ -20059,11 +20687,84 @@ function renderGame() {
   // Draw active effects log at center top
   drawEffectLog();
 
+  // Toy Lover world-space HUD (traps, tracking arrow)
+  _renderToyLoverHUD(gameCtx, camX, camY);
+
   // Update HUD
   updateHUD();
 }
 
 // ═══════════════════════════════════════════════════════════════
+// ── Toy Lover rendering helpers (called from draw loop) ──
+function _renderToyLoverHUD(ctx, cameraX, cameraY) {
+  // Draw tank form for any player in tank mode (not just local player)
+  for (const _tp of gamePlayers) {
+    if (!_tp.alive || !_tp.toyTankActive) continue;
+    const _tsx = _tp.x - cameraX, _tsy = _tp.y - cameraY;
+    const _tSize = GAME_TILE * 2.0;
+    ctx.save();
+    ctx.fillStyle = '#c0a000'; ctx.strokeStyle = '#8a7000'; ctx.lineWidth = 2;
+    ctx.fillRect(_tsx - _tSize/2, _tsy - _tSize/2, _tSize, _tSize);
+    ctx.strokeRect(_tsx - _tSize/2, _tsy - _tSize/2, _tSize, _tSize);
+    // Turret
+    ctx.fillStyle = '#8a7000';
+    ctx.fillRect(_tsx - _tSize*0.2, _tsy - _tSize*0.2, _tSize*0.4, _tSize*0.4);
+    // Barrel
+    ctx.strokeStyle = '#c0a000'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(_tsx, _tsy); ctx.lineTo(_tsx, _tsy - _tSize*0.7); ctx.stroke();
+    // HP bar
+    const _hFrac = Math.max(0, (_tp.toyTankHp || 0) / 2000);
+    ctx.fillStyle = '#333'; ctx.fillRect(_tsx - _tSize/2, _tsy - _tSize/2 - 8, _tSize, 4);
+    ctx.fillStyle = _hFrac > 0.5 ? '#2ecc71' : _hFrac > 0.25 ? '#f39c12' : '#e74c3c';
+    ctx.fillRect(_tsx - _tSize/2, _tsy - _tSize/2 - 8, _tSize * _hFrac, 4);
+    ctx.restore();
+  }
+  if (!localPlayer || !localPlayer.alive || !localPlayer.fighter || localPlayer.fighter.id !== 'toylover') return;
+  // Rubik trap markers (only owner sees them)
+  if (localPlayer.toyRubikTraps) {
+    for (const _trap of localPlayer.toyRubikTraps) {
+      if (_trap.triggered) continue;
+      const _tx = _trap.x - cameraX, _ty = _trap.y - cameraY;
+      const _ts = GAME_TILE * 0.4;
+      ctx.save();
+      ctx.fillStyle = 'rgba(155,89,182,0.25)';
+      ctx.fillRect(_tx - _ts, _ty - _ts, _ts*2, _ts*2);
+      ctx.strokeStyle = '#9b59b6'; ctx.lineWidth = 2;
+      ctx.strokeRect(_tx - _ts, _ty - _ts, _ts*2, _ts*2);
+      ctx.fillStyle = '#9b59b6'; ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('TRAP', _tx, _ty);
+      ctx.restore();
+    }
+  }
+  // Tracking arrow (world-space)
+  if (localPlayer.toyTrackingArrow) {
+    const _atgt = gamePlayers.find(p => p.id === localPlayer.toyTrackingArrow.targetId && p.alive);
+    if (_atgt) {
+      const _lx = localPlayer.x - cameraX, _ly = localPlayer.y - cameraY;
+      const _ax = _atgt.x - cameraX, _ay = _atgt.y - cameraY;
+      const _adx = _ax - _lx, _ady = _ay - _ly;
+      const _ad = Math.sqrt(_adx*_adx + _ady*_ady) || 1;
+      const _anx = _adx/_ad, _any = _ady/_ad;
+      const _frac = localPlayer.toyTrackingArrow.timer / 10;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(155,89,182,' + (0.5 + _frac*0.5) + ')';
+      ctx.lineWidth = 4; ctx.setLineDash([8,4]);
+      ctx.beginPath();
+      ctx.moveTo(_lx + _anx*GAME_TILE*1.2, _ly + _any*GAME_TILE*1.2);
+      ctx.lineTo(_ax - _anx*GAME_TILE*0.8, _ay - _any*GAME_TILE*0.8);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(155,89,182,' + (0.5 + _frac*0.5) + ')';
+      ctx.save();
+      ctx.translate(_ax - _anx*GAME_TILE*0.8, _ay - _any*GAME_TILE*0.8);
+      ctx.rotate(Math.atan2(_any, _anx));
+      ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-16,-8); ctx.lineTo(-16,8); ctx.closePath(); ctx.fill();
+      ctx.restore();
+      ctx.restore();
+    }
+  }
+}
 // HUD
 // ═══════════════════════════════════════════════════════════════
 function drawTopRightHP() {
@@ -20819,6 +21520,13 @@ function buildGameStateSnapshot() {
     hitmanLockingIn: p.hitmanLockingIn || false,
     hitmanLockingInTimer: p.hitmanLockingInTimer || 0,
     hitmanLockingFireTimer: p.hitmanLockingFireTimer || 0,
+    // Toy Lover state
+    toyCarId: p.toyCarId || null, toyCarControlling: p.toyCarControlling || false,
+    toyLegoWallId: p.toyLegoWallId || null,
+    toyTankActive: p.toyTankActive || false, toyTankHp: p.toyTankHp || 0,
+    toyRubikTraps: p.toyRubikTraps ? p.toyRubikTraps.slice() : [],
+    toyRubikPlacing: p.toyRubikPlacing || false, toyRubikPlaceTimer: p.toyRubikPlaceTimer || 0,
+    toyTrackingArrow: p.toyTrackingArrow ? Object.assign({}, p.toyTrackingArrow) : null,
     // Gimkit state
     gimkitEnergy: p.gimkitEnergy || 0,
     gimkitJumping: p.gimkitJumping || false,
@@ -21196,6 +21904,14 @@ function onRemoteGameState(snapshot) {
     if (sp.hitmanLockingIn != null) p.hitmanLockingIn = sp.hitmanLockingIn;
     if (sp.hitmanLockingInTimer != null) p.hitmanLockingInTimer = sp.hitmanLockingInTimer;
     if (sp.hitmanLockingFireTimer != null) p.hitmanLockingFireTimer = sp.hitmanLockingFireTimer;
+    if (sp.toyTankActive != null) p.toyTankActive = sp.toyTankActive;
+    if (sp.toyTankHp != null) p.toyTankHp = sp.toyTankHp;
+    if (sp.toyCarId != null) p.toyCarId = sp.toyCarId;
+    if (sp.toyCarControlling != null) p.toyCarControlling = sp.toyCarControlling;
+    if (sp.toyLegoWallId != null) p.toyLegoWallId = sp.toyLegoWallId;
+    if (sp.toyRubikTraps != null) p.toyRubikTraps = sp.toyRubikTraps;
+    if (sp.toyRubikPlacing != null) p.toyRubikPlacing = sp.toyRubikPlacing;
+    if (sp.toyTrackingArrow != null) p.toyTrackingArrow = sp.toyTrackingArrow;
     if (sp.gimkitEnergy != null) p.gimkitEnergy = sp.gimkitEnergy;
     if (sp.gimkitJumping != null) p.gimkitJumping = sp.gimkitJumping;
     if (sp.gimkitJumpTimer != null) p.gimkitJumpTimer = sp.gimkitJumpTimer;
