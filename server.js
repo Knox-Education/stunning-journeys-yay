@@ -18,6 +18,10 @@ const io = new Server(server, {
   pingInterval: 10000,
 });
 
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Lobby state ─────────────────────────────────────────────
